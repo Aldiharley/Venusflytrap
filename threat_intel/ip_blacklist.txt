@@ -1,0 +1,2 @@
+# One IP per line. Denied IPs hard-pin to Block (unless also in ip_whitelist).
+# Populate from your own feeds; shipped empty by default.

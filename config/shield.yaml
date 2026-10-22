@@ -1,0 +1,47 @@
+# Venusflytrap configuration. Every value here matches the built-in defaults,
+# so running with no --config flag behaves identically to this file. Mirrors the
+# article's shield/scoring/chain/honeypot YAML split.
+
+shield:
+  max_payload: 65536      # bytes inspected per field before work begins
+  decode_cap: 14          # max decode layers peeled to a fixpoint
+  deep_threshold: 3       # layers at/above this raise the "deep nesting" signal
+
+scoring:
+  weight_graph: 1.0       # taint-graph is the primary engine
+  weight_signature: 0.9
+  weight_intent: 0.7
+  weight_api: 0.6
+  weight_ai: 0.5
+  block_at: 90            # score >= this => Block
+  challenge_at: 70        # >= this => Challenge
+  monitor_at: 40          # >= this => Monitor, else Allow
+  conflict_threshold: 0.6 # weight above which Safe-vs-Dangerous is a real conflict
+  chain_stage_bonus: 15   # added to score when the source advances a kill-chain stage
+
+chain:
+  window_secs: 3600       # per-source event memory window
+  max_sources: 4096       # bounded LRU of tracked sources
+  events_per_source: 64
+
+honeypot:
+  decoy_paths:
+    - /admin/backup.zip
+    - /wp-admin/secret
+    - /.git/config
+    - /phpmyadmin/
+    - /_internal/debug
+  sensitive_paths:
+    - /.env
+    - /.git/
+    - /.npmrc
+    - /actuator
+    - /actuator/configprops
+    - /actuator/env
+    - /info.php
+    - /phpinfo.php
+    - /server-status
+    - /.aws/credentials
+    - /config.json
+    - /.ssh/id_rsa
+    - /wp-config.php

@@ -1,0 +1,21 @@
+[package]
+name = "vft-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Venusflytrap core engine: normalize -> token-graph taint -> four-valued lattice -> verdict, plus honeypot and attack-chain inference."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+percent-encoding.workspace = true
+unicode-normalization.workspace = true
+base64.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1.5.0"

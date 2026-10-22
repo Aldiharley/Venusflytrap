@@ -1,0 +1,24 @@
+[package]
+name = "vft-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Venusflytrap CLI: scan a request, run the benchmark, or start the proxy."
+
+[[bin]]
+name = "venusflytrap"
+path = "src/main.rs"
+
+[dependencies]
+vft-core = { path = "../vft-core" }
+vft-proxy = { path = "../vft-proxy" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+regex.workspace = true
+tokio = { version = "1.41.0", features = ["rt-multi-thread"] }
+
+[dev-dependencies]

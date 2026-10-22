@@ -1,0 +1,2 @@
+# One IP per line. Whitelisted IPs are never hard-blocked by intel deny rules
+# (they are still inspected by the detection engines). Shipped empty by default.

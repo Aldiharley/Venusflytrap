@@ -1,0 +1,22 @@
+[package]
+name = "vft-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Venusflytrap reverse-proxy: inspects requests and forwards, blocks, or challenges."
+
+[dependencies]
+vft-core = { path = "../vft-core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+hyper = { version = "1.5.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1.10", features = ["tokio", "server", "client", "client-legacy", "http1"] }
+http-body-util = "0.1.2"
+tokio = { version = "1.41.0", features = ["rt-multi-thread", "net", "macros", "sync", "io-util"] }
+bytes = "1.8.0"
+
+[dev-dependencies]
+tokio = { version = "1.41.0", features = ["rt-multi-thread", "net", "macros", "sync", "io-util", "time"] }

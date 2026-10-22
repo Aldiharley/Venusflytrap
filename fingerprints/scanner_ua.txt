@@ -1,0 +1,16 @@
+# Scanner / offensive-tooling User-Agent fingerprints (one substring per line,
+# case-insensitive). Loaded by the intel engine if this directory is passed.
+# These contribute Suspicious evidence; a UA alone never hard-blocks (spoofable).
+sqlmap
+nikto
+nmap
+masscan
+dirbuster
+gobuster
+feroxbuster
+wpscan
+nuclei
+acunetix
+nessus
+zgrab
+httpx
