@@ -24,6 +24,15 @@ chain:
   window_secs: 3600       # per-source event memory window
   max_sources: 4096       # bounded LRU of tracked sources
   events_per_source: 64
+  ipv6_prefix: 64         # IPv6 sources are aggregated to this prefix
+  ban_policy:
+    on_honeypot: true
+    on_exfiltration_block: true
+    exploitation_blocks: 3  # ban after this many exploitation blocks ...
+    within_secs: 600        # ... within this many seconds
+    ttl_secs: 3600          # first ban length; doubles on re-offence
+    ttl_max_secs: 86400
+    max_bans: 100000
 
 honeypot:
   decoy_paths:

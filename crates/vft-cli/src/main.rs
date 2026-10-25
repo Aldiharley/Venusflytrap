@@ -61,6 +61,17 @@ enum Command {
         #[arg(long)]
         monitor_only: bool,
     },
+    /// Configuration tools.
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Parse and validate a config file; exit 1 and list every issue if invalid.
+    Validate { file: PathBuf },
 }
 
 fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Config> {
@@ -125,6 +136,13 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
+        Command::Config { action: ConfigCmd::Validate { file } } => match Config::load(&file) {
+            Ok(_) => println!("{}: ok", file.display()),
+            Err(e) => {
+                eprintln!("{}: {e}", file.display());
+                std::process::exit(1);
+            }
+        },
     }
     Ok(())
 }

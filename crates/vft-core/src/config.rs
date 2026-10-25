@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub shield: ShieldConfig,
     pub scoring: ScoringConfig,
@@ -13,7 +13,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ShieldConfig {
     pub max_payload: usize,
     pub decode_cap: u8,
@@ -31,7 +31,7 @@ impl Default for ShieldConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScoringConfig {
     /// Per-engine weight multipliers.
     pub weight_graph: f32,
@@ -71,7 +71,7 @@ impl Default for ScoringConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ChainConfig {
     /// Events older than this no longer count toward a source's stage.
     pub window_secs: u64,
@@ -97,7 +97,7 @@ impl Default for ChainConfig {
 
 /// When a source gets banned, and for how long.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BanPolicy {
     pub on_honeypot: bool,
     pub on_exfiltration_block: bool,
@@ -127,7 +127,7 @@ impl Default for BanPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HoneypotConfig {
     /// Decoy paths that no legitimate client should touch.
     pub decoy_paths: Vec<String>,
@@ -170,6 +170,19 @@ impl Default for HoneypotConfig {
     }
 }
 
+/// One problem with one option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigIssue {
+    pub key: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ConfigIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.key, self.message)
+    }
+}
+
 /// Error loading configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -177,17 +190,157 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("parsing config: {0}")]
     Parse(#[from] serde_yaml::Error),
+    #[error("invalid config: {}", .0.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("; "))]
+    Invalid(Vec<ConfigIssue>),
 }
 
 impl Config {
-    /// Load from a YAML file; missing file is not an error — defaults are used.
+    /// Load and validate a YAML file. A missing file is an error.
+    pub fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
+        let s = std::fs::read_to_string(path)?;
+        let cfg: Config = serde_yaml::from_str(&s)?;
+        cfg.validate().map_err(ConfigError::Invalid)?;
+        Ok(cfg)
+    }
+
+    /// `None` means built-in defaults; `Some(path)` must exist and validate.
     pub fn load_or_default(path: Option<&std::path::Path>) -> Result<Config, ConfigError> {
         match path {
-            Some(p) if p.exists() => {
-                let s = std::fs::read_to_string(p)?;
-                Ok(serde_yaml::from_str(&s)?)
-            }
-            _ => Ok(Config::default()),
+            Some(p) => Config::load(p),
+            None => Ok(Config::default()),
         }
+    }
+
+    /// Per-key bounds and cross-field rules. Every issue names its option key.
+    pub fn validate(&self) -> Result<(), Vec<ConfigIssue>> {
+        let mut v: Vec<ConfigIssue> = Vec::new();
+        let mut bad = |key: &str, message: String| v.push(ConfigIssue { key: key.into(), message });
+
+        let sh = &self.shield;
+        if sh.max_payload < 1024 {
+            bad("shield.max_payload", format!("must be >= 1024, got {}", sh.max_payload));
+        }
+        if !(1..=32).contains(&sh.decode_cap) {
+            bad("shield.decode_cap", format!("must be in 1..=32, got {}", sh.decode_cap));
+        }
+        if sh.deep_threshold == 0 || sh.deep_threshold > sh.decode_cap {
+            bad("shield.deep_threshold", format!("must be in 1..=decode_cap, got {}", sh.deep_threshold));
+        }
+
+        let s = &self.scoring;
+        for (key, w) in [
+            ("scoring.weight_graph", s.weight_graph),
+            ("scoring.weight_signature", s.weight_signature),
+            ("scoring.weight_intent", s.weight_intent),
+            ("scoring.weight_api", s.weight_api),
+            ("scoring.weight_ai", s.weight_ai),
+        ] {
+            if !w.is_finite() || !(0.0..=2.0).contains(&w) {
+                bad(key, format!("must be a finite number in [0, 2], got {w}"));
+            }
+        }
+        if !s.conflict_threshold.is_finite() || !(0.0..=1.0).contains(&s.conflict_threshold) {
+            bad("scoring.conflict_threshold", format!("must be in [0, 1], got {}", s.conflict_threshold));
+        }
+        if !s.corroboration_cap.is_finite() || !(0.0..=50.0).contains(&s.corroboration_cap) {
+            bad("scoring.corroboration_cap", format!("must be in [0, 50], got {}", s.corroboration_cap));
+        }
+        if s.monitor_at == 0 {
+            bad("scoring.monitor_at", "must be >= 1 (0 would flag every request)".into());
+        }
+        if !(s.monitor_at < s.challenge_at && s.challenge_at < s.block_at && s.block_at <= 100) {
+            bad(
+                "scoring.block_at",
+                format!(
+                    "bands must satisfy monitor_at < challenge_at < block_at <= 100, got {}/{}/{}",
+                    s.monitor_at, s.challenge_at, s.block_at
+                ),
+            );
+        }
+
+        let c = &self.chain;
+        if c.window_secs == 0 {
+            bad("chain.window_secs", "must be >= 1".into());
+        }
+        if c.max_sources < 64 {
+            bad("chain.max_sources", format!("must be >= 64, got {}", c.max_sources));
+        }
+        if c.events_per_source == 0 {
+            bad("chain.events_per_source", "must be >= 1".into());
+        }
+        if !(1..=128).contains(&c.ipv6_prefix) {
+            bad("chain.ipv6_prefix", format!("must be in 1..=128, got {}", c.ipv6_prefix));
+        }
+        let b = &c.ban_policy;
+        if b.exploitation_blocks == 0 {
+            bad("chain.ban_policy.exploitation_blocks", "must be >= 1".into());
+        }
+        if b.within_secs == 0 {
+            bad("chain.ban_policy.within_secs", "must be >= 1".into());
+        }
+        if b.ttl_secs == 0 {
+            bad("chain.ban_policy.ttl_secs", "must be >= 1".into());
+        }
+        if b.ttl_max_secs < b.ttl_secs {
+            bad("chain.ban_policy.ttl_max_secs", format!("must be >= ttl_secs ({}), got {}", b.ttl_secs, b.ttl_max_secs));
+        }
+        if b.max_bans < 64 {
+            bad("chain.ban_policy.max_bans", format!("must be >= 64, got {}", b.max_bans));
+        }
+
+        for (key, list) in [
+            ("honeypot.decoy_paths", &self.honeypot.decoy_paths),
+            ("honeypot.sensitive_paths", &self.honeypot.sensitive_paths),
+        ] {
+            if let Some(p) = list.iter().find(|p| !p.starts_with('/')) {
+                bad(key, format!("paths must start with '/', got {p:?}"));
+            }
+        }
+
+        if v.is_empty() {
+            Ok(())
+        } else {
+            Err(v)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issues(yaml: &str) -> Vec<ConfigIssue> {
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parses");
+        cfg.validate().err().unwrap_or_default()
+    }
+
+    #[test]
+    fn defaults_and_shipped_yaml_validate() {
+        assert!(Config::default().validate().is_ok());
+        let shipped: Config =
+            serde_yaml::from_str(include_str!("../../../config/shield.yaml")).expect("shipped yaml parses");
+        assert!(shipped.validate().is_ok(), "{:?}", shipped.validate());
+    }
+
+    #[test]
+    fn unknown_key_is_rejected() {
+        let r: Result<Config, _> = serde_yaml::from_str("scoring:\n  blok_at: 10\n");
+        assert!(r.is_err(), "typo must not be silently ignored");
+    }
+
+    #[test]
+    fn bad_values_report_their_key() {
+        assert!(issues("scoring:\n  block_at: 0\n").iter().any(|i| i.key == "scoring.block_at"));
+        assert!(issues("scoring:\n  weight_ai: .nan\n").iter().any(|i| i.key == "scoring.weight_ai"));
+        assert!(issues("shield:\n  max_payload: 0\n").iter().any(|i| i.key == "shield.max_payload"));
+        assert!(issues("chain:\n  ban_policy:\n    ttl_max_secs: 1\n")
+            .iter()
+            .any(|i| i.key == "chain.ban_policy.ttl_max_secs"));
+    }
+
+    #[test]
+    fn missing_explicit_file_is_an_error() {
+        let r = Config::load_or_default(Some(std::path::Path::new("Z:/definitely/not/here.yaml")));
+        assert!(r.is_err());
     }
 }
