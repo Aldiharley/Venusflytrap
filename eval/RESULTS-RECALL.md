@@ -131,3 +131,17 @@ Decision diffs: 17. Four are benign requests that went Allow to Block, score 39 
 Gate: FAIL (delta FP is +4, required 0). The regression tests pass (`comma_padding_does_not_hide_sqli`, `exhausted_windows_emit_a_limit`, `attack_after_padding_is_found_in_a_later_window`, `running_out_of_windows_is_reported`, `graph_windows_bounds`). Code kept and committed; the controller and owner decide. No tuning was done.
 
 Owner ruling (2026-10-25): kept. The 4 new dev FPs are existing SQL constructs (`sqli.boolean-tautology` ×3, `sqli.stacked-query` ×1) firing on the tails of large benign telemetry bodies that truncation at 4,096 tokens used to hide; `limit.graph-truncated` itself fired on no dev request. For fail-closed fixes, FPs from newly inspected text count against the dev 1.0% FP ceiling instead of a 0-FP rule: dev FP rate is 146 / 16,610 = 0.88%, within the ceiling, and the regression tests block. Gate under the amended rule: PASS. Plan B's body structuring targets these bodies.
+
+### C3 — chunked inspection and limit.payload-truncated
+
+Fail-closed fix, judged under the owner's amended rule (2026-10-25): the regression tests must block and FPs from newly inspected text count against the dev 1.0% FP ceiling (166 of 16,610 benign requests). Fields longer than `shield.max_payload` are now inspected in overlapping chunks (256 chars overlap) under a per-request budget, `shield.max_inspect_bytes` (default 1 MiB). When the budget runs out, or normalization had to cut text, one Suspicious `limit.payload-truncated` is emitted per request. Dev half, library mode, `compare_runs.py pre-c3_dev.csv c3_dev.csv`.
+
+```
+a: tp=148 fp=146 tn=16464 fn=181 recall=0.4498 fp_rate=0.0088
+b: tp=148 fp=146 tn=16464 fn=181 recall=0.4498 fp_rate=0.0088
+delta: tp=+0 fp=+0
+```
+
+Decision diffs: 10, all benign (label 0) dev rows and none became a Block. Six went Allow to Monitor (score 37-39 to 41-43) and four stayed in their verdict (score +2). `limit.payload-truncated` fired on 5 dev requests (4 Monitor, 1 Allow); two of those also gain an extra `cmd.cmd-substitution` from a later chunk. The other 5 diffs are +2 score shifts with no new construct id (repeat firings on chunk tails). Constructs on the newly inspected text: `cmd.cmd-substitution` and `limit.payload-truncated` only; no new FP. Dev FP rate: 146 / 16,610 = 0.88%, unchanged from the pre-change run and within the 1.0% ceiling (166).
+
+Gate under the amended rule: PASS (regression tests pass: `attack_past_max_payload_blocks`, `exceeding_the_inspection_budget_emits_a_limit`, `chunks_cover_everything_with_overlap`, `inspect_budget_at_least_one_field`, `chunks_never_panic_and_cover`; dev FP 0.88% <= 1.0%). Dev latency p50/p95/p99: 102/287/987 us before, 84/242/840 us after (run-to-run noise; no slowdown seen).

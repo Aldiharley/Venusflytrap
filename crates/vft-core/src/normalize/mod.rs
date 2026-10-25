@@ -29,6 +29,8 @@ pub struct Normalized {
     /// Number of decode layers peeled.
     pub layers: u8,
     pub flags: Flags,
+    /// Normalization cut text: the input exceeded `max_payload`, or NFKC expansion did.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ impl Default for Options {
 /// Normalize a single field value.
 pub fn normalize(input: &str, opts: &Options) -> Normalized {
     // Bound the work first.
+    let mut truncated = input.chars().count() > opts.max_payload;
     let bounded: String = input.chars().take(opts.max_payload).collect();
 
     let mut flags = Flags::default();
@@ -71,6 +74,7 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
     // the string again before tokenization (L3).
     if folded.chars().count() > opts.max_payload {
         folded = folded.chars().take(opts.max_payload).collect();
+        truncated = true;
     }
     let canon = canonicalize_ws_comments(&folded, &mut flags);
 
@@ -79,7 +83,35 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
         cased: canon,
         layers,
         flags,
+        truncated,
     }
+}
+
+/// Characters shared by neighbouring chunks, so a payload cannot hide on a seam.
+pub const CHUNK_OVERLAP: usize = 256;
+
+/// Split `s` into chunks of at most `max` chars that overlap by
+/// [`CHUNK_OVERLAP`] chars. A string of at most `max` chars is one chunk.
+pub fn chunks(s: &str, max: usize) -> Vec<&str> {
+    let idx: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let n = idx.len();
+    if n <= max {
+        return vec![s];
+    }
+    let step = max.saturating_sub(CHUNK_OVERLAP).max(1);
+    let mut out = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = (start + max).min(n);
+        let lo = idx[start];
+        let hi = if end == n { s.len() } else { idx[end] };
+        out.push(&s[lo..hi]);
+        if end == n {
+            break;
+        }
+        start += step;
+    }
+    out
 }
 
 /// Apply decoders repeatedly until a pass makes no change or the cap is hit.
@@ -406,6 +438,19 @@ mod tests {
 
     fn norm(s: &str) -> Normalized {
         normalize(s, &Options::default())
+    }
+
+    #[test]
+    fn chunks_cover_everything_with_overlap() {
+        let s: String = "ab€".repeat(1000); // 3,000 chars, multi-byte included
+        let cs = chunks(&s, 1024);
+        assert!(cs.iter().all(|c| c.chars().count() <= 1024));
+        assert!(s.starts_with(cs[0]) && s.ends_with(cs[cs.len() - 1]));
+        for w in cs.windows(2) {
+            let tail: String = w[0].chars().rev().take(CHUNK_OVERLAP).collect::<Vec<_>>().into_iter().rev().collect();
+            assert!(w[1].starts_with(&tail), "chunks must overlap by CHUNK_OVERLAP chars");
+        }
+        assert_eq!(chunks("short", 1024), vec!["short"]);
     }
 
     #[test]

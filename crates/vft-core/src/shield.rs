@@ -89,29 +89,41 @@ impl Shield {
         };
         let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: self.cfg.shield.max_graph_windows };
 
-        for field in req.fields() {
-            let n = normalize(&field.raw, &self.norm_opts);
-            max_layers = max_layers.max(n.layers);
-            let analysis = graph::analyze_with(&n.text, &gopts);
-            let ctx = FieldCtx {
-                field: &field,
-                norm: &n,
-                analysis: &analysis,
-                disabled: &self.disabled,
-            };
+        // Long fields are inspected in overlapping chunks under a per-request
+        // byte budget; running out of budget, or a cut during normalization,
+        // fails closed with `limit.payload-truncated`.
+        let mut budget = self.cfg.shield.max_inspect_bytes;
+        let mut payload_truncated = false;
+        'fields: for field in req.fields() {
             let fref = FieldRef::of(&field);
-            if analysis.graph_truncated {
-                self.record_graph_truncated(&mut rec, fref.clone());
+            for chunk in crate::normalize::chunks(&field.raw, self.cfg.shield.max_payload) {
+                if chunk.len() > budget {
+                    payload_truncated = true;
+                    break 'fields;
+                }
+                budget -= chunk.len();
+                let n = normalize(chunk, &self.norm_opts);
+                payload_truncated |= n.truncated;
+                max_layers = max_layers.max(n.layers);
+                let analysis = graph::analyze_with(&n.text, &gopts);
+                if analysis.graph_truncated {
+                    self.record_graph_truncated(&mut rec, fref.clone());
+                }
+                let ctx = FieldCtx {
+                    field: &field,
+                    norm: &n,
+                    analysis: &analysis,
+                    disabled: &self.disabled,
+                };
+                for (det, w) in &field_detectors {
+                    let e = det.assess(&ctx);
+                    rec.record(det.name(), *w, Some(fref.clone()), e);
+                }
+                // AI detector
+                let e = ai.assess(&ctx);
+                rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref.clone()), e);
             }
-            for (det, w) in &field_detectors {
-                let e = det.assess(&ctx);
-                rec.record(det.name(), *w, Some(fref.clone()), e);
-            }
-            // AI detector
-            let e = ai.assess(&ctx);
-            rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref), e);
         }
-
         if let Some(first) = req.non_utf8_headers.first().filter(|_| !self.disabled.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
             rec.record(
                 "adapter",
@@ -130,6 +142,8 @@ impl Shield {
         {
             let n = normalize(&req.path, &self.norm_opts);
             max_layers = max_layers.max(n.layers);
+            // A cut path is not fully inspected either.
+            payload_truncated |= n.truncated;
             let analysis = graph::analyze_with(&n.text, &gopts);
             if analysis.graph_truncated {
                 self.record_graph_truncated(&mut rec, FieldRef::path());
@@ -148,6 +162,20 @@ impl Shield {
                     e,
                 );
             }
+        }
+
+        if payload_truncated && !self.disabled.is(&sinks::LIMIT_PAYLOAD_TRUNCATED) {
+            rec.record(
+                "limit",
+                self.cfg.scoring.weight_api,
+                None,
+                Evidence::new(
+                    FourValued::Suspicious,
+                    0.6,
+                    vec![sinks::LIMIT_PAYLOAD_TRUNCATED.pattern()],
+                    "request exceeded shield.max_inspect_bytes or a field was cut; not fully inspected",
+                ),
+            );
         }
 
         // Request-level intent (recon of sensitive paths).
@@ -619,5 +647,22 @@ mod tests {
             j.score,
             j.reason
         );
+    }
+
+    #[test]
+    fn attack_past_max_payload_blocks() {
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), format!("{} 1 union select a,b from users", "a".repeat(70_000))));
+        assert_eq!(Shield::new(Config::default()).inspect(&req).verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn exceeding_the_inspection_budget_emits_a_limit() {
+        let mut cfg = Config::default();
+        cfg.shield.max_inspect_bytes = 100_000;
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), "a".repeat(200_000)));
+        let j = Shield::new(cfg).inspect(&req);
+        assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.payload-truncated")));
     }
 }

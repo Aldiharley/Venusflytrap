@@ -76,6 +76,10 @@ pub struct ShieldConfig {
     /// Token windows (4096 tokens, overlapping by 64) analyzed per field before
     /// giving up. When they run out the field is reported as `limit.graph-truncated`.
     pub max_graph_windows: usize,
+    /// Bytes of one request's fields inspected, summed across fields and chunks.
+    /// Past it the rest is skipped and the request is reported as
+    /// `limit.payload-truncated`. Must be >= `max_payload`.
+    pub max_inspect_bytes: usize,
     /// Construct or decoder ids switched off (see `venusflytrap ablate`).
     /// Every id must be registered; unknown ids fail validation.
     pub disabled: Vec<String>,
@@ -88,6 +92,7 @@ impl Default for ShieldConfig {
             decode_cap: 14,
             deep_threshold: 3,
             max_graph_windows: 32,
+            max_inspect_bytes: 1024 * 1024,
             disabled: Vec::new(),
         }
     }
@@ -292,6 +297,9 @@ impl Config {
         if !(1..=1024).contains(&sh.max_graph_windows) {
             bad("shield.max_graph_windows", format!("must be in 1..=1024, got {}", sh.max_graph_windows));
         }
+        if sh.max_inspect_bytes < sh.max_payload {
+            bad("shield.max_inspect_bytes", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_inspect_bytes));
+        }
         for id in crate::graph::sinks::unknown_ids(&sh.disabled) {
             bad("shield.disabled", format!("unknown construct id {id:?}"));
         }
@@ -410,6 +418,16 @@ mod tests {
     fn issues(yaml: &str) -> Vec<ConfigIssue> {
         let cfg: Config = serde_yaml::from_str(yaml).expect("parses");
         cfg.validate().err().unwrap_or_default()
+    }
+
+    #[test]
+    fn inspect_budget_at_least_one_field() {
+        assert!(issues("shield:
+  max_inspect_bytes: 1000
+").iter().any(|i| i.key == "shield.max_inspect_bytes"));
+        assert!(issues("shield:
+  max_inspect_bytes: 1048576
+").is_empty());
     }
 
     #[test]

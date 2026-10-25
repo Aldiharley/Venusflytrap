@@ -61,3 +61,12 @@ fn nested_encoding_terminates() {
     let dur = inspect_value(&s);
     assert!(dur < Duration::from_millis(500), "took {dur:?}");
 }
+
+proptest! {
+    #[test]
+    fn chunks_never_panic_and_cover(s in ".{0,3000}", max in 300usize..2000) {
+        let cs = vft_core::normalize::chunks(&s, max);
+        prop_assert!(!cs.is_empty());
+        prop_assert!(cs.iter().all(|c| c.chars().count() <= max));
+    }
+}
