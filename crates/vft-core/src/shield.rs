@@ -12,7 +12,7 @@ use crate::honeypot::Honeypot;
 use crate::intel::Intel;
 use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
 use crate::lattice::{Evidence, FourValued};
-use crate::normalize::{normalize, Normalized, Options};
+use crate::normalize::{normalize, normalize_unless_cut, Normalized, Options};
 use crate::request::Request;
 use crate::score::{arbitrate, Scored};
 
@@ -63,6 +63,11 @@ impl Shield {
 
     /// Pure, stateless inspection: no chain memory, no clock.
     pub fn inspect(&self, req: &Request) -> Judgment {
+        self.inspect_counting(req).0
+    }
+
+    /// [`Shield::inspect`], plus the normalization work it spent (folded chars).
+    fn inspect_counting(&self, req: &Request) -> (Judgment, usize) {
         // Intel allow-list short-circuit (still inspect, but never hard-block on
         // intel; allow-list only suppresses the intel deny pin).
         // Lists are keyed by the canonical address (IPv4-mapped IPv6 -> IPv4),
@@ -92,9 +97,10 @@ impl Shield {
         // Long fields are inspected in overlapping chunks under a per-request
         // byte budget. A chunk whose normalization is cut is re-inspected as
         // overlapping halves (see `inspect_pieces`), so nothing is lost unless the
-        // budget runs out or splitting bottoms out; either hard-blocks via
-        // `limit.payload-truncated`.
+        // budget runs out, splitting bottoms out, or the request's normalization
+        // work cap is reached; each hard-blocks via `limit.payload-truncated`.
         let mut budget = self.cfg.shield.max_inspect_bytes;
+        let mut work = NormalizeWork { used: 0, cap: self.cfg.shield.max_normalize_work, exhausted: false };
         let mut payload_truncated = false;
         'fields: for field in req.fields() {
             let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
@@ -110,11 +116,14 @@ impl Shield {
                 budget -= added;
                 prev_end = range.end;
                 let chunk = &field.raw[range];
-                let (lost, layers) = inspect_pieces(chunk, 0, &self.norm_opts, &mut |n| {
+                let (lost, layers) = inspect_pieces(chunk, 0, &self.norm_opts, &mut work, &mut |n| {
                     self.inspect_text(&mut rec, &field, n, &gopts, &field_detectors, &ai)
                 });
                 payload_truncated |= lost;
                 max_layers = max_layers.max(layers);
+                if work.exhausted {
+                    break 'fields;
+                }
             }
         }
         if let Some(first) = req.non_utf8_headers.first().filter(|_| !self.disabled.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
@@ -133,7 +142,7 @@ impl Shield {
 
         // Also inspect the path itself for traversal/recon structure.
         {
-            let (lost, layers) = inspect_pieces(&req.path, 0, &self.norm_opts, &mut |n| {
+            let (lost, layers) = inspect_pieces(&req.path, 0, &self.norm_opts, &mut work, &mut |n| {
                 let analysis = graph::analyze_with(&n.text, &gopts);
                 if analysis.graph_truncated {
                     self.record_graph_truncated(&mut rec, FieldRef::path());
@@ -169,7 +178,7 @@ impl Shield {
                     FourValued::Dangerous,
                     1.0,
                     vec![sinks::LIMIT_PAYLOAD_TRUNCATED.pattern()],
-                    "request exceeded shield.max_inspect_bytes or text could not be fully inspected",
+                    "request exceeded shield.max_inspect_bytes or shield.max_normalize_work, or text could not be fully inspected",
                 ),
             );
         }
@@ -190,17 +199,18 @@ impl Shield {
         }
 
         // Honeypot.
-        let mut hard_block = denied || limit_block;
+        let mut honeypot_or_deny = denied;
         let honeypot_hit = if self.disabled.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
         if let Some(e) = honeypot_hit {
-            hard_block = true;
+            honeypot_or_deny = true;
             rec.record("honeypot", 1.0, Some(FieldRef::path()), e);
         }
+        let hard_block = honeypot_or_deny || limit_block;
 
         let (score, verdict, conflict) = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
-        let reason = build_reason(&rec.matched, conflict, false, hard_block);
+        let reason = build_reason(&rec.matched, conflict, false, honeypot_or_deny, limit_block);
 
-        Judgment {
+        let j = Judgment {
             verdict,
             score,
             engines: rec.engines,
@@ -210,7 +220,8 @@ impl Shield {
             normalized_layers: max_layers,
             banned_source: false,
             reason,
-        }
+        };
+        (j, work.used)
     }
 
     /// Run the graph analysis, the three field detectors and the AI detector over
@@ -386,12 +397,19 @@ impl Recorder {
     }
 }
 
-fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -> String {
+/// A hard block names its causes: a honeypot hit or deny-listed source
+/// (`honeypot_or_deny`), and/or `limit.payload-truncated` (`limit`).
+fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, honeypot_or_deny: bool, limit: bool) -> String {
+    const HARD: &str = "hard-block: honeypot or deny-list";
+    const LIMIT: &str = "limit.payload-truncated (request not fully inspected)";
     if banned {
         return "source previously advanced the attack chain or tripped a honeypot".into();
     }
-    if hard {
-        return "hard-block: honeypot or deny-list".into();
+    match (honeypot_or_deny, limit) {
+        (true, true) => return format!("{HARD}; {LIMIT}"),
+        (true, false) => return HARD.into(),
+        (false, true) => return format!("hard-block: {LIMIT}"),
+        (false, false) => {}
     }
     if matched.is_empty() {
         return "no evidence".into();
@@ -413,29 +431,58 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -
 /// is reached in 5 halvings (with the 256-char overlap).
 const MAX_SPLIT_DEPTH: u8 = 6;
 
+/// The request's normalization work: folded chars produced by every `normalize`
+/// call (field chunks, split pieces, path), against `shield.max_normalize_work`.
+struct NormalizeWork {
+    used: usize,
+    cap: usize,
+    /// A normalization was refused; nothing more is inspected.
+    exhausted: bool,
+}
+
 /// Normalize `text` and hand it to `f`. If normalization cut it, re-inspect the
 /// same raw text as two halves overlapping by [`CHUNK_OVERLAP`] chars, recursively,
 /// until each piece normalizes uncut. A piece still cut at [`MAX_SPLIT_DEPTH`], or
-/// too short to split, is inspected as cut and reported as lost. Returns
-/// `(lost, max decode layers)`.
-fn inspect_pieces(text: &str, depth: u8, opts: &Options, f: &mut dyn FnMut(&Normalized)) -> (bool, u8) {
-    let n = normalize(text, opts);
-    if !n.truncated {
-        f(&n);
-        return (false, n.layers);
+/// too short to split, is inspected as cut and reported as lost. A normalization
+/// whose worst-case work would pass the cap is not run: `work` is marked exhausted
+/// and the piece is reported as lost. Returns `(lost, max decode layers)`.
+///
+/// [`CHUNK_OVERLAP`]: crate::normalize::CHUNK_OVERLAP
+fn inspect_pieces(
+    text: &str,
+    depth: u8,
+    opts: &Options,
+    work: &mut NormalizeWork,
+    f: &mut dyn FnMut(&Normalized),
+) -> (bool, u8) {
+    let chars = text.chars().count();
+    let bound = crate::normalize::work_bound(chars, opts.max_payload);
+    if work.exhausted || work.used.saturating_add(bound) > work.cap {
+        work.exhausted = true;
+        return (true, 0);
     }
     let overlap = crate::normalize::CHUNK_OVERLAP;
-    let chars = text.chars().count();
     if depth >= MAX_SPLIT_DEPTH || chars <= 2 * overlap {
+        // Cannot be split: inspect it, cut or not; a cut here is a real loss.
+        let n = normalize(text, opts);
+        work.used = work.used.saturating_add(n.work);
         f(&n);
-        return (true, n.layers);
+        return (n.truncated, n.layers);
+    }
+    match normalize_unless_cut(text, opts) {
+        Ok(n) => {
+            work.used = work.used.saturating_add(n.work);
+            f(&n);
+            return (false, n.layers);
+        }
+        Err(cut_work) => work.used = work.used.saturating_add(cut_work),
     }
     let at = |k: usize| text.char_indices().nth(k).map_or(text.len(), |(b, _)| b);
     let mid = chars / 2;
     let left = &text[..at(mid + overlap / 2)];
     let right = &text[at(mid - overlap / 2)..];
-    let (l_lost, l_layers) = inspect_pieces(left, depth + 1, opts, f);
-    let (r_lost, r_layers) = inspect_pieces(right, depth + 1, opts, f);
+    let (l_lost, l_layers) = inspect_pieces(left, depth + 1, opts, work, f);
+    let (r_lost, r_layers) = inspect_pieces(right, depth + 1, opts, work, f);
     (l_lost || r_lost, l_layers.max(r_layers))
 }
 
@@ -913,11 +960,128 @@ mod tests {
         assert!(!has_limit(&Shield::new(cfg).inspect(&query_req("a".repeat(3000)))));
     }
 
+    fn path_taint(j: &Judgment) -> bool {
+        j.contributions.iter().any(|c| c.engine == "graph-taint" && c.field == Some(FieldRef::path()))
+    }
+
     #[test]
     fn a_long_path_is_split_not_dropped() {
         let mut req = Request::get(format!("/{}", "a".repeat(70_000)));
         req.query.push(("q".into(), "x".into()));
         let j = Shield::new(Config::default()).inspect(&req);
         assert!(!has_limit(&j));
+        assert!(!path_taint(&j));
+        // An attack past the first 64 KiB of the path is still found.
+        let req = Request::get(format!("/{}/../../../../etc/passwd", "a".repeat(70_000)));
+        let j = Shield::new(Config::default()).inspect(&req);
+        assert!(!has_limit(&j));
+        assert!(path_taint(&j), "{}", j.reason);
+    }
+
+    fn fdfa_body(bytes: usize) -> Request {
+        let mut req = Request::get("/items");
+        req.method = "POST".into();
+        req.body = FDFA.to_string().repeat(bytes / 3).into_bytes();
+        req
+    }
+
+    #[test]
+    fn a_one_mib_fdfa_body_hits_the_normalize_work_cap() {
+        // ~349,500 FDFA: lossless inspection needs ~17.7M folded chars (leaves fold
+        // to 6.3M, each split node costs max_payload), past the 8 Mi-char default
+        // cap, so the request hard-blocks.
+        let cfg = Config::default();
+        let cap = cfg.shield.max_normalize_work;
+        let (j, work) = Shield::new(cfg).inspect_counting(&fdfa_body(1 << 20));
+        assert!(has_limit(&j));
+        assert_eq!(j.verdict, Verdict::Block);
+        assert_eq!(j.reason, LIMIT_REASON);
+        assert!(work <= cap, "work {work} > cap {cap}");
+        // The first 64 KiB chunk alone is inspected losslessly within the cap.
+        assert!(work > 65_536 * 18, "work {work}");
+    }
+
+    #[test]
+    fn normalize_work_never_passes_the_cap() {
+        let cap = Config::default().shield.max_normalize_work;
+        let shield = Shield::new(Config::default());
+        let mut many = Request::get("/items");
+        for i in 0..64 {
+            many.query.push((format!("q{i}"), FDFA.to_string().repeat(65_536)));
+        }
+        // (request, hits the cap). One 64 KiB-char FDFA field needs about 3.4M
+        // folded chars and is inspected in full; the rest need more than 8 Mi.
+        for (i, (req, capped)) in [
+            (fdfa_body(1 << 20), true),
+            (fdfa_body(4 << 20), true),
+            (query_req(FDFA.to_string().repeat(300_000)), true),
+            (query_req(FDFA.to_string().repeat(65_536)), false),
+            (many, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (j, work) = shield.inspect_counting(&req);
+            eprintln!("case {i}: work {work}, limit {}", has_limit(&j));
+            assert!(work <= cap, "case {i}: work {work} > cap {cap}");
+            assert_eq!(has_limit(&j), capped, "case {i}");
+            assert_eq!(j.verdict == Verdict::Block, capped, "case {i}");
+        }
+    }
+
+    #[test]
+    fn plain_text_within_the_budget_stays_under_the_work_cap() {
+        // ASCII never expands: a 4 MiB body (just under the byte budget) folds to
+        // about its own length plus chunk overlaps, well under 8 Mi chars.
+        let mut req = Request::get("/items");
+        req.method = "POST".into();
+        req.body = "a".repeat((4 << 20) - 1024).into_bytes();
+        let (j, work) = shield().inspect_counting(&req);
+        assert!(!has_limit(&j));
+        assert!(work < (4 << 20) + 64 * 1024, "work {work}");
+    }
+
+    #[test]
+    fn reaching_the_work_cap_blocks_and_stops_inspection() {
+        let mut cfg = Config::default();
+        cfg.shield.max_normalize_work = 100_000;
+        let mut req = Request::get("/items");
+        req.query.push(("a".into(), "a".repeat(65_536)));
+        req.query.push(("b".into(), format!("{}{}", "a".repeat(40_000), SQLI)));
+        let (j, work) = Shield::new(cfg).inspect_counting(&req);
+        assert!(work <= 100_000, "work {work}");
+        assert!(has_limit(&j));
+        assert!(!has_construct(&j, "sqli.union-select")); // field b was not inspected
+        assert_eq!(j.verdict, Verdict::Block);
+        assert_eq!(j.reason, LIMIT_REASON);
+    }
+
+    const LIMIT_REASON: &str = "hard-block: limit.payload-truncated (request not fully inspected)";
+
+    #[test]
+    fn a_limit_block_names_its_cause() {
+        let mut cfg = Config::default();
+        cfg.shield.max_inspect_bytes = 100_000;
+        let j = Shield::new(cfg).inspect(&query_req("a".repeat(200_000)));
+        assert_eq!(j.verdict, Verdict::Block);
+        assert_eq!(j.reason, LIMIT_REASON);
+    }
+
+    #[test]
+    fn honeypot_and_deny_list_reasons_are_unchanged() {
+        let j = shield().inspect(&Request::get("/.git/config"));
+        assert_eq!(j.reason, "hard-block: honeypot or deny-list");
+        let mut s = shield();
+        s.intel_mut().add_deny_ip("192.0.2.9".parse().unwrap());
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("192.0.2.9".parse().unwrap());
+        assert_eq!(s.inspect(&r).reason, "hard-block: honeypot or deny-list");
+        // Both causes at once: both are named.
+        let mut cfg = Config::default();
+        cfg.shield.max_inspect_bytes = 100_000;
+        let mut r = Request::get("/.git/config");
+        r.query.push(("q".into(), "a".repeat(200_000)));
+        let j = Shield::new(cfg).inspect(&r);
+        assert_eq!(j.reason, "hard-block: honeypot or deny-list; limit.payload-truncated (request not fully inspected)");
     }
 }

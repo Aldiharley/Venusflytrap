@@ -188,7 +188,7 @@ pub fn constructs() -> &'static [ConstructInfo];
 
 | Construct | Option key | Fires when | Evidence |
 |---|---|---|---|
-| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a piece is still cut after lossless recursive splitting reaches its depth bound | hard Block (owner ruling 2026-10-26) |
+| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a piece is still cut after lossless recursive splitting reaches its depth bound, or the per-request normalization work cap `shield.max_normalize_work` (default 2 × max_inspect_bytes) is reached | hard Block (owner ruling 2026-10-26) |
 | `limit.graph-truncated` | `shield.max_graph_windows` (new, 32) | a field needs more 4,096-token windows than the cap | Suspicious |
 | `limit.body-unparsed` | `shield.body_parse` | a body falls back to one whole field | informational, weight 0 |
 

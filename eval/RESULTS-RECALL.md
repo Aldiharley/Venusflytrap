@@ -134,9 +134,11 @@ Owner ruling (2026-10-25): kept. The 4 new dev FPs are existing SQL constructs (
 
 ### C3 — chunked inspection and limit.payload-truncated
 
-Fail-closed fix, judged under the owner's amended rule (2026-10-25): the regression tests must block and FPs from newly inspected text count against the dev 1.0% FP ceiling (166 of 16,610 benign requests). Fields longer than `shield.max_payload` are inspected in overlapping chunks (256 chars overlap) under a per-request byte budget, `shield.max_inspect_bytes` (default 4 MiB, each field charged once). Dev half, library mode, `compare_runs.py pre-c3_dev.csv c3d_dev.csv`.
+Fail-closed fix, judged under the owner's amended rule (2026-10-25): the regression tests must block and FPs from newly inspected text count against the dev 1.0% FP ceiling (166 of 16,610 benign requests). Fields longer than `shield.max_payload` are inspected in overlapping chunks (256 chars overlap) under a per-request byte budget, `shield.max_inspect_bytes` (default 4 MiB, each field charged once). Dev half, library mode, `compare_runs.py pre-c3_dev.csv c3e_dev.csv`.
 
 Owner rulings after review (2026-10-26): (R1) lossless recursive splitting. Whenever normalizing a piece of raw text is cut, that raw piece is re-inspected as two halves overlapping by 256 raw chars, recursively, until each piece normalizes uncut (depth bound 6; a piece of at most 512 chars cannot be split). This replaces two earlier exemption rules, a folded-overflow comparison and a head-verification check, both of which review showed could be bypassed (decoding shrinks text and NFKC expands it, so the exempted seam could hide an attack). It applies to every field chunk and to the path; sub-pieces are not charged to the budget. (R2) `limit.payload-truncated` now hard-blocks (Dangerous, weight 1.0, pins the verdict to Block like the honeypot does). It fires only on real loss: budget exhaustion, or a piece still cut at the depth bound or too short to split.
+
+Normalization work cap (C3 re-review): every split node used to re-run a full normalization, so a request of NFKC-expanding chars cost seconds of CPU (release, default config: 1 MiB U+FDFA body 1,319 ms, 4 MiB single U+FDFA field 5,684 ms; before C3 the 1 MiB body took 23 ms because everything past 64 KiB was dropped). Two changes bound it. (1) Unicode folding stops at `max_payload + 1` chars, so a cut piece costs O(max_payload) instead of O(18 x raw); uncut text normalizes byte-identically, and a piece that is split skips canonicalization. (2) A per-request counter adds up the folded chars of every normalization (field chunks, split pieces, path) against `shield.max_normalize_work` (new, default 8,388,608 chars = 2 x `max_inspect_bytes`, validated >= `max_payload`). A normalization whose worst case (18 x its input, at most `max_payload`) would pass the cap is not run: inspection stops and `limit.payload-truncated` hard-blocks the request. No clock is involved. A 1 MiB U+FDFA body needs 17,677,824 folded chars to inspect losslessly (measured with the cap lifted), so it reaches the cap (work 8,376,720) and hard-blocks; one 64 KiB-char U+FDFA field needs 3,354,118 and is inspected in full.
 
 ```
 a: tp=148 fp=146 tn=16464 fn=181 recall=0.4498 fp_rate=0.0088
@@ -146,6 +148,17 @@ delta: tp=+0 fp=+0
 
 Decision diffs: 7, all benign (label 0) dev rows, all Allow to Monitor, none a Block. Two (`09/8a/171355d4b76706b9e4be0a80519a.white`, `11/27/9e27efe2a7cf63decdd16ed80f7c.white`) go from score 37 to 42 and gain `cmd.shell-meta`, `xss.html-tag` and `cmd.cmd-substitution` firings from text past the first 64 KiB (including re-inspected halves). Five (`66/57/9ea1675a0c2393318bb4e64333e5.white`, `92/f6/e825501ce0567d1b48285015ddd1.white`, `ac/b8/5784291dfc61d9dbcffb451ba393.white`, `c8/51/6e8acba2047ff63b8086b18d557f.white`, `ea/b0/3738d8ed30e1cb95967b389313cb.white`) go from 39 to 41 on one extra `cmd.shell-meta`. `limit.payload-truncated` fires on no dev row, so the hard block cost no dev FP. Dev FP rate: 146 / 16,610 = 0.88%, unchanged from the pre-change run and within the 1.0% ceiling (166).
 
-Worst case (release build, not part of the dev eval): a single query field of 300,000 x U+FDFA (each folds to 18 chars, forcing maximal splitting) is inspected in 1.12 s. A field of 1,400,000 x U+FDFA, which fills the whole 4 MiB budget, takes 4.89 s.
+Worst cases (release build, default config, best of 3 after a warm-up, `cargo test --release -p vft-core --test fuzz_props -- --ignored --nocapture normalization_work_timings`; not part of the dev eval):
 
-Gate under the amended rule: PASS (regression tests pass; dev FP 0.88% <= 1.0%). Dev latency p50/p95/p99 in us: 102/287/987 before, 82/240/814 after; earlier runs of near-identical builds gave 67/196/735 to 124/344/1183, so the spread is run-to-run noise and no change is claimed.
+| Request | Time | Verdict |
+|---|---|---|
+| 1 MiB body of U+FDFA | 327 ms | Block (work cap, `limit.payload-truncated`) |
+| one query field of 65,536 x U+FDFA | 132 ms | Allow (inspected in full, no evidence) |
+| one query field of 300,000 x U+FDFA | 327 ms | Block (work cap) |
+| one query field of 4 MiB of U+FDFA | 372 ms | Block (work cap) |
+| 64 query fields of 65,536 x U+FDFA | 354 ms | Block (work cap) |
+| 4 MiB ASCII body | 99 ms | Allow (inspected in full, no evidence) |
+
+The same harness on the previous commit (44d91ec, no work cap) gave 1,151 ms (Allow), 231 ms (Allow), 1,079 ms (Allow), 5,240 ms (Allow), 5,177 ms (Block, byte budget) and 102 ms (Allow). The worst case is now 372 ms, about 3.8 x the 4 MiB plain-text request.
+
+Gate under the amended rule: PASS (regression tests pass; dev FP 0.88% <= 1.0%). Dev latency p50/p95/p99 in us: 102/287/987 before, 78/219/786 after; earlier runs of near-identical builds gave 67/196/735 to 124/344/1183, so the spread is run-to-run noise and no change is claimed.

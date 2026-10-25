@@ -82,6 +82,11 @@ pub struct ShieldConfig {
     /// Past it the rest is skipped and the request is reported as
     /// `limit.payload-truncated`. Must be >= `max_payload`.
     pub max_inspect_bytes: usize,
+    /// Folded chars all normalizations of one request may produce (field chunks,
+    /// split pieces and the path). Default 8 Mi chars, 2 x `max_inspect_bytes`.
+    /// A normalization that could pass it is not run: inspection stops and the
+    /// request is reported as `limit.payload-truncated`. Must be >= `max_payload`.
+    pub max_normalize_work: usize,
     /// Construct or decoder ids switched off (see `venusflytrap ablate`).
     /// Every id must be registered; unknown ids fail validation.
     pub disabled: Vec<String>,
@@ -95,6 +100,7 @@ impl Default for ShieldConfig {
             deep_threshold: 3,
             max_graph_windows: 32,
             max_inspect_bytes: 4 * 1024 * 1024,
+            max_normalize_work: 8 * 1024 * 1024,
             disabled: Vec::new(),
         }
     }
@@ -302,6 +308,9 @@ impl Config {
         if sh.max_inspect_bytes < sh.max_payload {
             bad("shield.max_inspect_bytes", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_inspect_bytes));
         }
+        if sh.max_normalize_work < sh.max_payload {
+            bad("shield.max_normalize_work", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_normalize_work));
+        }
         for id in crate::graph::sinks::unknown_ids(&sh.disabled) {
             bad("shield.disabled", format!("unknown construct id {id:?}"));
         }
@@ -429,6 +438,17 @@ mod tests {
 ").iter().any(|i| i.key == "shield.max_inspect_bytes"));
         assert!(issues("shield:
   max_inspect_bytes: 1048576
+").is_empty());
+    }
+
+    #[test]
+    fn normalize_work_at_least_one_field() {
+        assert_eq!(Config::default().shield.max_normalize_work, 2 * Config::default().shield.max_inspect_bytes);
+        assert!(issues("shield:
+  max_normalize_work: 1000
+").iter().any(|i| i.key == "shield.max_normalize_work"));
+        assert!(issues("shield:
+  max_normalize_work: 65536
 ").is_empty());
     }
 

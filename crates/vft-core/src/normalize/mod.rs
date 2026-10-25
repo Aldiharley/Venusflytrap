@@ -31,6 +31,9 @@ pub struct Normalized {
     pub flags: Flags,
     /// Normalization cut text: the input exceeded `max_payload`, or NFKC expansion did.
     pub truncated: bool,
+    /// Folded chars this normalization produced (at most `max_payload`): what it
+    /// costs against the per-request `shield.max_normalize_work`.
+    pub work: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,30 @@ impl Default for Options {
 
 /// Normalize a single field value.
 pub fn normalize(input: &str, opts: &Options) -> Normalized {
+    finish(fold_stage(input, opts))
+}
+
+/// [`normalize`] for a piece that is split when cut: a cut stops after folding and
+/// returns `Err(work)`, skipping canonicalization of text nobody reads.
+pub fn normalize_unless_cut(input: &str, opts: &Options) -> Result<Normalized, usize> {
+    let f = fold_stage(input, opts);
+    if f.truncated {
+        Err(f.work)
+    } else {
+        Ok(finish(f))
+    }
+}
+
+/// Bounded, decoded and folded text, before whitespace/comment canonicalization.
+struct Folded {
+    folded: String,
+    flags: Flags,
+    layers: u8,
+    truncated: bool,
+    work: usize,
+}
+
+fn fold_stage(input: &str, opts: &Options) -> Folded {
     // Bound the work first.
     let input_chars = input.chars().count();
     let mut truncated = input_chars > opts.max_payload;
@@ -70,24 +97,34 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
         flags.deep_nesting = true;
     }
 
-    let mut folded = fold_unicode(&decoded);
     // Cap post-fold length: NFKC can expand some code points many-fold, so bound
-    // the string again before tokenization (L3).
-    let folded_chars = folded.chars().count();
-    if folded_chars > opts.max_payload {
-        folded = folded.chars().take(opts.max_payload).collect();
-        truncated = true;
+    // the string again before tokenization (L3). Folding stops at the cap, so a
+    // cut costs O(max_payload), not O(18 x input).
+    let (folded, cut) = fold_unicode_capped(&decoded, opts.max_payload);
+    truncated |= cut;
+    let work = folded.chars().count();
+    Folded { folded, flags, layers, truncated, work }
+}
 
-    }
-    let canon = canonicalize_ws_comments(&folded, &mut flags);
-
+fn finish(f: Folded) -> Normalized {
+    let mut flags = f.flags;
+    let canon = canonicalize_ws_comments(&f.folded, &mut flags);
     Normalized {
         text: canon.to_lowercase(),
         cased: canon,
-        layers,
+        layers: f.layers,
         flags,
-        truncated,
+        truncated: f.truncated,
+        work: f.work,
     }
+}
+
+/// NFKC expands one code point into at most 18 (U+FDFA); decoding never adds chars.
+pub const MAX_FOLD_EXPANSION: usize = 18;
+
+/// An upper bound on [`Normalized::work`] for an input of `input_chars` chars.
+pub fn work_bound(input_chars: usize, max_payload: usize) -> usize {
+    input_chars.min(max_payload).saturating_mul(MAX_FOLD_EXPANSION).min(max_payload)
 }
 
 /// Characters shared by neighbouring chunks, so a payload cannot hide on a seam.
@@ -345,6 +382,21 @@ pub fn fold_unicode(s: &str) -> String {
     nfkc.chars().map(confusables::skeleton_char).collect()
 }
 
+/// The first `cap` chars of [`fold_unicode`], and whether the full fold is longer.
+/// Folding stops at char `cap + 1`, so the cost is bounded by `cap`, not by the
+/// input's expansion.
+pub fn fold_unicode_capped(s: &str, cap: usize) -> (String, bool) {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out = String::new();
+    for (i, c) in s.nfkc().enumerate() {
+        if i == cap {
+            return (out, true);
+        }
+        out.push(confusables::skeleton_char(c));
+    }
+    (out, false)
+}
+
 fn count_scripts(s: &str) -> usize {
     let mut latin = false;
     let mut cyrillic = false;
@@ -571,6 +623,43 @@ mod tests {
         let out = canonicalize_ws_comments("1=1 #dropme", &mut f2);
         assert_eq!(out, "1=1");
         assert!(f2.had_comment);
+    }
+
+    #[test]
+    fn capped_fold_matches_the_full_fold() {
+        for s in ["", "abc", "\u{FDFA}\u{FDFA}x", "\u{FF41}\u{0430}e\u{301}", "\u{FB01}\u{2460}"] {
+            let full: Vec<char> = fold_unicode(s).chars().collect();
+            for cap in 0..=full.len() + 2 {
+                let want: String = full.iter().take(cap).collect();
+                assert_eq!(fold_unicode_capped(s, cap), (want, full.len() > cap), "{s:?} cap {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_cuts_exactly_when_the_fold_exceeds_the_cap() {
+        let opts = Options { max_payload: 1024, ..Options::default() };
+        let fdfa = "\u{FDFA}".repeat(56); // folds to 1,008 chars
+        let fits = normalize(&format!("{fdfa}{}", "a".repeat(16)), &opts);
+        assert!(!fits.truncated);
+        assert_eq!(fits.work, 1024);
+        let cut = normalize(&format!("{fdfa}{}", "a".repeat(17)), &opts);
+        assert!(cut.truncated);
+        assert_eq!(cut.work, 1024);
+        assert_eq!(normalize("abc", &opts).work, 3);
+        let uncut = format!("{fdfa}{}", "a".repeat(16));
+        let n = normalize_unless_cut(&uncut, &opts).map(|n| n.text);
+        assert_eq!(n, Ok(normalize(&uncut, &opts).text));
+        assert_eq!(normalize_unless_cut(&format!("{fdfa}{}", "a".repeat(17)), &opts).map(|n| n.work), Err(1024));
+    }
+
+    #[test]
+    fn work_bound_covers_the_largest_expansion() {
+        for k in [0usize, 1, 10, 56, 57, 2000] {
+            let s = "\u{FDFA}".repeat(k);
+            let opts = Options { max_payload: 1024, ..Options::default() };
+            assert!(normalize(&s, &opts).work <= work_bound(k, 1024), "k {k}");
+        }
     }
 
     #[test]
