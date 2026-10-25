@@ -74,9 +74,15 @@ async fn oversized_body_is_413_before_upstream() {
     let up = stub(true).await;
     let p = proxy(short_cfg(), up.addr).await;
     let body = vec![b'a'; 200 * 1024];
-    let mut raw = format!("POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
-    raw.extend_from_slice(&body);
-    let resp = send(p, &raw).await;
+    let head = format!("POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    // Read the answer before sending the body: if body bytes are still unread
+    // when the proxy closes, Windows answers with a RST that discards the 413
+    // already sitting in the client's receive buffer.
+    let mut s = TcpStream::connect(p).await.unwrap();
+    s.write_all(head.as_bytes()).await.unwrap();
+    let (out, _) = read_until_closed(&mut s, Duration::from_secs(5)).await;
+    let _ = s.write_all(&body).await;
+    let resp = String::from_utf8_lossy(&out);
     assert!(resp.starts_with("HTTP/1.1 413"), "{resp}");
     assert_eq!(up.conns.load(Ordering::SeqCst), 0);
 }
@@ -152,4 +158,112 @@ async fn no_decision_headers_or_error_text_reach_the_client() {
     assert!(resp.starts_with("http/1.1 502"), "{resp}");
     assert!(!resp.contains("x-venusflytrap"), "{resp}");
     assert!(!resp.contains("error"), "{resp}");
+}
+
+/// Upstream stub whose reply is computed from the raw request; with
+/// `stall_after` the socket is then held open without sending anything more.
+async fn stub_with(reply: fn(&[u8]) -> Vec<u8>, stall_after: bool) -> Stub {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let conns = Arc::new(AtomicUsize::new(0));
+    let last = Arc::new(Mutex::new(Vec::new()));
+    let (c, la) = (conns.clone(), last.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = l.accept().await else { return };
+            c.fetch_add(1, Ordering::SeqCst);
+            let la = la.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                *la.lock().unwrap() = buf[..n].to_vec();
+                let _ = s.write_all(&reply(&buf[..n])).await;
+                if stall_after {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            });
+        }
+    });
+    Stub { addr, conns, last }
+}
+
+/// Read until EOF, a reset, or `limit`; returns what was read and whether the
+/// connection ended (EOF or error) before the limit.
+async fn read_until_closed(s: &mut TcpStream, limit: Duration) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let ended = tokio::time::timeout(limit, s.read_to_end(&mut out)).await.is_ok();
+    (out, ended)
+}
+
+#[tokio::test]
+async fn too_many_headers_is_431_before_upstream() {
+    let up = stub(true).await;
+    let mut cfg = short_cfg();
+    cfg.limits.max_headers = 16;
+    let p = proxy(cfg, up.addr).await;
+    let mut raw = String::from("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n");
+    for i in 0..40 {
+        raw.push_str(&format!("X-H{i}: v\r\n"));
+    }
+    raw.push_str("\r\n");
+    let resp = send(p, raw.as_bytes()).await;
+    assert!(resp.starts_with("HTTP/1.1 431"), "{resp}");
+    assert_eq!(up.conns.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stalled_upstream_body_is_cut_after_idle_timeout() {
+    // Complete response headers promising 1 MB, a few bytes, then silence.
+    fn reply(_: &[u8]) -> Vec<u8> {
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\npartial".to_vec()
+    }
+    let up = stub_with(reply, true).await;
+    let mut cfg = short_cfg();
+    cfg.limits.response_idle_timeout_ms = 300;
+    let p = proxy(cfg, up.addr).await;
+    let mut s = TcpStream::connect(p).await.unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+    let t = Instant::now();
+    let (out, ended) = read_until_closed(&mut s, Duration::from_secs(3)).await;
+    let out = String::from_utf8_lossy(&out);
+    assert!(ended, "client connection still open after response idle timeout: {out}");
+    assert!(t.elapsed() < Duration::from_secs(3));
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+}
+
+#[tokio::test]
+async fn client_that_never_reads_is_dropped_at_max_connection_ms() {
+    const BIG: usize = 8 * 1024 * 1024;
+    fn reply(req: &[u8]) -> Vec<u8> {
+        if req.starts_with(b"GET /big ") {
+            let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {BIG}\r\nConnection: close\r\n\r\n").into_bytes();
+            r.resize(r.len() + BIG, b'x');
+            r
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+        }
+    }
+    let up = stub_with(reply, false).await;
+    let mut cfg = short_cfg();
+    cfg.limits.max_connections = 1;
+    cfg.limits.max_connection_ms = 500;
+    let p = proxy(cfg, up.addr).await;
+
+    // Client A takes the only connection slot and never reads its 8 MB response.
+    let t = Instant::now();
+    let mut a = TcpStream::connect(p).await.unwrap();
+    a.write_all(b"GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client B is only served once A's connection is dropped.
+    let mut b = TcpStream::connect(p).await.unwrap();
+    let _ = b.write_all(b"GET /small HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let (out, _) = read_until_closed(&mut b, Duration::from_secs(5)).await;
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    let waited = t.elapsed();
+    assert!(waited < Duration::from_secs(3), "second client waited {waited:?}");
+    // B could not be served before A's 500 ms lifetime cap expired.
+    assert!(waited >= Duration::from_millis(450), "slot was not held by A: {waited:?}");
+    drop(a);
 }

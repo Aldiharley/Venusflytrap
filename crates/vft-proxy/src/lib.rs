@@ -4,8 +4,11 @@
 //! Block/Challenge get a generic 403. Decision headers never reach clients.
 #![forbid(unsafe_code)]
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -29,7 +32,68 @@ pub mod audit;
 pub mod pipeline;
 pub use hyper::http;
 
-type Body = BoxBody<Bytes, hyper::Error>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type Body = BoxBody<Bytes, BoxError>;
+
+/// Upstream response body that fails (aborting the client connection) when no
+/// frame arrives within `idle`; the window restarts on every frame.
+struct IdleTimeout<B> {
+    inner: B,
+    idle: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl<B> IdleTimeout<B> {
+    fn new(inner: B, idle: Duration) -> Self {
+        IdleTimeout { inner, idle, sleep: Box::pin(tokio::time::sleep(idle)) }
+    }
+}
+
+#[derive(Debug)]
+struct ResponseIdle;
+
+impl std::fmt::Display for ResponseIdle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream response body idle timeout")
+    }
+}
+
+impl std::error::Error for ResponseIdle {}
+
+impl<B> hyper::body::Body for IdleTimeout<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
+        let this = &mut *self;
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(frame) => {
+                let next = tokio::time::Instant::now() + this.idle;
+                this.sleep.as_mut().reset(next);
+                Poll::Ready(frame.map(|r| r.map_err(Into::into)))
+            }
+            Poll::Pending => match this.sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Some(Err(Box::new(ResponseIdle)))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.inner.size_hint()
+    }
+}
 
 /// Shared proxy state.
 pub struct ProxyState {
@@ -184,7 +248,8 @@ async fn forward(state: &ProxyState, parts: &http::request::Parts, body: Bytes, 
         Ok(Ok(resp)) => {
             let (mut rp, rb) = resp.into_parts();
             strip_hop_by_hop(&mut rp.headers);
-            Response::from_parts(rp, rb.boxed())
+            let idle = Duration::from_millis(state.limits.response_idle_timeout_ms);
+            Response::from_parts(rp, IdleTimeout::new(rb, idle).boxed())
         }
     }
 }
@@ -220,6 +285,7 @@ pub async fn serve_listener(state: Arc<ProxyState>, listener: TcpListener) -> an
         let st = state.clone();
         let header_ms = state.limits.header_read_timeout_ms;
         let max_headers = state.limits.max_headers;
+        let lifetime = Duration::from_millis(state.limits.max_connection_ms);
         tokio::spawn(async move {
             let _permit = permit;
             let svc = service_fn(move |req| handle(st.clone(), peer, req));
@@ -227,7 +293,10 @@ pub async fn serve_listener(state: Arc<ProxyState>, listener: TcpListener) -> an
             b.timer(TokioTimer::new())
                 .header_read_timeout(Duration::from_millis(header_ms))
                 .max_headers(max_headers);
-            let _ = b.serve_connection(TokioIo::new(stream), svc).await;
+            // Dropping the connection future on expiry closes the socket and
+            // releases the slot, also when a client stops reading (no write
+            // progress means hyper never finishes on its own).
+            let _ = tokio::time::timeout(lifetime, b.serve_connection(TokioIo::new(stream), svc)).await;
         });
     }
 }

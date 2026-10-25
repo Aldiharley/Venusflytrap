@@ -68,3 +68,5 @@ limits:
   body_read_timeout_ms: 30000
   upstream_connect_timeout_ms: 5000
   upstream_response_timeout_ms: 30000
+  response_idle_timeout_ms: 30000   # max gap between upstream response-body chunks
+  max_connection_ms: 300000         # hard cap on one client connection's lifetime

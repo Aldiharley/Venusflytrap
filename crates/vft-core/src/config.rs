@@ -45,6 +45,10 @@ pub struct LimitsConfig {
     pub body_read_timeout_ms: u64,
     pub upstream_connect_timeout_ms: u64,
     pub upstream_response_timeout_ms: u64,
+    /// Max gap between upstream response-body frames before the response is aborted.
+    pub response_idle_timeout_ms: u64,
+    /// Hard cap on one client connection's lifetime; its slot is released on expiry.
+    pub max_connection_ms: u64,
 }
 
 impl Default for LimitsConfig {
@@ -57,6 +61,8 @@ impl Default for LimitsConfig {
             body_read_timeout_ms: 30_000,
             upstream_connect_timeout_ms: 5_000,
             upstream_response_timeout_ms: 30_000,
+            response_idle_timeout_ms: 30_000,
+            max_connection_ms: 300_000,
         }
     }
 }
@@ -358,6 +364,8 @@ impl Config {
             ("limits.body_read_timeout_ms", l.body_read_timeout_ms),
             ("limits.upstream_connect_timeout_ms", l.upstream_connect_timeout_ms),
             ("limits.upstream_response_timeout_ms", l.upstream_response_timeout_ms),
+            ("limits.response_idle_timeout_ms", l.response_idle_timeout_ms),
+            ("limits.max_connection_ms", l.max_connection_ms),
         ] {
             if ms == 0 {
                 bad(key, "must be >= 1".into());
@@ -426,6 +434,8 @@ mod tests {
             ("limits:\n  max_connections: 0\n", "limits.max_connections"),
             ("limits:\n  header_read_timeout_ms: 0\n", "limits.header_read_timeout_ms"),
             ("limits:\n  upstream_response_timeout_ms: 0\n", "limits.upstream_response_timeout_ms"),
+            ("limits:\n  response_idle_timeout_ms: 0\n", "limits.response_idle_timeout_ms"),
+            ("limits:\n  max_connection_ms: 0\n", "limits.max_connection_ms"),
         ] {
             assert!(issues(yaml).iter().any(|i| i.key == key), "{key}");
         }
