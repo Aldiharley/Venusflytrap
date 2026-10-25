@@ -66,6 +66,9 @@ pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.hea
 // --- Decoders -------------------------------------------------------------------
 
 pub static DECODE_PERCENT_LOSSY: ConstructInfo = ConstructInfo { id: "decode.percent-lossy", family: None, kind: ConstructKind::Decoder, summary: "URL decoding: '+' to space, %XX byte by byte, lossy UTF-8" };
+pub static DECODE_ENTITY: ConstructInfo = ConstructInfo { id: "decode.entity", family: None, kind: ConstructKind::Decoder, summary: "HTML entities: numeric, plus a fixed set of named ones" };
+pub static DECODE_ESC_HEX: ConstructInfo = ConstructInfo { id: "decode.esc-hex", family: None, kind: ConstructKind::Decoder, summary: "\\xNN and \\uNNNN escapes" };
+pub static DECODE_B64_WHOLE: ConstructInfo = ConstructInfo { id: "decode.b64-whole", family: None, kind: ConstructKind::Decoder, summary: "a field that is base64 as a whole; also tried before '+' becomes a space" };
 
 static REGISTRY: &[&ConstructInfo] = &[
     &sql::UNION_SELECT,
@@ -102,6 +105,9 @@ static REGISTRY: &[&ConstructInfo] = &[
     &INTEL_SCANNER_UA,
     &LIMIT_HEADER_NON_UTF8,
     &DECODE_PERCENT_LOSSY,
+    &DECODE_ENTITY,
+    &DECODE_ESC_HEX,
+    &DECODE_B64_WHOLE,
 ];
 
 /// Every registered construct, decoder and limit.

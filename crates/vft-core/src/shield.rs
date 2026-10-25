@@ -343,6 +343,13 @@ mod tests {
     }
 
     #[test]
+    fn base64_xss_with_plus_in_a_header_blocks() {
+        let mut req = Request::get("/");
+        req.headers.push(("x-data".into(), "PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+Pg==".into()));
+        assert_eq!(Shield::new(Config::default()).inspect(&req).verdict, Verdict::Block);
+    }
+
+    #[test]
     fn raw_cookie_header_is_inspected_when_cookies_not_parsed() {
         // A library caller may supply only the raw Cookie header. It must not
         // be skipped: the skip is valid only when parsed cookies cover it.

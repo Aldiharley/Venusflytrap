@@ -99,3 +99,19 @@ One decision diff: `61/81/472215d2fca9ef868561906345b2.white` (a white-side requ
 Gate: FAIL (+0 TP is not greater than +0 FP). The dev corpus has no request where a stray invalid `%XX` hid an otherwise-blocked payload, so the fix has no measurable recall effect here. Code and unit tests are kept (they pin the H1 bypass); the controller decides whether the strict rule applies to a change with no corpus footprint. No tuning was done.
 
 Owner ruling (2026-10-25): kept. H1 closes a confirmed bypass (a single invalid `%XX` disabled URL decoding for the whole field) that the dev half never exercises, so it is judged like the C2/C3 fail-closed fixes: 0 added dev FPs (here +0) and its probe regression tests block (`one_bad_byte_does_not_disable_url_decoding`, `sqli_survives_an_invalid_utf8_escape_in_the_same_field`). Gate under the amended rule: PASS.
+
+### L5 — decode.b64-whole before '+' (and decoder ids)
+
+Fixed decoder: gate is delta TP > delta FP (spec §4.4). Whole-field base64 is now tried before the URL step turns `+` into a space; `decode.entity`, `decode.esc-hex` and `decode.b64-whole` are registered ids and can be disabled. Dev half, library mode, `compare_runs.py pre-l5_dev.csv l5_dev.csv`.
+
+```
+a: tp=147 fp=142 tn=16468 fn=182 recall=0.4468 fp_rate=0.0085
+b: tp=148 fp=142 tn=16468 fn=181 recall=0.4498 fp_rate=0.0085
+delta: tp=+1 fp=+0
+```
+
+Decision diffs: 1. `09/51/70d77d502fc1f4de9e24b71dd19e.black` went Allow to Block, score 30 to 100.
+
+Gate: PASS (+1 TP is greater than +0 FP).
+
+Note: `parse_corpus.py`/`parse_qsl` and many adapters already turn `+` into a space in query values before the engine sees them, so L5 can only act on bodies, headers and cookies. A small delta is therefore expected and is reported as measured.

@@ -126,6 +126,14 @@ pub fn percent_decode_lossy(s: &str) -> String {
 /// One decode pass: URL -> HTML entity -> \xNN/\uNNNN -> whole-string base64.
 /// Each stage only applies if it changes the string.
 fn decode_once(s: &str, disabled: &Disabled) -> String {
+    // Whole-field base64 first: '+' is a base64 character, and the URL step
+    // below turns it into a space (L5).
+    if !disabled.is(&sinks::DECODE_B64_WHOLE) {
+        if let Some(d) = try_whole_base64(s) {
+            return d;
+        }
+    }
+
     let mut out = s.to_string();
 
     // URL / percent decoding.
@@ -137,7 +145,7 @@ fn decode_once(s: &str, disabled: &Disabled) -> String {
     }
 
     // HTML entities (named + numeric).
-    if out.contains('&') {
+    if out.contains('&') && !disabled.is(&sinks::DECODE_ENTITY) {
         let d = decode_html_entities(&out);
         if d != out {
             out = d;
@@ -145,7 +153,7 @@ fn decode_once(s: &str, disabled: &Disabled) -> String {
     }
 
     // \xNN and \uNNNN escapes.
-    if out.contains("\\x") || out.contains("\\u") {
+    if (out.contains("\\x") || out.contains("\\u")) && !disabled.is(&sinks::DECODE_ESC_HEX) {
         let d = decode_backslash_escapes(&out);
         if d != out {
             out = d;
@@ -153,9 +161,11 @@ fn decode_once(s: &str, disabled: &Disabled) -> String {
     }
 
     // Base64, only when the whole token looks like base64 and decodes to text.
-    if let Some(d) = try_whole_base64(&out) {
-        if d != out {
-            out = d;
+    if !disabled.is(&sinks::DECODE_B64_WHOLE) {
+        if let Some(d) = try_whole_base64(&out) {
+            if d != out {
+                out = d;
+            }
         }
     }
 
@@ -396,6 +406,21 @@ mod tests {
 
     fn norm(s: &str) -> Normalized {
         normalize(s, &Options::default())
+    }
+
+    #[test]
+    fn base64_with_plus_decodes() {
+        // base64 of `<svg onload=alert(1)>>` contains '+'
+        let n = norm("PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+Pg==");
+        assert!(n.text.contains("<svg onload=alert(1)>"), "got: {}", n.text);
+    }
+
+    #[test]
+    fn decoders_can_be_disabled() {
+        let opts = Options { disabled: Disabled::resolve(&["decode.entity".into()]), ..Options::default() };
+        assert!(normalize("&lt;script&gt;", &opts).text.contains("&lt;script&gt;"));
+        let opts = Options { disabled: Disabled::resolve(&["decode.esc-hex".into()]), ..Options::default() };
+        assert!(normalize("\\x3cscript", &opts).text.contains("\\x3cscript"));
     }
 
     #[test]
