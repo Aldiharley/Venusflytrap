@@ -81,3 +81,19 @@ These constructs predate recall-lift: reported only, nothing is dropped (spec §
 | honeypot.decoy-hit | Signature | 147 | 142 | 0 | 0 | 0 |
 | intel.scanner-ua | Signature | 147 | 142 | 0 | 0 | 0 |
 | limit.header-non-utf8 | Limit | 147 | 142 | 0 | 0 | 0 |
+
+## M2a — fail-closed and decoder fixes (dev A/B per change)
+
+### H1 — decode.percent-lossy
+
+Fixed decoder: gate is delta TP > delta FP (spec §4.4). Dev half, library mode, `compare_runs.py pre-h1_dev.csv h1_dev.csv`.
+
+```
+a: tp=147 fp=142 tn=16468 fn=182 recall=0.4468 fp_rate=0.0085
+b: tp=147 fp=142 tn=16468 fn=182 recall=0.4468 fp_rate=0.0085
+delta: tp=+0 fp=+0
+```
+
+One decision diff: `61/81/472215d2fca9ef868561906345b2.white` (a white-side request) went Monitor to Allow, score 40 to 39; the score fell below the Monitor threshold, no Block/Allow decision changed.
+
+Gate: FAIL (+0 TP is not greater than +0 FP). The dev corpus has no request where a stray invalid `%XX` hid an otherwise-blocked payload, so the fix has no measurable recall effect here. Code and unit tests are kept (they pin the H1 bypass); the controller decides whether the strict rule applies to a change with no corpus footprint. No tuning was done.

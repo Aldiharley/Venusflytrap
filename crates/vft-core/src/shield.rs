@@ -31,14 +31,15 @@ impl Shield {
     }
 
     pub fn with_oracle(cfg: Config, oracle: Box<dyn AiOracle>) -> Self {
+        let disabled = Disabled::resolve(&cfg.shield.disabled);
         let norm_opts = Options {
             max_payload: cfg.shield.max_payload,
             decode_cap: cfg.shield.decode_cap,
             deep_threshold: cfg.shield.deep_threshold,
+            disabled: disabled.clone(),
         };
         let honeypot = Honeypot::new(&cfg.honeypot);
         let intel = Intel::with_defaults();
-        let disabled = Disabled::resolve(&cfg.shield.disabled);
         Shield {
             cfg,
             norm_opts,
@@ -432,6 +433,14 @@ mod tests {
         off_cfg.shield.disabled = vec!["honeypot.decoy-hit".into()];
         let j = Shield::new(off_cfg).inspect(&req);
         assert!(!j.contributions.iter().any(|c| c.construct.as_deref() == Some("honeypot.decoy-hit")));
+    }
+
+    #[test]
+    fn sqli_survives_an_invalid_utf8_escape_in_the_same_field() {
+        let mut req = Request::get("/login");
+        req.method = "POST".into();
+        req.body = b"user=admin%27%20or%201%3D1--%20&x=%ff".to_vec();
+        assert_eq!(Shield::new(Config::default()).inspect(&req).verdict, Verdict::Block);
     }
 
     #[test]

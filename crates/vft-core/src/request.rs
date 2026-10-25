@@ -116,28 +116,6 @@ impl Request {
     }
 }
 
-/// Percent-decode to bytes, then UTF-8 lossily (never skips a layer on bad
-/// UTF-8). Private stand-in until the recall-lift decoder
-/// (`normalize::percent_decode_lossy`) lands — replace this then.
-fn percent_decode_lossy(s: &str) -> String {
-    let b = s.as_bytes();
-    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// The path as a backend would resolve it: percent-decoded (up to 3 layers;
 /// decoding stops after 3, so deeper nesting is left encoded),
 /// backslashes as slashes, matrix parameters (`;x`) dropped per segment, empty
@@ -147,7 +125,7 @@ fn percent_decode_lossy(s: &str) -> String {
 pub fn canonical_path(raw: &str) -> String {
     let mut s = raw.to_string();
     for _ in 0..3 {
-        let d = percent_decode_lossy(&s);
+        let d = crate::normalize::percent_decode_lossy(&s);
         if d == s {
             break;
         }

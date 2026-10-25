@@ -9,6 +9,8 @@ mod confusables;
 
 use base64::Engine as _;
 
+use crate::graph::sinks::{self, Disabled};
+
 /// Flags raised during normalization — themselves weak signals.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Flags {
@@ -34,6 +36,8 @@ pub struct Options {
     pub max_payload: usize,
     pub decode_cap: u8,
     pub deep_threshold: u8,
+    /// Decoders switched off (`shield.disabled`).
+    pub disabled: Disabled,
 }
 
 impl Default for Options {
@@ -42,6 +46,7 @@ impl Default for Options {
             max_payload: 64 * 1024,
             decode_cap: 14,
             deep_threshold: 3,
+            disabled: Disabled::default(),
         }
     }
 }
@@ -56,7 +61,7 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
         flags.mixed_script = true;
     }
 
-    let (decoded, layers) = decode_fixpoint(&bounded, opts.decode_cap);
+    let (decoded, layers) = decode_fixpoint_with(&bounded, opts.decode_cap, &opts.disabled);
     if layers >= opts.deep_threshold {
         flags.deep_nesting = true;
     }
@@ -79,10 +84,15 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
 
 /// Apply decoders repeatedly until a pass makes no change or the cap is hit.
 pub fn decode_fixpoint(input: &str, cap: u8) -> (String, u8) {
+    decode_fixpoint_with(input, cap, &Disabled::default())
+}
+
+/// [`decode_fixpoint`] with some decoders switched off.
+pub fn decode_fixpoint_with(input: &str, cap: u8, disabled: &Disabled) -> (String, u8) {
     let mut cur = input.to_string();
     let mut layers = 0u8;
     for _ in 0..cap {
-        let next = decode_once(&cur);
+        let next = decode_once(&cur, disabled);
         if next == cur {
             break;
         }
@@ -92,19 +102,37 @@ pub fn decode_fixpoint(input: &str, cap: u8) -> (String, u8) {
     (cur, layers)
 }
 
+/// Percent-decode to bytes, then UTF-8 lossily. One invalid byte (`%ff`) yields
+/// U+FFFD instead of disabling URL decoding for the whole field (H1).
+pub fn percent_decode_lossy(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// One decode pass: URL -> HTML entity -> \xNN/\uNNNN -> whole-string base64.
 /// Each stage only applies if it changes the string.
-fn decode_once(s: &str) -> String {
+fn decode_once(s: &str, disabled: &Disabled) -> String {
     let mut out = s.to_string();
 
     // URL / percent decoding.
-    if out.contains('%') || out.contains('+') {
-        let replaced = out.replace('+', " ");
-        if let Ok(dec) = percent_encoding::percent_decode_str(&replaced).decode_utf8() {
-            let d = dec.into_owned();
-            if d != out {
-                out = d;
-            }
+    if (out.contains('%') || out.contains('+')) && !disabled.is(&sinks::DECODE_PERCENT_LOSSY) {
+        let d = percent_decode_lossy(&out.replace('+', " "));
+        if d != out {
+            out = d;
         }
     }
 
@@ -368,6 +396,25 @@ mod tests {
 
     fn norm(s: &str) -> Normalized {
         normalize(s, &Options::default())
+    }
+
+    #[test]
+    fn one_bad_byte_does_not_disable_url_decoding() {
+        let n = norm("admin%27%20or%201%3D1--%20&x=%ff");
+        assert!(n.text.contains("admin' or 1=1"), "got: {}", n.text);
+    }
+
+    #[test]
+    fn percent_decode_lossy_cases() {
+        assert_eq!(percent_decode_lossy("a%41%2"), "aA%2");
+        assert_eq!(percent_decode_lossy("%ff"), "\u{fffd}");
+        assert_eq!(percent_decode_lossy("%zz"), "%zz");
+    }
+
+    #[test]
+    fn disabling_percent_decoding_leaves_the_field_encoded() {
+        let opts = Options { disabled: Disabled::resolve(&["decode.percent-lossy".to_string()]), ..Options::default() };
+        assert_eq!(normalize("a%41", &opts).text, "a%41");
     }
 
     #[test]
