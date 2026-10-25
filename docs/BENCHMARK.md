@@ -43,20 +43,27 @@ unreadable files counted as missed). The baselines read all 658 and have one fig
 
 | Engine | TP | FP | FN (656 / 658) | Recall (656 / 658) | Precision | F1 (656 / 658) | FP rate |
 |---|---|---|---|---|---|---|---|
-| Venusflytrap, library | 283 | 269 | 373 / 375 | 43.14% / 43.01% | 51.27% | 0.4685 / 0.4678 | 0.81% |
-| Venusflytrap, serve, distinct | 283 | 269 | 373 / 375 | 43.14% / 43.01% | 51.27% | 0.4685 / 0.4678 | 0.81% |
-| Venusflytrap, serve, pooled:100 | 446 | 15,847 | 210 / 212 | 67.99% / 67.78% | 2.74% | 0.0526 / 0.0526 | 47.70% |
+| Venusflytrap, library | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| Venusflytrap, serve, distinct | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| Venusflytrap, serve, pooled:100 | 446 | 15,848 | 210 / 212 | 67.99% / 67.78% | 2.74% | 0.0526 / 0.0526 | 47.71% |
 | libinjection (Python-parsed input) | 214 | 93 | 444 | 32.52% | 69.71% | 0.4435 | 0.28% |
 | Regex baseline (Python-parsed input) | 127 | 126 | 531 | 19.30% | 50.20% | 0.2788 | 0.38% |
+
+These rows are from the tree after the final-review fix wave, which made query keys, cookie names and
+`Accept-Encoding` inspected fields (they were forwarded but not inspected before). Against the previous
+measurement (283 TP / 269 FP library) that added one true positive and two false positives, all three
+from query keys; details in `eval/RESULTS-SP1.md`, "Final review fix wave".
 
 How to read this:
 
 - The engine detects about 43% of this corpus's malicious requests, and about half of what it blocks is
-  benign. That is a weak result in absolute terms. It finds more attacks than libinjection (283 vs 214
-  true positives) but raises more false positives (269 vs 93), so libinjection has the higher precision.
-- **Serve-distinct equals library**, request for request. With one source per request, state never
-  changes a verdict, which is the expected check.
-- **Serve-pooled:100 is not a better detector.** Its extra true positives (446 vs 283) and its 47.70%
+  benign. That is a weak result in absolute terms. It finds more attacks than libinjection (284 vs 214
+  true positives) but raises more false positives (271 vs 93), so libinjection has the higher precision.
+- **Serve-distinct makes the same block/allow decision as library**, request for request. With one
+  source per request, state never changes a block/allow decision, which is the expected check. The
+  verdict labels are not all identical: 10 malicious requests are Challenge in the library and Block in
+  serve, because the first exploitation event from a source adds the chain-stage bonus.
+- **Serve-pooled:100 is not a better detector.** Its extra true positives (446 vs 284) and its 47.71%
   FP rate both come from bans: once a shared source is banned, every later request from it is rejected,
   malicious or benign.
 
@@ -65,7 +72,7 @@ How to read this:
 | Run | benign sources | benign sources banned | collateral FP | bans from allowed requests | invariant violations |
 |---|---|---|---|---|---|
 | serve, distinct | 33,219 | 72 | 0 | 0 | 0 |
-| serve, pooled:100 | 100 | 80 | 15,578 | 0 | 0 |
+| serve, pooled:100 | 100 | 80 | 15,577 | 0 | 0 |
 
 - `benign_sources_banned`: sources that sent at least one benign request and were banned. In the
   distinct run these are 72 sources whose own benign request was blocked (a false positive) and then
@@ -76,7 +83,7 @@ How to read this:
 - `invariant_violations` is 0: every Allow in the corpus is recorded as benign in the attack chain.
 
 **Failed acceptance check.** The SP1 check "collateral FP is no larger than request-level FP" **fails**
-for pooled:100: collateral FP is 15,578 against 269 request-level false positives on the library path.
+for pooled:100: collateral FP is 15,577 against 271 request-level false positives on the library path.
 The cause is that a single blocked exfiltration request bans a shared source for one hour, and with 100
 shared sources, 80 were banned. Redesigning the ban policy is a planned follow-up; this run changes no
 policy or configuration.
@@ -96,69 +103,85 @@ traffic, so only recall is meaningful. Retention is mutant recall divided by see
 | Regex baseline (original run) | not re-measured | not re-measured | 54% |
 
 The libinjection and regex retentions are carried over from the original measurement run and were not
-re-run for this document. SP1 left Venusflytrap's mutation robustness unchanged. With 22 seeds the seed
+re-run for this document. SP1, including the final-review fix wave, left Venusflytrap's mutation
+robustness unchanged (the mutation set carries its payloads in query values, which were already inspected). With 22 seeds the seed
 recall is a coarse number: one seed is 4.5 points.
 
 ## 5. Latency
 
-Per-request latency of the detection call only (parsing excluded), microseconds, release build, one
-thread, on the full corpus.
+Per-request latency in microseconds, release build, one thread, on the full corpus; raw-file parsing
+is excluded. The rows do not time the same call, so they are not strictly like-for-like: the library
+row times `Shield::inspect` only, while the serve rows time `Pipeline::decide`, which adds adapting
+the hyper request (`adapt::from_parts`), the ban lookup, and the chain `observe`/`finalize` around the
+same inspection.
 
 | Path | p50 | p95 | p99 |
 |---|---|---|---|
-| Library (`Shield::inspect`) | 72 | 210 | 718 |
-| Serve, distinct (`Pipeline::decide`) | 71 | 208 | 713 |
-| Serve, pooled:100 (not comparable) | 42 | 160 | 368 |
+| Library (`Shield::inspect`), run 1 / run 2 | 72 / 70 | 224 / 213 | 659 / 645 |
+| Serve, distinct (`Pipeline::decide`), run 1 / run 2 | 70 / 73 | 217 / 233 | 641 / 715 |
+| Serve, pooled:100 (not comparable) | 47 | 214 | 458 |
 
-The pooled row is lower only because requests from banned sources are rejected before inspection.
+The library and serve-distinct rows come from an A/B run on one machine state, interleaving the binary
+from before the final-review fix wave with the current one. The earlier binary measured 64 / 191 / 653
+and 63 / 190 / 659 (library) and 63 / 187 / 642 and 63 / 187 / 669 (serve distinct) in the same session,
+so the fix wave costs about 10% at p50 and 12 to 25% at p95: query keys, cookie names and
+`Accept-Encoding` are now inspected fields. The pooled row is a single run; it is lower only because
+requests from banned sources are rejected before inspection.
 
 **Throughput.** `Pipeline::decide` (64-shard chain store, no lock held during inspection) against
-stateless `Shield::inspect`: 8 threads x 50 requests, each request from its own source (50 distinct sources per thread, 400 in
-total), a request with a ~64 KB query, after one discarded warm-up round of each mode. Ratio stateless / stateful over three runs of the final tree: 0.99, 0.98 and 1.01
-(stateless 0.185, 0.175, 0.185 s; stateful 0.188, 0.179, 0.184 s). The stateful path runs at parity
-with the stateless one; the acceptance floor was 0.75.
+stateless `Shield::inspect`: 8 threads x 50 requests, each request from its own source (50 distinct
+sources per thread, 400 in total), a request with a ~64 KB query, after one discarded warm-up round of
+each mode. Ratio stateless / stateful over three runs of the current tree: 1.21, 1.14 and 0.94
+(stateless 0.494, 0.548, 0.286 s; stateful 0.407, 0.482, 0.305 s). These runs were noisier and slower in
+absolute terms than the earlier ones (ratios 0.99, 0.98, 1.01 at about 0.18 s per pass); every run is
+above the 0.75 acceptance floor, and no run shows the stateful path slower than 0.94x stateless.
 
 ## 6. TCP replay equivalence
 
 Every replayed sample's proxy answer is compared with the in-process decision: 403 must equal
 Block/Challenge and 200 must equal Allow/Monitor. A 400, 413, 431 or 501 from the proxy's HTTP front end
 is counted as `proxy_rejected`, not as a mismatch. Each sample uses its own source (`X-Forwarded-For`
-from a trusted loopback peer), `Connection: close`, and an exact `Content-Length`.
+from a trusted loopback peer), `Connection: close`, and an exact `Content-Length`. Mismatches are
+counted by direction:
 
-| Run | replayed | matched_block (403) | matched_allow (200) | proxy_rejected | not_replayable | mismatched |
-|---|---|---|---|---|---|---|
-| First 1,000 samples | 992 | 20 | 971 | 1 | 8 | **0** |
-| Full corpus (33,877 samples) | 33,711 | 550 | 32,207 | 5 | 166 | **949** |
+- `block_vs_proxy_allow`: in-process Block/Challenge, proxy 200. A request the engine stops reached
+  the upstream. This is the bucket that matters for safety.
+- `allow_vs_proxy_403`: in-process Allow/Monitor, proxy 403.
+- `upstream_5xx`: in-process Allow/Monitor, proxy 502/504. The proxy only answers 502/504 after it has
+  decided to forward (a stopped request gets its 403 first), so these are the same Allow decision
+  followed by a failure to reach the stub upstream.
+- `io`: the replay client could not connect, write or read a status; no proxy decision was observed.
+- `other`: anything else.
 
-**The full-corpus run is not clean: 949 samples mismatched.** The 20 mismatches the tool lists are all
-`502` responses on benign samples that the in-process decision also allowed (`in_process_block=false`).
-For those 20, the proxy reached the same Allow decision and then failed to reach the stub upstream: a
-failure of the test harness, not a disagreement between the proxy and the engine. Only the first 20
-mismatches are listed by the tool. The other 929 were not individually examined, and their cause
-(ephemeral-port exhaustion and undrained stub bodies, below) is inferred from the 20 listed ones and from
-the reproduction below, not established. What was observed:
+| Run | replayed | matched_block (403) | matched_allow (200) | proxy_rejected | not_replayable | block_vs_proxy_allow | allow_vs_proxy_403 | upstream_5xx | io | other |
+|---|---|---|---|---|---|---|---|---|---|---|
+| First 1,000 samples | 992 | 20 | 971 | 1 | 8 | **0** | 0 | 0 | 0 | 0 |
+| Full corpus (33,877 samples) | 33,711 | 553 | 32,377 | 5 | 166 | **0** | **0** | 767 | 9 | 0 |
 
-- Apart from the large-body ones below, the failures start roughly 17,000 samples into the run and are
-  dense from there (the next listed mismatch is `88/58`, then a run of `89/*` samples). A separate replay
-  of 24,000 small benign samples at full speed reproduced the pattern: mismatches began at the same
-  point in the corpus (first listed `81/d4`, `86/ca`, `87/be`, then dense from `88/*`), all listed ones
-  `502` with in-process Allow, 6,437 in total.
-- 8,107 sockets were still in `TIME_WAIT` right after the full run, and the Windows dynamic port range is
-  16,384 ports. Two loopback sockets per request (client to proxy, proxy to upstream) with
-  `Connection: close` make ephemeral-port exhaustion the likely cause. This is inferred from that
-  evidence; it was not confirmed by capturing the connect error.
-- The four earliest mismatches (`09/8a/...` 573 KB, `11/27/...` 858 KB, `1b/12/...` 66 KB,
-  `30/56/...` 74 KB) are larger request bodies; the first two reproduce a 502 in isolation. The stub
-  upstream reads once and closes without draining the body, which probably resets the connection while the proxy
-  is still sending it. That is also a harness limitation, and it is a separate cause from the port
-  exhaustion.
-- Samples such as `88/58/...` (1 KB) that mismatched in the full run pass when replayed in a small
-  corpus, so those failures depend on load, not on request content.
+**No request that the engine stops was let through, and no observed allowed request was refused.** Both
+decision-disagreement buckets are 0 over the full corpus. Every in-process Block/Challenge is accounted
+for: 553 answered 403 and 2 more (`00/06/...`, `ec/98/...`) were refused with 400 by the HTTP front end
+before inspection; 555 is also the serve-distinct blocked count (284 TP + 271 FP).
 
-`matched_block` 550 shows the block path was exercised on the whole corpus (the 1,000-sample prefix holds
-only 20 blocked requests). Among the 20 examined mismatches, none shows the proxy and the engine deciding
-differently. The other 929 were not examined, so this run does not demonstrate full-corpus equivalence. Making the replay immune to port exhaustion and large-body resets is not part of this
-document's scope.
+The run is still not clean in the harness sense: 776 samples did not produce a 200 that could be
+compared directly.
+
+- **767 `upstream_5xx`**, all 502 with in-process Allow in the 20 listed examples. As argued above, a
+  502 means the proxy had already decided to forward. Two of the listed ones are the large bodies
+  (`09/8a/...` 573 KB, `11/27/...` 858 KB) that reproduced a 502 in isolation in the earlier
+  investigation (the stub upstream reads once and closes without draining the body). The rest are
+  listed from `81/*` onwards, as in the earlier run, where loopback port exhaustion is the likely cause:
+  33,244 sockets were in `TIME_WAIT` right after the run, against a 16,384-port Windows dynamic range.
+  That cause is inferred, not confirmed by capturing the upstream connect error.
+- **9 `io`**, all `connect timeout` from the replay client to the proxy, in-process Allow, listed from
+  `82/*` to `87/*`: the same port-exhaustion window on the client side. No proxy decision was observed
+  for these 9.
+
+So block/allow equivalence over sockets is shown for every in-process block and for 32,377 + 767
+allowed requests; it is not observed for the 9 `io` samples or the 5 front-end rejections. The previous
+run of this replay (before the fix wave, without direction buckets) had 949 unexamined mismatches; the
+bucketed re-run replaces it. Making the harness immune to port exhaustion and large-body resets is not
+part of this document's scope.
 
 ## 7. What this does not show
 
@@ -172,3 +195,25 @@ document's scope.
 - **Two malicious files are unscored** because they were unreadable on the measuring machine.
 - **Pooled sources are a model.** Real shared-source behaviour depends on the deployment's
   trusted-proxy configuration, which this benchmark does not vary.
+
+**Known open fail-opens and uninspected input.** The current tree forwards these to the upstream
+without inspecting them. Read every "inspected" claim elsewhere with this list:
+
+- **Field content past `shield.max_payload`** (65,536 characters per field by default). The normalizer
+  truncates each field silently, so the rest of a long field is forwarded uninspected. In practice this
+  is a request body: the proxy accepts bodies up to `limits.max_body` (1 MiB). Owned by the recall-lift
+  effort (C3, fail-closed truncation).
+- **Tokens past the graph cap** (4,096 per field): the taint graph is built from the first 4,096 tokens
+  only. Owned by recall-lift (C2).
+- **One-layer percent-decode failure**: a percent-encoded layer whose decoded bytes are not valid UTF-8
+  is not peeled, so that field is analysed with the layer still encoded. Owned by recall-lift (H1).
+- **`Content-Length`** is forwarded but not inspected (the HTTP front end has already validated it as a
+  length). **`Connection`** is not inspected; it is hop-by-hop and never forwarded.
+- A raw `Cookie` header whose every segment is `token=value` is inspected through its parsed cookie
+  names and values rather than a second time as a header. Any other `Cookie` header is inspected both
+  ways.
+
+**Ban storage (implementation note).** Bans are kept in their own map inside each of the 64 chain
+shards (separate capacity `chain.ban_policy.max_bans`, never evicted by the source LRU), not in a
+separate `BanStore` as the SP1 design sketched. This is an intentional simplification. A banned source is
+answered from the request head (`Pipeline::fast_track`) before its body is read.

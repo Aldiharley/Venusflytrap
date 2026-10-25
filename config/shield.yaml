@@ -3,7 +3,7 @@
 # article's shield/scoring/chain/honeypot YAML split.
 
 shield:
-  max_payload: 65536      # bytes inspected per field before work begins
+  max_payload: 65536      # characters inspected per field; content past this is NOT inspected (known fail-open, docs/BENCHMARK.md section 7)
   decode_cap: 14          # max decode layers peeled to a fixpoint
   deep_threshold: 3       # layers at/above this raise the "deep nesting" signal
 
