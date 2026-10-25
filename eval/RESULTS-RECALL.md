@@ -97,3 +97,5 @@ delta: tp=+0 fp=+0
 One decision diff: `61/81/472215d2fca9ef868561906345b2.white` (a white-side request) went Monitor to Allow, score 40 to 39; the score fell below the Monitor threshold, no Block/Allow decision changed.
 
 Gate: FAIL (+0 TP is not greater than +0 FP). The dev corpus has no request where a stray invalid `%XX` hid an otherwise-blocked payload, so the fix has no measurable recall effect here. Code and unit tests are kept (they pin the H1 bypass); the controller decides whether the strict rule applies to a change with no corpus footprint. No tuning was done.
+
+Owner ruling (2026-10-25): kept. H1 closes a confirmed bypass (a single invalid `%XX` disabled URL decoding for the whole field) that the dev half never exercises, so it is judged like the C2/C3 fail-closed fixes: 0 added dev FPs (here +0) and its probe regression tests block (`one_bad_byte_does_not_disable_url_decoding`, `sqli_survives_an_invalid_utf8_escape_in_the_same_field`). Gate under the amended rule: PASS.

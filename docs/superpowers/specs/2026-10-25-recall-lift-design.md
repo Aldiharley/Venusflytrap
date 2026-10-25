@@ -101,8 +101,8 @@ Leave-one-out on dev: one baseline run with everything enabled, then one run per
 | `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings` | green |
 | Dev FP rate | ≤ 1.0% |
 | Each new detection construct or decoder (leave-one-out on dev) | ΔTP > ΔFP, else dropped |
-| Each widened or fixed construct or decoder (`xss.dangerous-proto`, the binary list, `decode.percent-lossy`, `decode.b64-whole`) | the change alone, new vs previous behavior on dev: ΔTP > ΔFP, else reverted |
-| Each limit or fail-closed fix | adds 0 dev FPs, and its probe regression test blocks |
+| Each widened or fixed construct or decoder (`xss.dangerous-proto`, the binary list, `decode.b64-whole`) | the change alone, new vs previous behavior on dev: ΔTP > ΔFP, else reverted |
+| Each limit, fail-closed fix, or bypass fix (`decode.percent-lossy`, owner ruling 2026-10-25) | adds 0 dev FPs, and its probe regression test blocks |
 | Mutation robustness | retained ≥ 96%, and mutant recall ≥ 83.0% |
 | Full-corpus latency | p95 < 1 ms (PRD NFR1) |
 | Held-out | scored once at milestone end; reported, never tuned on |
