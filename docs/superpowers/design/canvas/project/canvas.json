@@ -1,0 +1,20 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-10-25T20:10:00Z"},
+  "title": "Venusflytrap Console Design",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1440, "h": 900, "title": "Traffic topology — light", "expand": "fill", "is_interactive": true},
+    "TopologyDark.dc.html": {"x": 1520, "y": 0, "w": 1440, "h": 900, "title": "Traffic topology — dark", "expand": "fill", "is_interactive": true},
+    "AttackChains.dc.html": {"x": 0, "y": 1020, "w": 1440, "h": 900, "title": "Attack chains (live) — dark", "expand": "fill"},
+    "Monitor.dc.html": {"x": 1520, "y": 1020, "w": 1440, "h": 900, "title": "Monitor — light", "expand": "fill"},
+    "RequestDetails.dc.html": {"x": 0, "y": 2040, "w": 1440, "h": 900, "title": "Request details — dark", "expand": "fill"},
+    "Components.dc.html": {"x": 1520, "y": 2040, "w": 1440, "h": 1040, "title": "Design system — both themes"}
+  },
+  "order": ["Main.dc.html", "TopologyDark.dc.html", "AttackChains.dc.html", "Monitor.dc.html", "RequestDetails.dc.html", "Components.dc.html"],
+  "notes": {
+    "title": {"x": 0, "y": -300, "text": "Venusflytrap console — design v1 (sample data, layout only)", "kind": "title1", "maxW": 2960}
+  },
+  "designSystems": []
+}

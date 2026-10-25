@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Monitor</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#2353B3}a:hover{color:#173A7D}
+</style>
+</helmet>
+<div style="width: 100%; min-height: 900px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.base}}; color: {{t.text}}; font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums">
+
+  <header style="height: 56px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; gap: 16px; padding: 0 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border-bottom: 0.5px solid {{t.hairline}}; flex-wrap: wrap">
+    <div style="display: flex; align-items: center; gap: 10px; min-width: 196px">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{{t.accent}}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 4.4 3.4 8 8 9 4.6-1 8-4.6 8-9V6l-8-3z"></path><path d="M8.5 11.5 12 8l3.5 3.5"></path><path d="M8.5 15 12 11.5 15.5 15"></path></svg>
+      <div style="display: flex; flex-direction: column; line-height: 16px">
+        <span style="font-weight: 700; font-size: 15px">Venusflytrap</span>
+        <span style="font-size: 11px; color: {{t.text2}}">Monitor</span>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 16px; margin-left: auto">
+      <span style="font-size: 12px; color: {{t.text2}}">Auto-refresh</span>
+      <div role="group" aria-label="Auto-refresh interval" style="display: inline-flex; border-radius: 8px; padding: 2px; background: {{t.sunken}}; box-shadow: {{t.insetShadow}}">
+        <button type="button" aria-pressed="true" style="height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-size: 12px; font-weight: 600; box-shadow: {{t.shadow1}}; cursor: pointer">10 s</button>
+        <button type="button" aria-pressed="false" style="height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: {{t.text2}}; font: inherit; font-size: 12px; cursor: pointer">1 min</button>
+        <button type="button" aria-pressed="false" style="height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: {{t.text2}}; font: inherit; font-size: 12px; cursor: pointer">Off</button>
+      </div>
+    </div>
+  </header>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+    <nav aria-label="Console" style="width: 72px; flex-shrink: 0; box-sizing: border-box; padding: 12px 8px; display: flex; flex-direction: column; gap: 4px; background: {{t.sunken}}">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" aria-current="{{n.current}}" style="height: 56px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; text-decoration: none; font-size: 11px; font-weight: 500; color: {{n.fg}}; background: {{n.bg}}; box-shadow: {{n.shadow}}">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{n.icon}}"></path></svg>
+          {{n.label}}
+        </a>
+      </sc-for>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 24px; display: flex; flex-direction: column; gap: 16px">
+      <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap">
+        <div style="position: relative; flex: 1 1 560px">
+          <label for="q" style="display: block; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}; margin-bottom: 4px">Query</label>
+          <div style="height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 8px; background: {{t.input}}; border: 1px solid {{t.accent}}; outline: 2px solid {{t.accent}}; outline-offset: 2px; box-shadow: {{t.insetShadow}}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{t.text2}}" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+            <span id="q" role="textbox" aria-label="Query" style="flex: 1; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; white-space: nowrap; overflow: hidden">
+              <span style="color: {{t.accent}}">verdict</span><span style="color: {{t.attention}}">:</span><span>block</span>
+              <span style="color: {{t.accent}}">construct</span><span style="color: {{t.attention}}">:</span><span>sqli.*</span>
+              <span style="color: {{t.accent}}">-path</span><span style="color: {{t.attention}}">:</span><span style="color: {{t.string}}">"/health"</span>
+              <span style="color: {{t.accent}}">src</span><span style="color: {{t.attention}}">:</span><span>203.0.1</span><span style="display: inline-block; width: 1px; height: 16px; background: {{t.text}}; vertical-align: middle"></span>
+            </span>
+            <span style="font-size: 12px; color: {{t.muted}}">231 matches</span>
+          </div>
+          <div role="listbox" aria-label="Suggestions for src" style="position: absolute; left: 330px; top: 72px; width: 300px; box-sizing: border-box; padding: 4px; border-radius: 12px; background: {{t.overlayGlass}}; box-shadow: {{t.shadow3}}; border: 0.5px solid {{t.hairline}}; z-index: 2">
+            <sc-for list="{{suggest}}" as="s" hint-placeholder-count="4">
+              <div role="option" aria-selected="{{s.sel}}" style="height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 8px; background: {{s.bg}}; box-shadow: {{s.shadow}}; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px">
+                <span><b>203.0.1</b>{{s.rest}}</span>
+                <span style="margin-left: auto; font-family: Inter, system-ui, sans-serif; color: {{t.muted}}">{{s.count}}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div>
+          <span style="display: block; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}; margin-bottom: 4px">Time range</span>
+          <button type="button" style="height: 40px; padding: 0 14px; border-radius: 8px; border: 1px solid {{t.borderStrong}}; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Last 1 hour</button>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Group by</span>
+        <sc-for list="{{groups}}" as="g" hint-placeholder-count="5">
+          <button type="button" aria-pressed="{{g.pressed}}" style="height: 28px; padding: 0 10px; border-radius: 14px; border: {{g.border}}; background: {{g.bg}}; color: {{t.text}}; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer">{{g.label}}</button>
+        </sc-for>
+        <span style="margin-left: auto; font-size: 12px; color: {{t.text2}}">Allowed requests are sampled at 1 %; counts above come from per-minute rollups.</span>
+      </div>
+
+      <div style="overflow-x: auto; border-radius: 12px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border: 0.5px solid {{t.hairline}}">
+        <table aria-label="Matching requests" style="width: 100%; min-width: 1100px; border-collapse: collapse; font-size: 13px; line-height: 18px">
+          <thead>
+            <tr style="height: 40px; text-align: left; border-bottom: 1px solid {{t.borderSubtle}}">
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Time</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Source</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Request</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Verdict</th>
+              <th scope="col" style="padding: 0 12px; text-align: right; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Score</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Construct · field</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Decided by</th>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{rows}}" as="r" hint-placeholder-count="8">
+              <tr style="height: 44px; border-bottom: 1px solid {{t.borderSubtle}}; background: {{r.rowBg}}; box-shadow: {{r.rowShadow}}">
+                <td style="padding: 0 12px; white-space: nowrap; color: {{t.text2}}">{{r.time}}</td>
+                <td style="padding: 0 12px; white-space: nowrap; font-family: 'JetBrains Mono', Consolas, monospace"><a href="AttackChains.dc.html">{{r.src}}</a></td>
+                <td style="padding: 0 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{r.req}}</td>
+                <td style="padding: 0 12px">
+                  <span style="display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 4px; background: {{r.vbg}}; color: {{r.vfg}}; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="{{r.vglyph}}"></path></svg>{{r.verdict}}
+                  </span>
+                </td>
+                <td style="padding: 0 12px; text-align: right; font-weight: 600">{{r.score}}</td>
+                <td style="padding: 0 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; white-space: nowrap">{{r.construct}}</td>
+                <td style="padding: 0 12px; white-space: nowrap"><a href="RequestDetails.dc.html" style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px">{{r.decided}}</a></td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; font-size: 12px; color: {{t.text2}}">
+          <span>Showing 8 of 231 · newest first</span>
+          <button type="button" style="height: 32px; padding: 0 12px; border-radius: 16px; border: 1px solid {{t.borderStrong}}; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-size: 13px; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Load older</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  tokens(dark) {
+    if (dark) return {
+      base: '#17191D', sunken: '#101215', raised: '#252B36', raisedGlass: 'rgb(37 43 54 / .88)', overlayGlass: 'rgb(45 52 66 / .94)', input: '#101215',
+      text: '#ECEEF2', text2: '#B9BFCA', muted: '#9AA2B0', hairline: 'rgb(255 255 255 / .08)', borderSubtle: 'rgb(255 255 255 / .14)', borderStrong: '#77808F',
+      accent: '#76A6FF', accentSoft: '#1E2C47', attention: '#E6BD68', string: '#FFAA6B', rowBlocked: '#33201F', blockLine: '#FF6F65',
+      shadow1: '0 1px 2px rgb(0 0 0/.40), 0 2px 8px rgb(0 0 0/.28), inset 0 1px 0 rgb(255 255 255/.06), inset 0 -1px 0 rgb(0 0 0/.30)',
+      shadow2: '0 2px 4px rgb(0 0 0/.40), 0 10px 24px rgb(0 0 0/.40), inset 0 1px 0 rgb(255 255 255/.08), inset 0 -1px 0 rgb(0 0 0/.35)',
+      shadow3: '0 6px 12px rgb(0 0 0/.45), 0 28px 56px rgb(0 0 0/.55), inset 0 1px 0 rgb(255 255 255/.10), inset 0 -1px 0 rgb(0 0 0/.40)',
+      insetShadow: 'inset 0 2px 5px rgb(0 0 0/.55), inset 0 -1px 0 rgb(255 255 255/.05)',
+      block: ['#FF928A', '#4A1F1C'], challenge: ['#F2C46B', '#3B2E10'], monitor: ['#B0A9FF', '#29275A'], allow: ['#7FD99D', '#173528']
+    };
+    return {
+      base: '#D6D1CB', sunken: '#CAC4BD', raised: '#EEEBE7', raisedGlass: 'rgb(238 235 231 / .80)', overlayGlass: 'rgb(247 245 242 / .88)', input: '#F7F5F2',
+      text: '#1E1B18', text2: '#48423C', muted: '#565049', hairline: 'rgb(30 27 24 / .12)', borderSubtle: 'rgb(30 27 24 / .20)', borderStrong: '#7A7269',
+      accent: '#2353B3', accentSoft: '#D9E3F6', attention: '#7A4F00', string: '#9A440A', rowBlocked: '#F2DEDA', blockLine: '#C0322A',
+      shadow1: '0 1px 2px rgb(60 48 36/.10), 0 2px 6px rgb(60 48 36/.08), inset 0 1px 0 rgb(255 255 255/.70), inset 0 -1px 0 rgb(60 48 36/.06)',
+      shadow2: '0 2px 4px rgb(60 48 36/.10), 0 8px 20px rgb(60 48 36/.14), inset 0 1px 0 rgb(255 255 255/.75), inset 0 -1px 0 rgb(60 48 36/.08)',
+      shadow3: '0 4px 8px rgb(60 48 36/.12), 0 24px 48px rgb(60 48 36/.22), inset 0 1px 0 rgb(255 255 255/.80), inset 0 -1px 0 rgb(60 48 36/.10)',
+      insetShadow: 'inset 0 2px 4px rgb(60 48 36/.16), inset 0 -1px 0 rgb(255 255 255/.60)',
+      block: ['#A3221A', '#F6D5D1'], challenge: ['#8A4F00', '#F5E2BF'], monitor: ['#4337A3', '#E1DDF6'], allow: ['#1D6B3A', '#D3EAD9']
+    };
+  }
+  renderVals() {
+    const dark = (this.props.theme ?? 'light') === 'dark';
+    const t = this.tokens(dark);
+    const navItems = [
+      ['Dash', '#', 'M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z'],
+      ['Map', 'Main.dc.html', 'M12 2 3 7l9 5 9-5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5'],
+      ['Chains', 'AttackChains.dc.html', 'M4 6h16M4 12h16M4 18h16M9 3v18'],
+      ['Monitor', '#', 'M3 12h4l3-8 4 16 3-8h4'],
+      ['Traps', '#', 'M12 3c-3 4-7 5-7 10a7 7 0 0 0 14 0c0-5-4-6-7-10z'],
+      ['Settings', '#', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+      ['Keys', '#', 'M15 7a4 4 0 1 1-3.9 5H3v3h3v3h3v-3h2.1A4 4 0 0 1 15 7z']
+    ];
+    const nav = navItems.map(([label, href, icon], i) => ({
+      label, href, icon, current: i === 3 ? 'page' : 'false',
+      fg: i === 3 ? t.text : t.text2, bg: i === 3 ? t.accentSoft : 'transparent', shadow: i === 3 ? 'inset 2px 0 0 ' + t.accent : 'none'
+    }));
+    const suggest = [
+      { rest: '13.9', count: '14', sel: 'true', bg: t.accentSoft, shadow: 'inset 2px 0 0 ' + t.accent },
+      { rest: '13.10', count: '9', sel: 'false', bg: 'transparent', shadow: 'none' },
+      { rest: '13.44', count: '3', sel: 'false', bg: 'transparent', shadow: 'none' },
+      { rest: '13.0/24', count: '26', sel: 'false', bg: 'transparent', shadow: 'none' }
+    ];
+    const groups = ['None', 'src', 'path', 'construct', 'stage', 'verdict'].map((g, i) => ({ label: g, pressed: i === 0 ? 'true' : 'false', bg: i === 0 ? t.accentSoft : t.raised, border: i === 0 ? '1.5px solid ' + t.accent : '1px solid ' + t.borderStrong }));
+    const glyph = {
+      Block: 'M8 2h8l6 6v8l-6 6H8l-6-6V8zM9 9l6 6M15 9l-6 6',
+      Challenge: 'M12 3 2 21h20L12 3zM12 10v5M12 18h.01'
+    };
+    const r = (time, src, req, verdict, score, construct, decided) => {
+      const key = verdict.toLowerCase();
+      return { time, src, req, verdict, score, construct, decided, vfg: t[key][0], vbg: t[key][1], vglyph: glyph[verdict],
+        rowBg: verdict === 'Block' ? t.rowBlocked : 'transparent', rowShadow: verdict === 'Block' ? 'inset 3px 0 0 ' + t.blockLine : 'none' };
+    };
+    const rows = [
+      r('10:37:01.208', '203.0.113.10', 'GET /api/items?id=-1 union select username,password from users', 'Block', 100, 'sqli.union-select · query:id', 'chain.ban_policy'),
+      r('10:35:44.019', '203.0.113.9', 'GET /api/items?id=1 or 1=1--', 'Block', 96, 'sqli.boolean-tautology · query:id', 'scoring.block_at'),
+      r('10:35:31.512', '203.0.113.9', "POST /login  user=admin'--", 'Block', 95, 'sqli.quote-breakout · form:user', 'scoring.block_at'),
+      r('10:35:12.877', '203.0.113.9', 'GET /api/items?id=1 union select 1,2,3-- -', 'Block', 100, 'sqli.union-select · query:id', 'scoring.block_at'),
+      r('10:34:02.330', '203.0.113.44', 'GET /search?q=1 and sleep(5)', 'Challenge', 74, 'sqli.sleep · query:q', 'scoring.challenge_at'),
+      r('10:33:15.090', '203.0.113.21', 'GET /api/report?sort=name;select 1', 'Block', 92, 'sqli.stacked-query · query:sort', 'scoring.block_at'),
+      r('10:31:48.402', '203.0.113.9', 'GET /api/items?id=2 order by 9', 'Challenge', 71, 'sqli.order-by · query:id', 'scoring.challenge_at'),
+      r('10:29:05.666', '203.0.113.60', 'GET /api/items?id=%55NION%20SELECT%201', 'Block', 95, 'sqli.union-select · query:id', 'scoring.block_at')
+    ];
+    return { t, nav, suggest, groups, rows };
+  }
+}
+</script>
+</body>
+</html>
