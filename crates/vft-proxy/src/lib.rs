@@ -99,7 +99,8 @@ where
 pub struct ProxyState {
     pub pipeline: pipeline::Pipeline,
     pub upstream: String,
-    pub audit: audit::AuditLog,
+    pub audit: audit::AuditSink,
+    request_seq: std::sync::atomic::AtomicU64,
     /// If true, Block/Challenge are stopped; otherwise everything is forwarded.
     pub enforce: bool,
     client: Client<HttpConnector, Full<Bytes>>,
@@ -108,7 +109,7 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
-    pub fn new(shield: Shield, upstream: String, audit_path: Option<String>, enforce: bool) -> Self {
+    pub fn new(shield: Shield, upstream: String, audit: audit::AuditSink, enforce: bool) -> Self {
         let limits = shield.config().limits.clone();
         let decision_headers = shield.config().proxy.decision_headers;
         let mut conn = HttpConnector::new();
@@ -117,7 +118,8 @@ impl ProxyState {
         ProxyState {
             pipeline: pipeline::Pipeline::new(Arc::new(shield)),
             upstream,
-            audit: audit::AuditLog::new(audit_path),
+            audit,
+            request_seq: std::sync::atomic::AtomicU64::new(0),
             enforce,
             client,
             limits,
@@ -203,7 +205,8 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     };
 
     let decision = state.pipeline.decide(&parts, &collected, Some(peer.ip()), now_ms());
-    state.audit.record(&decision.request, &decision.judgment);
+    let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.audit.record(&decision.request, &decision.judgment, now_ms(), id);
     let j = decision.judgment;
 
     if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {
@@ -310,7 +313,7 @@ mod tests {
         ProxyState::new(
             Shield::new(Config::default()),
             "http://127.0.0.1:1".into(),
-            None,
+            audit::AuditSink::off(),
             true,
         )
     }
