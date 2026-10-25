@@ -37,3 +37,7 @@ Input notes: `venusflytrap eval` cannot read 2 malicious files on this host (acc
 recall is over the malicious files it scores (656 on the full corpus; per-half counts from the JSON
 `read_failures`: dev 0 read failures, 329 scored; held-out 2 read failures, 327 scored). The libinjection
 and regex baselines read the Python-parsed JSONL, which still holds those 2 requests (an input-fairness gap SP1 also records).
+
+## M1 — registry refactor
+
+Decision diffs vs M0 build: library 0, serve 0, seeds 0, mutants 0 (33,877 + 33,877 + 22 + 660 requests).

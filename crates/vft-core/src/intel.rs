@@ -5,7 +5,6 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-use crate::judgment::{Family, Pattern};
 use crate::lattice::{Evidence, FourValued};
 
 /// Default scanner/recon user-agent substrings (lowercased).
@@ -81,7 +80,7 @@ impl Intel {
                 return Evidence::new(
                     value,
                     weight,
-                    vec![Pattern::new(Family::Intel, "scanner-ua")],
+                    vec![crate::graph::sinks::INTEL_SCANNER_UA.pattern()],
                     format!("scanner user-agent fingerprint: {sig}"),
                 );
             }

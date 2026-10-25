@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::graph;
-use crate::judgment::{Family, Pattern};
+use crate::graph::sinks::{self, ConstructInfo};
 use crate::lattice::{Evidence, FourValued};
 use crate::normalize::Normalized;
 use crate::request::{Field, Location, Request};
@@ -59,9 +59,9 @@ impl FieldDetector for SignatureDetector {
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
         let t = &ctx.norm.text;
         let mut hits = Vec::new();
-        for (needle, fam, name) in SIGNATURES {
+        for &(needle, c) in SIGNATURES {
             if t.contains(needle) {
-                hits.push(Pattern::new(*fam, *name));
+                hits.push(c.pattern());
             }
         }
         if hits.is_empty() {
@@ -72,14 +72,14 @@ impl FieldDetector for SignatureDetector {
     }
 }
 
-const SIGNATURES: &[(&str, Family, &str)] = &[
-    ("union all select", Family::Sqli, "union-all-select"),
-    ("' or '1'='1", Family::Sqli, "classic-or"),
-    ("information_schema", Family::Sqli, "schema-enum"),
-    ("<script>alert", Family::Xss, "alert-script"),
-    ("onerror=", Family::Xss, "onerror"),
-    ("/etc/passwd", Family::PathTraversal, "etc-passwd"),
-    ("$(cat ", Family::CommandInjection, "cat-subst"),
+static SIGNATURES: &[(&str, &ConstructInfo)] = &[
+    ("union all select", &sinks::SIG_UNION_ALL_SELECT),
+    ("' or '1'='1", &sinks::SIG_CLASSIC_OR),
+    ("information_schema", &sinks::SIG_SCHEMA_ENUM),
+    ("<script>alert", &sinks::SIG_ALERT_SCRIPT),
+    ("onerror=", &sinks::SIG_ONERROR),
+    ("/etc/passwd", &sinks::SIG_ETC_PASSWD),
+    ("$(cat ", &sinks::SIG_CAT_SUBST),
 ];
 
 /// API-safety: numeric/identifier fields carrying injection structure, or
@@ -97,7 +97,7 @@ impl FieldDetector for ApiSafetyDetector {
             return Evidence::new(
                 FourValued::Dangerous,
                 0.7,
-                vec![Pattern::new(Family::Sqli, "type-violation")],
+                vec![sinks::API_TYPE_VIOLATION.pattern()],
                 "numeric field carries injection structure",
             );
         }
@@ -197,7 +197,7 @@ pub fn intent_evidence(req: &Request, cfg: &Config) -> Evidence {
         return Evidence::new(
             value,
             weight,
-            vec![Pattern::new(Family::Recon, "sensitive-path-probe")],
+            vec![sinks::RECON_SENSITIVE_PATH.pattern()],
             format!("recon probe of sensitive path {path}"),
         );
     }

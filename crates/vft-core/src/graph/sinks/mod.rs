@@ -6,6 +6,11 @@
 //! be emitted and a disabled construct is dropped at the source. Ids are never
 //! reused; a rename keeps the old id as an alias entry.
 
+pub mod path;
+pub mod shell;
+pub mod sql;
+pub mod xss;
+
 use std::collections::HashSet;
 
 use super::tokenize::{Token, TokenKind};
@@ -59,6 +64,27 @@ pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-
 pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.header-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a header carried bytes that are not UTF-8" };
 
 static REGISTRY: &[&ConstructInfo] = &[
+    &sql::UNION_SELECT,
+    &sql::BOOLEAN_TAUTOLOGY,
+    &sql::QUOTE_BREAKOUT,
+    &sql::STACKED_QUERY,
+    &sql::SQL_KEYWORD,
+    &sql::FN_SLEEP,
+    &sql::FN_BENCHMARK,
+    &sql::FN_UPDATEXML,
+    &sql::FN_EXTRACTVALUE,
+    &sql::FN_LOAD_FILE,
+    &sql::FN_PG_SLEEP,
+    &xss::SCRIPT_TAG,
+    &xss::EVENT_HANDLER,
+    &xss::DANGEROUS_PROTO,
+    &xss::TAG_WITH_HANDLER,
+    &xss::HTML_TAG,
+    &shell::CMD_SUBSTITUTION,
+    &shell::CHAINED_COMMAND,
+    &shell::SHELL_META,
+    &path::DIRECTORY_TRAVERSAL,
+    &path::DOTDOT_SEGMENT,
     &SIG_UNION_ALL_SELECT,
     &SIG_CLASSIC_OR,
     &SIG_SCHEMA_ENUM,
@@ -143,12 +169,10 @@ pub struct SinkCtx<'a> {
     pub text: &'a str,
 }
 
-#[allow(dead_code)]
 pub(crate) fn has_kw(tokens: &[Token], kw: &str) -> bool {
     tokens.iter().any(|t| t.kind == TokenKind::SqlKeyword && t.text == kw)
 }
 
-#[allow(dead_code)]
 pub(crate) fn has_quote(tokens: &[Token]) -> bool {
     tokens.iter().any(|t| t.kind == TokenKind::Quote)
 }

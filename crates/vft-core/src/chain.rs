@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ChainConfig;
+use crate::graph::sinks::{self, ConstructInfo};
 use crate::judgment::{Family, Judgment, Stage, Verdict};
 use crate::lattice::FourValued;
 
@@ -42,7 +43,14 @@ impl Event {
 }
 
 /// Constructs whose Dangerous presence in a blocked request means data exfiltration.
-const EXFIL_CONSTRUCTS: &[&str] = &["union-select", "union-all-select", "schema-enum", "load_file"];
+// `sqli.fn-load-file` is only ever latent, so it can never satisfy the
+// Dangerous check below; kept as found (renaming must not change behavior).
+static EXFIL_CONSTRUCTS: &[&ConstructInfo] = &[
+    &sinks::sql::UNION_SELECT,
+    &sinks::SIG_UNION_ALL_SELECT,
+    &sinks::SIG_SCHEMA_ENUM,
+    &sinks::sql::FN_LOAD_FILE,
+];
 const ATTACK_FAMILIES: &[Family] =
     &[Family::Sqli, Family::Xss, Family::CommandInjection, Family::PathTraversal];
 
@@ -60,7 +68,7 @@ pub fn event_for(j: &Judgment) -> Event {
     if j.verdict.rank() >= Verdict::Challenge.rank() {
         let exfil = j.contributions.iter().any(|c| {
             c.value == FourValued::Dangerous
-                && c.construct.as_deref().is_some_and(|n| EXFIL_CONSTRUCTS.contains(&n))
+                && c.construct.as_deref().is_some_and(|n| EXFIL_CONSTRUCTS.iter().any(|c| c.id == n))
         });
         if exfil {
             return Event::Exfiltration;
@@ -289,7 +297,7 @@ mod tests {
         Contribution {
             engine: "intel".into(),
             field: None,
-            construct: Some("scanner-ua".into()),
+            construct: Some("intel.scanner-ua".into()),
             family: Some(Family::Intel),
             value: FourValued::Suspicious,
             weight: 0.8,

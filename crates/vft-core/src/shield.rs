@@ -10,7 +10,7 @@ use crate::detect::{
 use crate::graph;
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
-use crate::judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Verdict};
+use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
 use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{normalize, Options};
 use crate::request::Request;
@@ -111,7 +111,7 @@ impl Shield {
                 Evidence::new(
                     FourValued::Suspicious,
                     0.6,
-                    vec![Pattern::new(Family::Limit, "limit.header-non-utf8")],
+                    vec![crate::graph::sinks::LIMIT_HEADER_NON_UTF8.pattern()],
                     format!("non-UTF-8 bytes in header(s): {}", req.non_utf8_headers.join(", ")),
                 ),
             );
@@ -397,7 +397,7 @@ mod tests {
         let c = j
             .contributions
             .iter()
-            .find(|c| c.construct.as_deref() == Some("union-select"))
+            .find(|c| c.construct.as_deref() == Some("sqli.union-select"))
             .expect("union-select contribution");
         assert_eq!(c.field, Some(FieldRef { loc: Location::Query, name: "id".into() }));
         assert_eq!(c.family, Some(Family::Sqli));
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn browser_is_never_staged_or_banned() {
-        // C1 regression: latent shell-meta from ';' in browser headers must not
+        // C1 regression: latent cmd.shell-meta from ';' in browser headers must not
         // advance the chain.
         let s = shield();
         let mut chain = ChainTracker::new(&s.config().chain);

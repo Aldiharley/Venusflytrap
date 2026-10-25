@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn duplicate_construct_on_same_field_counts_once() {
         let cfg = ScoringConfig::default();
-        let p = vec![crate::judgment::Pattern::new(crate::judgment::Family::CommandInjection, "shell-meta")];
+        let p = vec![crate::judgment::Pattern::new(crate::judgment::Family::CommandInjection, "cmd.shell-meta")];
         let one = vec![scf(1.0, "a", Evidence::new(FourValued::Suspicious, 0.5, p.clone(), "w"))];
         let two = vec![
             scf(1.0, "a", Evidence::new(FourValued::Suspicious, 0.5, p.clone(), "w")),
