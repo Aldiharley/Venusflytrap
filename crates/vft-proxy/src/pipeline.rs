@@ -76,6 +76,14 @@ fn canonical(ip: IpAddr) -> IpAddr {
     SourceKey::new(ip, 128).ip()
 }
 
+/// One `X-Forwarded-For` hop: a bare IP, `a.b.c.d:port` or `[v6]:port`.
+fn parse_hop(hop: &str) -> Option<IpAddr> {
+    let hop = hop.trim();
+    hop.parse::<IpAddr>()
+        .ok()
+        .or_else(|| hop.parse::<std::net::SocketAddr>().ok().map(|s| s.ip()))
+}
+
 impl Pipeline {
     pub fn new(shield: Arc<Shield>) -> Self {
         let cfg = shield.config();
@@ -99,21 +107,25 @@ impl Pipeline {
     }
 
     /// The client address: the peer, unless the peer is a trusted proxy, in
-    /// which case the right-most untrusted `X-Forwarded-For` hop.
+    /// which case the right-most untrusted `X-Forwarded-For` hop. The walk goes
+    /// right to left and discards nothing: a trusted hop continues it, and any
+    /// hop that is not UTF-8 or not an IP (bare, `a.b.c.d:port` or `[v6]:port`)
+    /// ends it by returning the peer, so a forged hop to its left is never used.
     pub fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
         if !self.trusted.contains(&canonical(peer)) {
             return peer;
         }
-        let mut hops: Vec<IpAddr> = headers
-            .get_all("x-forwarded-for")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(','))
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        while let Some(ip) = hops.pop() {
-            if !self.trusted.contains(&canonical(ip)) {
-                return ip;
+        for value in headers.get_all("x-forwarded-for").iter().rev() {
+            let Ok(text) = value.to_str() else {
+                return peer;
+            };
+            for hop in text.rsplit(',') {
+                let Some(ip) = parse_hop(hop) else {
+                    return peer;
+                };
+                if !self.trusted.contains(&canonical(ip)) {
+                    return ip;
+                }
             }
         }
         peer
@@ -221,6 +233,76 @@ mod tests {
         assert_eq!(p.client_ip("192.0.2.5".parse().unwrap(), &h), "192.0.2.5".parse::<IpAddr>().unwrap());
     }
 
+    fn trusting_10_0_0_1() -> Pipeline {
+        let mut cfg = Config::default();
+        cfg.proxy.trusted_proxies = vec!["10.0.0.1".into()];
+        Pipeline::new(Arc::new(Shield::new(cfg)))
+    }
+
+    fn xff(v: &'static str) -> http::HeaderMap {
+        let mut h = http::HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_static(v));
+        h
+    }
+
+    #[test]
+    fn client_ip_accepts_ports_and_fails_closed_on_unparseable_hops() {
+        let p = trusting_10_0_0_1();
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        // (a) a port on the right-most hop is parsed, not dropped.
+        assert_eq!(
+            p.client_ip(peer, &xff("198.51.100.1, 203.0.113.5:4711")),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+        // (b) an unparseable right-most hop must not expose the forged hop to its left.
+        assert_eq!(p.client_ip(peer, &xff("198.51.100.1, unknown")), peer);
+        // (c) bracketed IPv6 with a port.
+        assert_eq!(
+            p.client_ip(peer, &xff("198.51.100.1, [2001:db8::7]:443")),
+            "2001:db8::7".parse::<IpAddr>().unwrap()
+        );
+        // A trusted hop (with a port) continues the walk past it.
+        assert_eq!(
+            p.client_ip(peer, &xff("198.51.100.1, 10.0.0.1:80")),
+            "198.51.100.1".parse::<IpAddr>().unwrap()
+        );
+        // An empty hop (trailing comma) is unparseable and fails closed.
+        assert_eq!(p.client_ip(peer, &xff("198.51.100.1,")), peer);
+    }
+
+    #[test]
+    fn client_ip_fails_closed_on_non_utf8_and_walks_header_lines_right_to_left() {
+        let p = trusting_10_0_0_1();
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut h = http::HeaderMap::new();
+        h.append("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        h.append("x-forwarded-for", HeaderValue::from_bytes(b"\xff\xfe").unwrap());
+        assert_eq!(p.client_ip(peer, &h), peer);
+        let mut h = http::HeaderMap::new();
+        h.append("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        h.append("x-forwarded-for", HeaderValue::from_static("203.0.113.5, 10.0.0.1"));
+        assert_eq!(p.client_ip(peer, &h), "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn ban_survives_source_churn_at_minimum_validated_capacity() {
+        let mut cfg = Config::default();
+        cfg.chain.max_sources = 640;
+        cfg.chain.ban_policy.max_bans = 640;
+        assert!(cfg.validate().is_ok());
+        let p = Pipeline::new(Arc::new(Shield::new(cfg)));
+        let attacker: IpAddr = "203.0.113.50".parse().unwrap();
+        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(attacker), 0).judgment.banned_source);
+        for i in 0..2_000u32 {
+            let ip = IpAddr::from([10, 20, (i >> 8) as u8, i as u8]);
+            let d = p.decide(&parts("/index.html", CHROME), b"", Some(ip), 1 + u64::from(i));
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "#{i}: {}", d.judgment.reason);
+        }
+        let d = p.decide(&parts("/index.html", CHROME), b"", Some(attacker), 5_000);
+        assert!(d.judgment.banned_source, "ban evicted by benign source churn");
+        assert_eq!(d.judgment.verdict, Verdict::Block);
+    }
+
     #[test]
     fn allow_listed_source_is_never_banned_even_via_mapped_ipv6() {
         // Owner decision (Task 2): allow-list uses the canonical IP and wins over bans.
@@ -274,6 +356,9 @@ mod tests {
             hs.into_iter().for_each(|h| h.join().unwrap());
             t.elapsed().as_secs_f64()
         };
+        // One discarded round of each mode first, so thread/allocator warm-up
+        // is not charged to whichever mode happens to run first.
+        let _ = (run(false), run(true));
         let (stateless, stateful) = (run(false), run(true));
         eprintln!("stateless {stateless:.3}s stateful {stateful:.3}s ratio {:.2}", stateless / stateful);
         assert!(stateless / stateful >= 0.75);

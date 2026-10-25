@@ -19,14 +19,16 @@ Mutation = 22 seeds → 660 mutants (eval/mutate.py, seed 1337).
 8 threads x 50 requests, 8 distinct source IPs per thread, release build
 (`cargo test --release -p vft-proxy --lib decide_throughput -- --ignored --nocapture`). Request: a ~64 KB query
 (4 fields of `a%3Bb%20` x 2000) with Chrome headers; the brief's 6-field query was 96 KB and exceeds the
-65,534-byte URI limit of the `http` crate, so the fixture uses 4 fields.
+65,534-byte URI limit of the `http` crate, so the fixture uses 4 fields. One discarded warm-up round of each mode
+runs before the timed pair.
 
 | Run | stateless | decide | ratio (stateless / decide) |
 |---|---|---|---|
-| 1 | 0.313 s | 0.221 s | 1.41 |
-| 2 | 0.316 s | 0.217 s | 1.46 |
-| 3 | 0.325 s | 0.213 s | 1.52 |
+| 1 | 0.193 s | 0.189 s | 1.02 |
+| 2 | 0.191 s | 0.193 s | 0.99 |
+| 3 | 0.186 s | 0.185 s | 1.00 |
 
-Acceptance is ratio >= 0.75 (decide at least 0.75x stateless throughput). It is met. A ratio above 1 does not mean the
-stateful path is faster: the test runs the stateless pass first, so it absorbs thread and allocator warm-up that the
-second pass does not pay. The meaningful reading is that the chain store adds no measurable serialisation.
+Acceptance is ratio >= 0.75 (decide at least 0.75x stateless throughput). It is met: after warm-up the stateful
+path runs at parity with the stateless one (ratio 0.99 to 1.02), i.e. the sharded chain store adds no measurable
+serialisation. (Before the warm-up was added the first measurement read 1.41 to 1.52, which was warm-up cost
+charged to the stateless pass, not a speed-up.)

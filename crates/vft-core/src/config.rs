@@ -271,8 +271,8 @@ impl Config {
         if c.window_secs == 0 {
             bad("chain.window_secs", "must be >= 1".into());
         }
-        if c.max_sources < 64 {
-            bad("chain.max_sources", format!("must be >= 64, got {}", c.max_sources));
+        if c.max_sources < 640 {
+            bad("chain.max_sources", format!("must be >= 640 (at least 10 per shard), got {}", c.max_sources));
         }
         if c.events_per_source == 0 {
             bad("chain.events_per_source", "must be >= 1".into());
@@ -293,8 +293,8 @@ impl Config {
         if b.ttl_max_secs < b.ttl_secs {
             bad("chain.ban_policy.ttl_max_secs", format!("must be >= ttl_secs ({}), got {}", b.ttl_secs, b.ttl_max_secs));
         }
-        if b.max_bans < 64 {
-            bad("chain.ban_policy.max_bans", format!("must be >= 64, got {}", b.max_bans));
+        if b.max_bans < 640 {
+            bad("chain.ban_policy.max_bans", format!("must be >= 640 (at least 10 per shard), got {}", b.max_bans));
         }
 
         for p in &self.proxy.trusted_proxies {
@@ -355,6 +355,15 @@ mod tests {
             .iter()
             .any(|i| i.key == "proxy.trusted_proxies"));
         assert!(issues("proxy:\n  trusted_proxies: [\"10.0.0.1\", \"::1\"]\n").is_empty());
+    }
+
+    #[test]
+    fn chain_capacity_minimums_leave_ten_slots_per_shard() {
+        assert!(issues("chain:\n  max_sources: 639\n").iter().any(|i| i.key == "chain.max_sources"));
+        assert!(issues("chain:\n  ban_policy:\n    max_bans: 639\n")
+            .iter()
+            .any(|i| i.key == "chain.ban_policy.max_bans"));
+        assert!(issues("chain:\n  max_sources: 640\n  ban_policy:\n    max_bans: 640\n").is_empty());
     }
 
     #[test]
