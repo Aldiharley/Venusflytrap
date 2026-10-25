@@ -80,10 +80,16 @@ impl Request {
         for (k, v) in &self.headers {
             // Skip hop-by-hop / noisy headers that are not attacker payload vectors
             // in the usual sense; keep the interesting ones.
+            let lname = k.to_ascii_lowercase();
             if matches!(
-                k.to_ascii_lowercase().as_str(),
-                "connection" | "content-length" | "accept-encoding" | "cookie"
+                lname.as_str(),
+                "connection" | "content-length" | "accept-encoding"
             ) {
+                continue;
+            }
+            // The raw Cookie header is covered by the parsed cookies below, so
+            // skip it only when they exist; otherwise inspect it as a header.
+            if lname == "cookie" && !self.cookies.is_empty() {
                 continue;
             }
             out.push(Field {

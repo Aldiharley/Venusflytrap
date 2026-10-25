@@ -335,6 +335,23 @@ mod tests {
     }
 
     #[test]
+    fn raw_cookie_header_is_inspected_when_cookies_not_parsed() {
+        // A library caller may supply only the raw Cookie header. It must not
+        // be skipped: the skip is valid only when parsed cookies cover it.
+        let mut req = Request::get("/x");
+        req.headers
+            .push(("Cookie".into(), "id=1 union select password from users".into()));
+        assert!(req.cookies.is_empty());
+        let j = shield().inspect(&req);
+        assert!(
+            matches!(j.verdict, Verdict::Block | Verdict::Challenge),
+            "{:?} {}",
+            j.verdict,
+            j.score
+        );
+    }
+
+    #[test]
     fn clean_header_does_not_damp_attack() {
         // H4: an unrelated clean field must not pull a Block down to Challenge.
         let mut req = Request::get("/items");
