@@ -5,7 +5,7 @@ bench_http example (keyed by row). Latency and construct names are ignored;
 everything that decides the outcome is compared.
 
 Usage: py -I -X utf8 eval/compare_runs.py <a.csv> <b.csv>
-Exit status: 0 identical decisions, 1 differences.
+Exit status: 0 identical decisions, 1 differences, 2 invalid input.
 """
 import csv
 import sys
@@ -15,12 +15,30 @@ BENCH_COLS = ("label", "pred", "score")
 
 
 def load(path):
-    """Returns (kind, {key: row_dict}) with kind 'eval' or 'bench'."""
+    """Returns (kind, {key: row_dict}) with kind 'eval' or 'bench'.
+
+    The format is taken from the header. Raises ValueError for an unrecognized
+    or incomplete header, or a file with no data rows.
+    """
     with open(path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    if rows and "rel" in rows[0]:
-        return "eval", {r["rel"]: r for r in rows}
-    return "bench", {str(i): r for i, r in enumerate(rows)}
+        reader = csv.DictReader(f)
+        fields = reader.fieldnames or []
+        if "rel" in fields:
+            kind, required = "eval", ("rel",) + EVAL_COLS
+        elif all(c in fields for c in BENCH_COLS):
+            kind, required = "bench", BENCH_COLS
+        else:
+            raise ValueError(f"{path}: unrecognized header {fields!r} "
+                             f"(expected eval 'rel,...' or bench 'label,pred,score,...')")
+        missing = [c for c in required if c not in fields]
+        if missing:
+            raise ValueError(f"{path}: {kind} header is missing columns {missing}")
+        rows = list(reader)
+    if not rows:
+        raise ValueError(f"{path}: no data rows")
+    if kind == "eval":
+        return kind, {r["rel"]: r for r in rows}
+    return kind, {str(i): r for i, r in enumerate(rows)}
 
 
 def is_attack(kind, row):
@@ -40,12 +58,13 @@ def metrics(kind, rows):
 
 
 def compare(a, b):
+    """Raises ValueError on a format mismatch or differing row sets."""
     (ka, ra), (kb, rb) = a, b
     if ka != kb:
-        sys.exit(f"cannot compare a {ka} CSV with a {kb} CSV")
+        raise ValueError(f"cannot compare a {ka} CSV with a {kb} CSV")
     cols = EVAL_COLS if ka == "eval" else BENCH_COLS
     if ra.keys() != rb.keys():
-        sys.exit(f"row sets differ: {len(ra.keys() - rb.keys())} only in a, {len(rb.keys() - ra.keys())} only in b")
+        raise ValueError(f"row sets differ: {len(ra.keys() - rb.keys())} only in a, {len(rb.keys() - ra.keys())} only in b")
     diffs = []
     for key in sorted(ra):
         x, y = ra[key], rb[key]
@@ -57,8 +76,13 @@ def compare(a, b):
 
 def main(argv):
     if len(argv) != 2:
-        sys.exit(__doc__)
-    diffs, ma, mb = compare(load(argv[0]), load(argv[1]))
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    try:
+        diffs, ma, mb = compare(load(argv[0]), load(argv[1]))
+    except (OSError, ValueError) as e:
+        print(f"compare_runs: {e}", file=sys.stderr)
+        sys.exit(2)
     for name, m in (("a", ma), ("b", mb)):
         print(f"{name}: tp={m['tp']} fp={m['fp']} tn={m['tn']} fn={m['fn']} "
               f"recall={m['recall']:.4f} fp_rate={m['fp_rate']:.4f}")

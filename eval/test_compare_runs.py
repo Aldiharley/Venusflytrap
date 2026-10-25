@@ -1,5 +1,7 @@
 """Tests for eval/compare_runs.py. Run: py -I -X utf8 eval/test_compare_runs.py"""
+import contextlib
 import importlib.util
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,6 +49,36 @@ class CompareTests(unittest.TestCase):
             a = write(tmp, "a.csv", EVAL_HDR + "x.black,1,Challenge,Challenge,75,false,\n")
             _, ma, _ = cr.compare(cr.load(a), cr.load(a))
             self.assertEqual(ma["tp"], 1)
+
+    def test_header_only_runs_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write(tmp, "a.csv", EVAL_HDR)
+            b = write(tmp, "b.csv", EVAL_HDR)
+            with self.assertRaises(ValueError):
+                cr.compare(cr.load(a), cr.load(b))
+
+    def test_zero_byte_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write(tmp, "a.csv", "")
+            with self.assertRaises(ValueError):
+                cr.load(a)
+
+    def test_unknown_header_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write(tmp, "a.csv", "foo,bar\n1,2\n")
+            with self.assertRaises(ValueError):
+                cr.load(a)
+
+    def test_cli_rejects_header_only_runs_with_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write(tmp, "a.csv", EVAL_HDR)
+            b = write(tmp, "b.csv", EVAL_HDR)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as cm:
+                    cr.main([a, b])
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("no data rows", err.getvalue())
 
 
 if __name__ == "__main__":
