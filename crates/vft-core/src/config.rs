@@ -70,9 +70,14 @@ impl Default for ScoringConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChainConfig {
+    /// Events older than this no longer count toward a source's stage.
     pub window_secs: u64,
+    /// Bounded LRU of tracked sources (bans are tracked separately).
     pub max_sources: usize,
     pub events_per_source: usize,
+    /// IPv6 sources are aggregated to this prefix length.
+    pub ipv6_prefix: u8,
+    pub ban_policy: BanPolicy,
 }
 
 impl Default for ChainConfig {
@@ -81,6 +86,37 @@ impl Default for ChainConfig {
             window_secs: 3600,
             max_sources: 4096,
             events_per_source: 64,
+            ipv6_prefix: 64,
+            ban_policy: BanPolicy::default(),
+        }
+    }
+}
+
+/// When a source gets banned, and for how long.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BanPolicy {
+    pub on_honeypot: bool,
+    pub on_exfiltration_block: bool,
+    /// Ban after this many exploitation blocks within `within_secs`.
+    pub exploitation_blocks: u32,
+    pub within_secs: u64,
+    /// First ban length; doubles on each re-offence up to `ttl_max_secs`.
+    pub ttl_secs: u64,
+    pub ttl_max_secs: u64,
+    pub max_bans: usize,
+}
+
+impl Default for BanPolicy {
+    fn default() -> Self {
+        BanPolicy {
+            on_honeypot: true,
+            on_exfiltration_block: true,
+            exploitation_blocks: 3,
+            within_secs: 600,
+            ttl_secs: 3600,
+            ttl_max_secs: 86_400,
+            max_bans: 100_000,
         }
     }
 }

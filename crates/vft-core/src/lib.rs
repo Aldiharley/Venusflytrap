@@ -30,8 +30,8 @@ pub mod request;
 pub mod score;
 pub mod shield;
 
-pub use chain::{ChainTracker, Event};
-pub use config::Config;
+pub use chain::{event_for, BanCause, BanRecord, ChainOutcome, ChainTracker, Event, SourceKey};
+pub use config::{BanPolicy, Config};
 pub use detect::{AiOracle, HeuristicOracle};
 pub use judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Stage, Verdict};
 pub use lattice::FourValued;

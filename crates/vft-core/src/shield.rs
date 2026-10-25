@@ -1,9 +1,7 @@
 //! FR9 — The orchestrator. Wires normalize → graph/taint → detectors → lattice
 //! → score, plus honeypot, intel, and (optionally) the chain tracker.
 
-use std::time::Instant;
-
-use crate::chain::{ChainTracker, Event};
+use crate::chain::{event_for, BanRecord, ChainOutcome, ChainTracker, SourceKey};
 use crate::config::Config;
 use crate::detect::{
     intent_evidence, AiDetector, AiOracle, ApiSafetyDetector, FieldCtx, FieldDetector,
@@ -12,7 +10,7 @@ use crate::detect::{
 use crate::graph;
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
-use crate::judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Verdict};
+use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
 use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{normalize, Options};
 use crate::request::Request;
@@ -55,17 +53,12 @@ impl Shield {
         &self.cfg
     }
 
-    /// Stateless inspection: no chain memory.
+    pub fn intel(&self) -> &Intel {
+        &self.intel
+    }
+
+    /// Pure, stateless inspection: no chain memory, no clock.
     pub fn inspect(&self, req: &Request) -> Judgment {
-        self.inspect_inner(req, None)
-    }
-
-    /// Stateful inspection: feeds the chain tracker and may escalate/ban.
-    pub fn inspect_stateful(&self, req: &Request, chain: &mut ChainTracker) -> Judgment {
-        self.inspect_inner(req, Some(chain))
-    }
-
-    fn inspect_inner(&self, req: &Request, chain: Option<&mut ChainTracker>) -> Judgment {
         // Intel allow-list short-circuit (still inspect, but never hard-block on
         // intel; allow-list only suppresses the intel deny pin).
         let denied = req
@@ -147,35 +140,8 @@ impl Shield {
             rec.record("honeypot", 1.0, Some(FieldRef::path()), e);
         }
 
-        // Chain inference (stateful only).
-        let mut chain_stage = None;
-        let mut banned_source = false;
-        let mut extra = 0u8;
-        if let (Some(chain), Some(ip)) = (chain, req.src_ip) {
-            let families: Vec<Family> = rec.matched.iter().map(|p| p.family).collect();
-            let honeypot = families.contains(&Family::Honeypot);
-            let event = classify_event(&rec.matched, honeypot);
-            let (stage, ban) = chain.observe(ip, event, Instant::now());
-            chain_stage = stage;
-            banned_source = ban || chain.is_banned(&ip);
-            if banned_source {
-                hard_block = true;
-            }
-            if stage.is_some() {
-                extra = self.cfg.scoring.chain_stage_bonus;
-            }
-        } else if let Some(ip) = req.src_ip {
-            // stateless: still reflect prior ban via intel deny only
-            let _ = ip;
-        }
-
-        let (score, mut verdict, conflict) =
-            arbitrate(&rec.scored, &self.cfg.scoring, hard_block, extra);
-        if banned_source {
-            verdict = Verdict::Block;
-        }
-
-        let reason = build_reason(&rec.matched, conflict, banned_source, hard_block);
+        let (score, verdict, conflict) = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
+        let reason = build_reason(&rec.matched, conflict, false, hard_block);
 
         Judgment {
             verdict,
@@ -183,37 +149,75 @@ impl Shield {
             engines: rec.engines,
             matched: rec.matched,
             contributions: rec.contributions,
-            chain_stage,
+            chain_stage: None,
             normalized_layers: max_layers,
-            banned_source,
+            banned_source: false,
             reason,
         }
     }
-}
 
-fn classify_event(matched: &[Pattern], honeypot: bool) -> Event {
-    let families: Vec<Family> = matched.iter().map(|p| p.family).collect();
-    // Exfiltration refinement from pattern names.
-    let exfil = matched.iter().any(|p| {
-        matches!(p.name.as_str(), "union-select" | "union-all-select")
-            || p.name == "load_file"
-            || p.name == "schema-enum"
-    });
-    if honeypot {
-        Event::Honeypot
-    } else if exfil {
-        Event::Exfiltration
-    } else if families
-        .iter()
-        .any(|f| matches!(f, Family::Sqli | Family::Xss | Family::CommandInjection | Family::PathTraversal))
-    {
-        Event::Exploitation
-    } else if families.contains(&Family::Recon) {
-        Event::Recon
-    } else if families.contains(&Family::Intel) {
-        Event::Enumeration
-    } else {
-        Event::Benign
+    /// Apply a chain outcome to a judgment. Never lowers the verdict.
+    pub fn finalize(&self, mut j: Judgment, o: &ChainOutcome) -> Judgment {
+        j.chain_stage = o.stage_after;
+        if o.advanced && o.stage_after.is_some() {
+            let bumped = j.score.saturating_add(self.cfg.scoring.chain_stage_bonus).min(100);
+            let v = crate::score::band(bumped, &self.cfg.scoring);
+            if v.rank() > j.verdict.rank() {
+                j.verdict = v;
+            }
+            j.score = j.score.max(bumped);
+        }
+        if let Some(b) = o.new_ban {
+            j.banned_source = true;
+            j.verdict = Verdict::Block;
+            j.score = 100;
+            j.reason = format!(
+                "{} (source banned: {:?}, {} s)",
+                j.reason,
+                b.cause,
+                (b.until_ms - b.since_ms) / 1000
+            );
+        }
+        j
+    }
+
+    /// The judgment for a request from an actively banned source (no inspection).
+    pub fn banned_judgment(&self, ban: &BanRecord) -> Judgment {
+        Judgment {
+            verdict: Verdict::Block,
+            score: 100,
+            engines: Vec::new(),
+            matched: Vec::new(),
+            contributions: vec![Contribution {
+                engine: "chain".into(),
+                field: None,
+                construct: Some("chain.ban".into()),
+                family: None,
+                value: FourValued::Dangerous,
+                weight: 1.0,
+                points: 0.0,
+            }],
+            chain_stage: None,
+            normalized_layers: 0,
+            banned_source: true,
+            reason: format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms),
+        }
+    }
+
+    /// Single-threaded stateful inspection: ban fast-track, pure inspect,
+    /// chain observe, finalize. The proxy runs the same steps over a sharded store.
+    pub fn inspect_stateful(&self, req: &Request, chain: &mut ChainTracker, now_ms: u64) -> Judgment {
+        let Some(ip) = req.src_ip else {
+            return self.inspect(req);
+        };
+        let key = SourceKey::new(ip, self.cfg.chain.ipv6_prefix);
+        if let Some(b) = chain.active_ban(key, now_ms) {
+            return self.banned_judgment(&b);
+        }
+        let j = self.inspect(req);
+        let may_ban = !self.intel.is_allowed(&ip);
+        let o = chain.observe(key, event_for(&j), now_ms, may_ban);
+        self.finalize(j, &o)
     }
 }
 
@@ -293,7 +297,8 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::judgment::FieldRef;
+    use crate::chain::ChainTracker;
+    use crate::judgment::{Family, FieldRef, Stage};
     use crate::lattice::FourValued;
     use crate::request::Location;
     use std::net::{IpAddr, Ipv4Addr};
@@ -346,23 +351,61 @@ mod tests {
         assert!(matches!(j.verdict, Verdict::Block | Verdict::Challenge), "v {:?} s {}", j.verdict, j.score);
     }
 
+    fn browser(path: &str, ip: IpAddr) -> Request {
+        let mut r = Request::get(path);
+        r.src_ip = Some(ip);
+        r.headers.push(("User-Agent".into(), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36".into()));
+        r.headers.push(("Accept".into(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()));
+        r.headers.push(("Accept-Language".into(), "en-US,en;q=0.9".into()));
+        r
+    }
+
     #[test]
-    fn chain_escalates_and_bans() {
+    fn browser_is_never_staged_or_banned() {
+        // C1 regression: latent shell-meta from ';' in browser headers must not
+        // advance the chain.
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1));
+        for i in 0..5 {
+            let j = s.inspect_stateful(&browser("/index.html", ip), &mut chain, i * 1000);
+            assert_eq!(j.verdict, Verdict::Allow, "request {i}: {}", j.reason);
+            assert!(!j.banned_source);
+            assert_eq!(j.chain_stage, None);
+        }
+    }
+
+    #[test]
+    fn repeated_exploitation_bans_then_fast_tracks() {
         let s = shield();
         let mut chain = ChainTracker::new(&s.config().chain);
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let mut xss = Request::get("/p");
+        xss.src_ip = Some(ip);
+        xss.query.push(("q".into(), "<script>alert(1)</script>".into()));
+        let j1 = s.inspect_stateful(&xss, &mut chain, 0);
+        assert_eq!(j1.verdict, Verdict::Block);
+        assert!(!j1.banned_source);
+        let _ = s.inspect_stateful(&xss, &mut chain, 1_000);
+        let j3 = s.inspect_stateful(&xss, &mut chain, 2_000);
+        assert!(j3.banned_source, "third exploitation block within 10 min bans");
+        let benign = browser("/index.html", ip);
+        let j4 = s.inspect_stateful(&benign, &mut chain, 3_000);
+        assert_eq!(j4.verdict, Verdict::Block);
+        assert!(j4.banned_source);
+    }
 
+    #[test]
+    fn chain_bonus_applies_only_on_advance() {
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
         let mut recon = Request::get("/.env");
         recon.src_ip = Some(ip);
-        let j1 = s.inspect_stateful(&recon, &mut chain);
-        assert!(j1.chain_stage.is_some());
-
-        let mut exploit = Request::get("/p");
-        exploit.src_ip = Some(ip);
-        exploit.query.push(("id".into(), "1 union select a,b".into()));
-        let j2 = s.inspect_stateful(&exploit, &mut chain);
-        assert!(j2.banned_source);
-        assert_eq!(j2.verdict, Verdict::Block);
+        let j1 = s.inspect_stateful(&recon, &mut chain, 0);
+        let j2 = s.inspect_stateful(&recon, &mut chain, 1_000);
+        assert_eq!(j1.chain_stage, Some(Stage::Recon));
+        assert!(j2.score < j1.score, "no bonus without an advance (M2): {} vs {}", j2.score, j1.score);
     }
 
     #[test]

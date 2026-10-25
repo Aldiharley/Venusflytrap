@@ -24,12 +24,11 @@ pub struct Scored {
 }
 
 /// Combine evidence into (score, verdict). Hard-pin inputs (deny-list, honeypot)
-/// are passed via `hard_block`. `extra` adds e.g. chain-stage bonus.
+/// are passed via `hard_block`.
 pub fn arbitrate(
     items: &[Scored],
     cfg: &ScoringConfig,
     hard_block: bool,
-    extra: u8,
 ) -> (u8, Verdict, bool) {
     if hard_block {
         return (100, Verdict::Block, true);
@@ -59,7 +58,6 @@ pub fn arbitrate(
         score *= 0.9;
     }
 
-    score = (score + extra as f32).min(100.0);
     let s = score.round() as u8;
     (s, band(s, cfg), is_conflict)
 }
@@ -93,7 +91,7 @@ mod tests {
             1.0,
             Evidence::new(FourValued::Dangerous, 0.95, vec![], "taint"),
         )];
-        let (s, v, _) = arbitrate(&ev, &cfg, false, 0);
+        let (s, v, _) = arbitrate(&ev, &cfg, false);
         assert!(s >= cfg.block_at, "score {s}");
         assert_eq!(v, Verdict::Block);
     }
@@ -102,7 +100,7 @@ mod tests {
     fn clean_allows() {
         let cfg = ScoringConfig::default();
         let ev = vec![sc(1.0, Evidence::none("ok"))];
-        let (s, v, _) = arbitrate(&ev, &cfg, false, 0);
+        let (s, v, _) = arbitrate(&ev, &cfg, false);
         assert_eq!(v, Verdict::Allow);
         assert_eq!(s, 0);
     }
@@ -110,7 +108,7 @@ mod tests {
     #[test]
     fn hard_block_pins() {
         let cfg = ScoringConfig::default();
-        let (s, v, _) = arbitrate(&[], &cfg, true, 0);
+        let (s, v, _) = arbitrate(&[], &cfg, true);
         assert_eq!(s, 100);
         assert_eq!(v, Verdict::Block);
     }
@@ -122,7 +120,7 @@ mod tests {
             0.7,
             Evidence::new(FourValued::Suspicious, 0.5, vec![], "latent"),
         )];
-        let (s, v, _) = arbitrate(&ev, &cfg, false, 0);
+        let (s, v, _) = arbitrate(&ev, &cfg, false);
         assert!(matches!(v, Verdict::Monitor | Verdict::Allow), "score {s} v {v:?}");
     }
 }
