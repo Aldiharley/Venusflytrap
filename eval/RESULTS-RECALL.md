@@ -115,3 +115,17 @@ Decision diffs: 1. `09/51/70d77d502fc1f4de9e24b71dd19e.black` went Allow to Bloc
 Gate: PASS (+1 TP is greater than +0 FP).
 
 Note: `parse_corpus.py`/`parse_qsl` and many adapters already turn `+` into a space in query values before the engine sees them, so L5 can only act on bodies, headers and cookies. A small delta is therefore expected and is reported as measured.
+
+### C2 — token windows and limit.graph-truncated
+
+Fail-closed fix: gate is delta FP = 0 on dev plus the regression tests (spec §4.4). Fields now run through overlapping 4096-token windows (64 tokens overlap, up to `shield.max_graph_windows`, default 32), and a field that runs out of windows emits Suspicious `limit.graph-truncated`. Dev half, library mode, `compare_runs.py pre-c2_dev.csv c2_dev.csv`.
+
+```
+a: tp=148 fp=142 tn=16468 fn=181 recall=0.4498 fp_rate=0.0085
+b: tp=148 fp=146 tn=16464 fn=181 recall=0.4498 fp_rate=0.0088
+delta: tp=+0 fp=+4
+```
+
+Decision diffs: 17. Four are benign requests that went Allow to Block, score 39 to 100: `c4/63/80b89d9d122c492af6b7077c9fdc.white`, `d0/3f/1709f660a201daf320d310c6c495.white`, `f9/24/0af6ebe0471f3515ad97f7d8de64.white`, `ff/f2/a21259580b9a671c4e5ef35f9519.white`. They are 27-79 KB telemetry POST bodies (`aegis.qq.com`, `insight.cloud.tencent.com`); a later window now reports `sqli.boolean-tautology` (3) or `sqli.stacked-query` (1) next to repeated `cmd.shell-meta`. The other 13 diffs are score-only shifts of 3 to 4 points (33 to 36/37, 36 to 39) with no verdict change. No `limit.graph-truncated` contribution appears in any dev row, so the new FPs come from tokens that were previously cut off at 4096 and are now inspected, not from the limit.
+
+Gate: FAIL (delta FP is +4, required 0). The regression tests pass (`comma_padding_does_not_hide_sqli`, `exhausted_windows_emit_a_limit`, `attack_after_padding_is_found_in_a_later_window`, `running_out_of_windows_is_reported`, `graph_windows_bounds`). Code kept and committed; the controller and owner decide. No tuning was done.

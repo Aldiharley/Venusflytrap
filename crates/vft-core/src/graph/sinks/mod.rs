@@ -63,6 +63,10 @@ pub static HONEYPOT_DECOY_HIT: ConstructInfo = ConstructInfo { id: "honeypot.dec
 pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-ua", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "User-Agent matches a scanner fingerprint" };
 pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.header-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a header carried bytes that are not UTF-8" };
 
+// --- Limits ---------------------------------------------------------------------
+
+pub static LIMIT_GRAPH_TRUNCATED: ConstructInfo = ConstructInfo { id: "limit.graph-truncated", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a field needed more token windows than shield.max_graph_windows" };
+
 // --- Decoders -------------------------------------------------------------------
 
 pub static DECODE_PERCENT_LOSSY: ConstructInfo = ConstructInfo { id: "decode.percent-lossy", family: None, kind: ConstructKind::Decoder, summary: "URL decoding: '+' to space, %XX byte by byte, lossy UTF-8" };
@@ -104,6 +108,7 @@ static REGISTRY: &[&ConstructInfo] = &[
     &HONEYPOT_DECOY_HIT,
     &INTEL_SCANNER_UA,
     &LIMIT_HEADER_NON_UTF8,
+    &LIMIT_GRAPH_TRUNCATED,
     &DECODE_PERCENT_LOSSY,
     &DECODE_ENTITY,
     &DECODE_ESC_HEX,

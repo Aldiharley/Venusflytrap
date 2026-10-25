@@ -87,7 +87,7 @@ impl Shield {
         let ai = AiDetector {
             oracle: self.oracle.as_ref(),
         };
-        let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: 1 };
+        let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: self.cfg.shield.max_graph_windows };
 
         for field in req.fields() {
             let n = normalize(&field.raw, &self.norm_opts);
@@ -100,6 +100,9 @@ impl Shield {
                 disabled: &self.disabled,
             };
             let fref = FieldRef::of(&field);
+            if analysis.graph_truncated {
+                self.record_graph_truncated(&mut rec, fref.clone());
+            }
             for (det, w) in &field_detectors {
                 let e = det.assess(&ctx);
                 rec.record(det.name(), *w, Some(fref.clone()), e);
@@ -128,6 +131,9 @@ impl Shield {
             let n = normalize(&req.path, &self.norm_opts);
             max_layers = max_layers.max(n.layers);
             let analysis = graph::analyze_with(&n.text, &gopts);
+            if analysis.graph_truncated {
+                self.record_graph_truncated(&mut rec, FieldRef::path());
+            }
             if !analysis.reachable.is_empty() {
                 let e = Evidence::new(
                     FourValued::Dangerous,
@@ -181,6 +187,25 @@ impl Shield {
             banned_source: false,
             reason,
         }
+    }
+
+    /// A field needed more token windows than `shield.max_graph_windows`: it was
+    /// not fully inspected, so fail closed with a Suspicious limit.
+    fn record_graph_truncated(&self, rec: &mut Recorder, field: FieldRef) {
+        if self.disabled.is(&sinks::LIMIT_GRAPH_TRUNCATED) {
+            return;
+        }
+        rec.record(
+            "limit",
+            self.cfg.scoring.weight_api,
+            Some(field),
+            Evidence::new(
+                FourValued::Suspicious,
+                0.6,
+                vec![sinks::LIMIT_GRAPH_TRUNCATED.pattern()],
+                "field exceeded shield.max_graph_windows; not fully inspected",
+            ),
+        );
     }
 
     /// Apply a chain outcome to a judgment. Never lowers the verdict.
@@ -340,6 +365,23 @@ mod tests {
 
     fn shield() -> Shield {
         Shield::new(Config::default())
+    }
+
+    #[test]
+    fn comma_padding_does_not_hide_sqli() {
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), format!("{} 1 union select a,b from users", ",".repeat(4100))));
+        assert_eq!(Shield::new(Config::default()).inspect(&req).verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn exhausted_windows_emit_a_limit() {
+        let mut cfg = Config::default();
+        cfg.shield.max_graph_windows = 1;
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), ",".repeat(5000)));
+        let j = Shield::new(cfg).inspect(&req);
+        assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.graph-truncated")));
     }
 
     #[test]

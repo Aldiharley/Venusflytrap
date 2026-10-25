@@ -73,6 +73,9 @@ pub struct ShieldConfig {
     pub max_payload: usize,
     pub decode_cap: u8,
     pub deep_threshold: u8,
+    /// Token windows (4096 tokens, overlapping by 64) analyzed per field before
+    /// giving up. When they run out the field is reported as `limit.graph-truncated`.
+    pub max_graph_windows: usize,
     /// Construct or decoder ids switched off (see `venusflytrap ablate`).
     /// Every id must be registered; unknown ids fail validation.
     pub disabled: Vec<String>,
@@ -84,6 +87,7 @@ impl Default for ShieldConfig {
             max_payload: 64 * 1024,
             decode_cap: 14,
             deep_threshold: 3,
+            max_graph_windows: 32,
             disabled: Vec::new(),
         }
     }
@@ -285,6 +289,9 @@ impl Config {
         if sh.deep_threshold == 0 || sh.deep_threshold > sh.decode_cap {
             bad("shield.deep_threshold", format!("must be in 1..=decode_cap, got {}", sh.deep_threshold));
         }
+        if !(1..=1024).contains(&sh.max_graph_windows) {
+            bad("shield.max_graph_windows", format!("must be in 1..=1024, got {}", sh.max_graph_windows));
+        }
         for id in crate::graph::sinks::unknown_ids(&sh.disabled) {
             bad("shield.disabled", format!("unknown construct id {id:?}"));
         }
@@ -403,6 +410,16 @@ mod tests {
     fn issues(yaml: &str) -> Vec<ConfigIssue> {
         let cfg: Config = serde_yaml::from_str(yaml).expect("parses");
         cfg.validate().err().unwrap_or_default()
+    }
+
+    #[test]
+    fn graph_windows_bounds() {
+        assert!(issues("shield:
+  max_graph_windows: 0
+").iter().any(|i| i.key == "shield.max_graph_windows"));
+        assert!(issues("shield:
+  max_graph_windows: 32
+").is_empty());
     }
 
     #[test]

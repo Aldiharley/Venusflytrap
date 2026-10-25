@@ -19,6 +19,9 @@ use sinks::{Disabled, Hits, SinkCtx};
 /// Caps so adversarial input can never blow up memory/CPU.
 const MAX_NODES: usize = 4096;
 
+/// Tokens shared by consecutive windows, so a construct cannot hide on a seam.
+pub const WINDOW_OVERLAP: usize = 64;
+
 #[derive(Debug, Clone)]
 pub struct Analysis {
     /// Sink patterns that are actually reachable from the tainted source.
@@ -37,34 +40,51 @@ impl Analysis {
 /// How to run the token graph over one field.
 pub struct GraphOpts<'a> {
     pub disabled: &'a Disabled,
-    /// Token windows of `MAX_NODES` to analyze before giving up (fail-closed
-    /// handling arrives with windowing; 1 = today's single truncated window).
+    /// Token windows to analyze before giving up: 4096-token windows overlapping
+    /// by 64. When they run out, `graph_truncated` is set and the shield emits
+    /// `limit.graph-truncated`.
     pub max_windows: usize,
 }
 
 /// Analyze one normalized field value with every construct enabled.
 pub fn analyze(text: &str) -> Analysis {
-    analyze_with(text, &GraphOpts { disabled: &Disabled::default(), max_windows: 1 })
+    analyze_with(text, &GraphOpts { disabled: &Disabled::default(), max_windows: 32 })
 }
 
 /// Analyze one normalized field value, skipping disabled constructs.
 pub fn analyze_with(text: &str, opts: &GraphOpts) -> Analysis {
-    let mut tokens = tokenize(text);
-    let graph_truncated = tokens.len() > MAX_NODES;
-    if graph_truncated {
-        tokens.truncate(MAX_NODES);
-    }
+    let tokens = tokenize(text);
 
     // At the WAF boundary the entire field is attacker-controlled, so any
     // structural sink we find *is* reachable from the tainted source. We still
     // distinguish "formed a dangerous construct" (reachable) from "contains a
     // lone dangerous token" (latent) to keep false positives down.
     let mut hits = Hits::new(opts.disabled);
-    let cx = SinkCtx { tokens: &tokens, text };
-    sinks::sql::detect(&cx, &mut hits);
-    sinks::xss::detect(&cx, &mut hits);
-    sinks::shell::detect(&cx, &mut hits);
-    sinks::path::detect(&cx, &mut hits);
+    // Overlapping windows so a construct cannot hide on a window seam. Text-level
+    // checks inside the sinks see the whole field in every window; `Hits`
+    // de-duplicates what they report.
+    let mut start = 0;
+    let mut windows = 0;
+    let mut graph_truncated = false;
+    loop {
+        let end = (start + MAX_NODES).min(tokens.len());
+        let cx = SinkCtx { tokens: &tokens[start..end], text };
+        sinks::sql::detect(&cx, &mut hits);
+        sinks::xss::detect(&cx, &mut hits);
+        sinks::shell::detect(&cx, &mut hits);
+        sinks::path::detect(&cx, &mut hits);
+        windows += 1;
+        if end == tokens.len() {
+            break;
+        }
+        if windows >= opts.max_windows {
+            graph_truncated = true;
+            break;
+        }
+        // Reached only when end == start + MAX_NODES, so this cannot underflow
+        // and always advances (MAX_NODES > WINDOW_OVERLAP).
+        start = end - WINDOW_OVERLAP;
+    }
 
     Analysis {
         reachable: hits.reachable,
@@ -77,6 +97,22 @@ pub fn analyze_with(text: &str, opts: &GraphOpts) -> Analysis {
 mod tests {
     use super::*;
     use crate::judgment::Family;
+
+    #[test]
+    fn attack_after_padding_is_found_in_a_later_window() {
+        let text = format!("{} 1 union select a,b from users", ",".repeat(4100));
+        let opts = GraphOpts { disabled: &sinks::Disabled::default(), max_windows: 32 };
+        let a = analyze_with(&text, &opts);
+        assert!(a.reachable.iter().any(|p| p.name == "sqli.union-select"), "{a:?}");
+        assert!(!a.graph_truncated);
+    }
+
+    #[test]
+    fn running_out_of_windows_is_reported() {
+        let text = ",".repeat(10_000);
+        let opts = GraphOpts { disabled: &sinks::Disabled::default(), max_windows: 2 };
+        assert!(analyze_with(&text, &opts).graph_truncated);
+    }
 
     fn fams(a: &Analysis) -> Vec<(Family, String)> {
         a.reachable
