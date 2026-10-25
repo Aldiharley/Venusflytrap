@@ -90,6 +90,12 @@ enum Command {
         /// Maximum samples to replay in `--mode tcp`.
         #[arg(long, default_value_t = 1000)]
         limit: usize,
+        /// Split manifest from eval/split.py (use with --side).
+        #[arg(long, requires = "side")]
+        manifest: Option<PathBuf>,
+        /// Which half of the split to score: dev or heldout.
+        #[arg(long, requires = "manifest")]
+        side: Option<String>,
     },
     /// Configuration tools.
     Config {
@@ -171,10 +177,13 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
-        Command::Eval { corpus, mode, sources, step_ms, out, limit } => {
+        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side } => {
             let cfg = load_config(cli.config.as_ref())?;
             let sources: eval::Sources = sources.parse().map_err(anyhow::Error::msg)?;
-            let samples = eval::load_corpus(&corpus)?;
+            let mut samples = eval::load_corpus(&corpus)?;
+            if let (Some(m), Some(s)) = (manifest.as_ref(), side.as_deref()) {
+                samples = eval::select_side(samples, &eval::load_manifest(m)?, s)?;
+            }
             if mode == EvalMode::Tcp {
                 let r = eval::run_tcp(cfg, &samples, limit)?;
                 println!("{}", serde_json::to_string_pretty(&r)?);
