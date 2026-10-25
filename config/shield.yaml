@@ -55,3 +55,16 @@ honeypot:
     - /config.json
     - /.ssh/id_rsa
     - /wp-config.php
+
+proxy:
+  trusted_proxies: []       # peers whose X-Forwarded-For is trusted (exact IPs)
+  decision_headers: off     # off | upstream (never sent to clients)
+
+limits:
+  max_body: 1048576         # bytes; larger bodies get 413 before any upstream connection
+  max_headers: 100
+  max_connections: 1024
+  header_read_timeout_ms: 10000
+  body_read_timeout_ms: 30000
+  upstream_connect_timeout_ms: 5000
+  upstream_response_timeout_ms: 30000

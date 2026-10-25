@@ -11,6 +11,7 @@ pub struct Config {
     pub chain: ChainConfig,
     pub honeypot: HoneypotConfig,
     pub proxy: ProxyConfig,
+    pub limits: LimitsConfig,
 }
 
 /// Data-plane settings that the engine itself does not use.
@@ -19,6 +20,45 @@ pub struct Config {
 pub struct ProxyConfig {
     /// Peers whose `X-Forwarded-For` is trusted (exact IPs).
     pub trusted_proxies: Vec<String>,
+    /// Whether decision headers are added to the forwarded request.
+    pub decision_headers: DecisionHeaders,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionHeaders {
+    /// Never emit decision headers.
+    #[default]
+    Off,
+    /// Add X-Venusflytrap-* to the forwarded request only (never to the client).
+    Upstream,
+}
+
+/// Request-level limits on the data plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsConfig {
+    pub max_body: usize,
+    pub max_headers: usize,
+    pub max_connections: usize,
+    pub header_read_timeout_ms: u64,
+    pub body_read_timeout_ms: u64,
+    pub upstream_connect_timeout_ms: u64,
+    pub upstream_response_timeout_ms: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        LimitsConfig {
+            max_body: 1024 * 1024,
+            max_headers: 100,
+            max_connections: 1024,
+            header_read_timeout_ms: 10_000,
+            body_read_timeout_ms: 30_000,
+            upstream_connect_timeout_ms: 5_000,
+            upstream_response_timeout_ms: 30_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +343,27 @@ impl Config {
             }
         }
 
+        let l = &self.limits;
+        if l.max_body < 1024 {
+            bad("limits.max_body", format!("must be >= 1024, got {}", l.max_body));
+        }
+        if !(8..=1000).contains(&l.max_headers) {
+            bad("limits.max_headers", format!("must be in 8..=1000, got {}", l.max_headers));
+        }
+        if l.max_connections == 0 {
+            bad("limits.max_connections", "must be >= 1".into());
+        }
+        for (key, ms) in [
+            ("limits.header_read_timeout_ms", l.header_read_timeout_ms),
+            ("limits.body_read_timeout_ms", l.body_read_timeout_ms),
+            ("limits.upstream_connect_timeout_ms", l.upstream_connect_timeout_ms),
+            ("limits.upstream_response_timeout_ms", l.upstream_response_timeout_ms),
+        ] {
+            if ms == 0 {
+                bad(key, "must be >= 1".into());
+            }
+        }
+
         for (key, list) in [
             ("honeypot.decoy_paths", &self.honeypot.decoy_paths),
             ("honeypot.sensitive_paths", &self.honeypot.sensitive_paths),
@@ -355,6 +416,20 @@ mod tests {
             .iter()
             .any(|i| i.key == "proxy.trusted_proxies"));
         assert!(issues("proxy:\n  trusted_proxies: [\"10.0.0.1\", \"::1\"]\n").is_empty());
+    }
+
+    #[test]
+    fn limits_are_validated() {
+        for (yaml, key) in [
+            ("limits:\n  max_body: 1000\n", "limits.max_body"),
+            ("limits:\n  max_headers: 7\n", "limits.max_headers"),
+            ("limits:\n  max_connections: 0\n", "limits.max_connections"),
+            ("limits:\n  header_read_timeout_ms: 0\n", "limits.header_read_timeout_ms"),
+            ("limits:\n  upstream_response_timeout_ms: 0\n", "limits.upstream_response_timeout_ms"),
+        ] {
+            assert!(issues(yaml).iter().any(|i| i.key == key), "{key}");
+        }
+        assert!(issues("proxy:\n  decision_headers: upstream\nlimits:\n  max_body: 2048\n").is_empty());
     }
 
     #[test]
