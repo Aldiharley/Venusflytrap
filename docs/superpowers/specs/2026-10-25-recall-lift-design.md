@@ -128,7 +128,7 @@ New module `vft-core/src/body.rs`: `body_fields(content_type, body) -> Vec<Field
 - JSON leaves come out of `serde_json` already unescaped.
 - A form value or JSON leaf that is itself JSON is expanded once more; total depth ≤ 2. JSON nesting stops at 32 levels.
 - At most 256 fields per body; any further content is joined into one remainder field, never dropped.
-- Inspection budget: oversized fields are inspected in 64 KiB chunks up to `shield.max_inspect_bytes` (4 MiB) per request. Past the budget, `limit.payload-truncated` emits Suspicious evidence (fixes C3).
+- Inspection budget: oversized fields are inspected in 64 KiB chunks up to `shield.max_inspect_bytes` (4 MiB) per request. Past the budget, `limit.payload-truncated` hard-blocks the request (fixes C3).
 - Field names now carry real parameter names, so `ApiSafetyDetector` (which keys off `id`, `*_id`) will fire more often. Its effect is measured by ablation.
 
 ## 6. Normalizer
@@ -188,7 +188,7 @@ pub fn constructs() -> &'static [ConstructInfo];
 
 | Construct | Option key | Fires when | Evidence |
 |---|---|---|---|
-| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a normalization cut loses text that is not re-inspected (interior cuts are verified by inspecting the chunk minus its overlap) | Suspicious |
+| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a piece is still cut after lossless recursive splitting reaches its depth bound | hard Block (owner ruling 2026-10-26) |
 | `limit.graph-truncated` | `shield.max_graph_windows` (new, 32) | a field needs more 4,096-token windows than the cap | Suspicious |
 | `limit.body-unparsed` | `shield.body_parse` | a body falls back to one whole field | informational, weight 0 |
 

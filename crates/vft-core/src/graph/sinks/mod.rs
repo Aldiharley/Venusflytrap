@@ -65,7 +65,7 @@ pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.hea
 
 // --- Limits ---------------------------------------------------------------------
 
-pub static LIMIT_PAYLOAD_TRUNCATED: ConstructInfo = ConstructInfo { id: "limit.payload-truncated", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "the request exceeded shield.max_inspect_bytes, or a normalization cut lost text that is not re-inspected" };
+pub static LIMIT_PAYLOAD_TRUNCATED: ConstructInfo = ConstructInfo { id: "limit.payload-truncated", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "the request exceeded shield.max_inspect_bytes, or a piece was still cut after lossless recursive splitting" };
 pub static LIMIT_GRAPH_TRUNCATED: ConstructInfo = ConstructInfo { id: "limit.graph-truncated", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a field needed more token windows than shield.max_graph_windows" };
 
 // --- Decoders -------------------------------------------------------------------

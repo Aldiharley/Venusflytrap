@@ -12,7 +12,7 @@ use crate::honeypot::Honeypot;
 use crate::intel::Intel;
 use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
 use crate::lattice::{Evidence, FourValued};
-use crate::normalize::{normalize, Options};
+use crate::normalize::{normalize, Normalized, Options};
 use crate::request::Request;
 use crate::score::{arbitrate, Scored};
 
@@ -90,15 +90,16 @@ impl Shield {
         let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: self.cfg.shield.max_graph_windows };
 
         // Long fields are inspected in overlapping chunks under a per-request
-        // byte budget; running out of budget, or a cut during normalization,
-        // fails closed with `limit.payload-truncated`.
+        // byte budget. A chunk whose normalization is cut is re-inspected as
+        // overlapping halves (see `inspect_pieces`), so nothing is lost unless the
+        // budget runs out or splitting bottoms out; either hard-blocks via
+        // `limit.payload-truncated`.
         let mut budget = self.cfg.shield.max_inspect_bytes;
         let mut payload_truncated = false;
         'fields: for field in req.fields() {
             let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
-            let last = ranges.len().saturating_sub(1);
             let mut prev_end = 0usize;
-            for (i, range) in ranges.into_iter().enumerate() {
+            for range in ranges {
                 // Each field's text is charged once: a chunk pays only for the
                 // bytes it adds beyond the previous chunk's end.
                 let added = range.end.saturating_sub(prev_end);
@@ -109,30 +110,11 @@ impl Shield {
                 budget -= added;
                 prev_end = range.end;
                 let chunk = &field.raw[range];
-                let n = normalize(chunk, &self.norm_opts);
-                max_layers = max_layers.max(n.layers);
-                self.inspect_text(&mut rec, &field, &n, &gopts, &field_detectors, &ai);
-                if n.truncated {
-                    if i == last {
-                        // Nothing after the last chunk re-reads what was cut.
-                        payload_truncated = true;
-                    } else {
-                        // Interior cut: the next chunk re-reads this chunk's last
-                        // `overlap` raw chars. Everything before them must be
-                        // inspected uncut, or the cut loses text.
-                        let max = self.cfg.shield.max_payload;
-                        let overlap = max - max.saturating_sub(crate::normalize::CHUNK_OVERLAP).max(1);
-                        let keep = chunk.chars().count().saturating_sub(overlap);
-                        let cut_at = chunk.char_indices().nth(keep).map_or(chunk.len(), |(b, _)| b);
-                        let head = normalize(&chunk[..cut_at], &self.norm_opts);
-                        if head.truncated {
-                            payload_truncated = true;
-                        }
-                        // The head's bytes are part of the already-charged chunk.
-                        max_layers = max_layers.max(head.layers);
-                        self.inspect_text(&mut rec, &field, &head, &gopts, &field_detectors, &ai);
-                    }
-                }
+                let (lost, layers) = inspect_pieces(chunk, 0, &self.norm_opts, &mut |n| {
+                    self.inspect_text(&mut rec, &field, n, &gopts, &field_detectors, &ai)
+                });
+                payload_truncated |= lost;
+                max_layers = max_layers.max(layers);
             }
         }
         if let Some(first) = req.non_utf8_headers.first().filter(|_| !self.disabled.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
@@ -151,40 +133,43 @@ impl Shield {
 
         // Also inspect the path itself for traversal/recon structure.
         {
-            let n = normalize(&req.path, &self.norm_opts);
-            max_layers = max_layers.max(n.layers);
-            // A cut path is not fully inspected either.
-            payload_truncated |= n.truncated;
-            let analysis = graph::analyze_with(&n.text, &gopts);
-            if analysis.graph_truncated {
-                self.record_graph_truncated(&mut rec, FieldRef::path());
-            }
-            if !analysis.reachable.is_empty() {
-                let e = Evidence::new(
-                    FourValued::Dangerous,
-                    0.9,
-                    analysis.reachable.clone(),
-                    "dangerous construct in path",
-                );
-                rec.record(
-                    "graph-taint",
-                    self.cfg.scoring.weight_graph,
-                    Some(FieldRef::path()),
-                    e,
-                );
-            }
+            let (lost, layers) = inspect_pieces(&req.path, 0, &self.norm_opts, &mut |n| {
+                let analysis = graph::analyze_with(&n.text, &gopts);
+                if analysis.graph_truncated {
+                    self.record_graph_truncated(&mut rec, FieldRef::path());
+                }
+                if !analysis.reachable.is_empty() {
+                    let e = Evidence::new(
+                        FourValued::Dangerous,
+                        0.9,
+                        analysis.reachable.clone(),
+                        "dangerous construct in path",
+                    );
+                    rec.record(
+                        "graph-taint",
+                        self.cfg.scoring.weight_graph,
+                        Some(FieldRef::path()),
+                        e,
+                    );
+                }
+            });
+            payload_truncated |= lost;
+            max_layers = max_layers.max(layers);
         }
 
-        if payload_truncated && !self.disabled.is(&sinks::LIMIT_PAYLOAD_TRUNCATED) {
+        // Real loss (budget exhausted, or splitting bottomed out on a cut piece)
+        // is a hard Block: text we could not inspect is not assumed benign.
+        let limit_block = payload_truncated && !self.disabled.is(&sinks::LIMIT_PAYLOAD_TRUNCATED);
+        if limit_block {
             rec.record(
                 "limit",
                 self.cfg.scoring.weight_api,
                 None,
                 Evidence::new(
-                    FourValued::Suspicious,
-                    0.6,
+                    FourValued::Dangerous,
+                    1.0,
                     vec![sinks::LIMIT_PAYLOAD_TRUNCATED.pattern()],
-                    "request exceeded shield.max_inspect_bytes or a field was cut; not fully inspected",
+                    "request exceeded shield.max_inspect_bytes or text could not be fully inspected",
                 ),
             );
         }
@@ -205,7 +190,7 @@ impl Shield {
         }
 
         // Honeypot.
-        let mut hard_block = denied;
+        let mut hard_block = denied || limit_block;
         let honeypot_hit = if self.disabled.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
         if let Some(e) = honeypot_hit {
             hard_block = true;
@@ -421,6 +406,37 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -
     } else {
         base
     }
+}
+
+/// Splitting stops after this many halvings. NFKC expands a char at most 18x, so a
+/// piece of `max_payload / 18` raw chars cannot be cut; from a 64 KiB chunk that
+/// is reached in 5 halvings (with the 256-char overlap).
+const MAX_SPLIT_DEPTH: u8 = 6;
+
+/// Normalize `text` and hand it to `f`. If normalization cut it, re-inspect the
+/// same raw text as two halves overlapping by [`CHUNK_OVERLAP`] chars, recursively,
+/// until each piece normalizes uncut. A piece still cut at [`MAX_SPLIT_DEPTH`], or
+/// too short to split, is inspected as cut and reported as lost. Returns
+/// `(lost, max decode layers)`.
+fn inspect_pieces(text: &str, depth: u8, opts: &Options, f: &mut dyn FnMut(&Normalized)) -> (bool, u8) {
+    let n = normalize(text, opts);
+    if !n.truncated {
+        f(&n);
+        return (false, n.layers);
+    }
+    let overlap = crate::normalize::CHUNK_OVERLAP;
+    let chars = text.chars().count();
+    if depth >= MAX_SPLIT_DEPTH || chars <= 2 * overlap {
+        f(&n);
+        return (true, n.layers);
+    }
+    let at = |k: usize| text.char_indices().nth(k).map_or(text.len(), |(b, _)| b);
+    let mid = chars / 2;
+    let left = &text[..at(mid + overlap / 2)];
+    let right = &text[at(mid - overlap / 2)..];
+    let (l_lost, l_layers) = inspect_pieces(left, depth + 1, opts, f);
+    let (r_lost, r_layers) = inspect_pieces(right, depth + 1, opts, f);
+    (l_lost || r_lost, l_layers.max(r_layers))
 }
 
 #[cfg(test)]
@@ -698,16 +714,18 @@ mod tests {
     }
 
     #[test]
-    fn exceeding_the_inspection_budget_emits_a_limit() {
+    fn exceeding_the_inspection_budget_blocks_with_a_limit() {
         let mut cfg = Config::default();
         cfg.shield.max_inspect_bytes = 100_000;
         let mut req = Request::get("/items");
         req.query.push(("q".into(), "a".repeat(200_000)));
         let j = Shield::new(cfg).inspect(&req);
-        assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.payload-truncated")));
+        assert!(has_limit(&j));
+        assert_eq!(j.verdict, Verdict::Block);
     }
 
     const FDFA: char = '\u{FDFA}'; // NFKC expands this one char into 18
+    const SQLI: &str = " 1 union select a,b from users-- ";
 
     fn count_limit(j: &Judgment) -> usize {
         j.contributions.iter().filter(|c| c.construct.as_deref() == Some("limit.payload-truncated")).count()
@@ -717,10 +735,33 @@ mod tests {
         count_limit(j) > 0
     }
 
+    fn has_construct(j: &Judgment, id: &str) -> bool {
+        j.contributions.iter().any(|c| c.construct.as_deref() == Some(id))
+    }
+
     fn small_payload_cfg() -> Config {
         let mut cfg = Config::default();
         cfg.shield.max_payload = 1024;
         cfg
+    }
+
+    fn query_req(v: String) -> Request {
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), v));
+        req
+    }
+
+    /// `lead` U+FDFA chars, then `a` filler up to char offset `at`, then `attack`,
+    /// then `a` filler up to `total` chars.
+    fn field_with(lead: usize, at: usize, attack: &str, total: usize) -> String {
+        let attack_len = attack.chars().count();
+        format!(
+            "{}{}{}{}",
+            FDFA.to_string().repeat(lead),
+            "a".repeat(at - lead),
+            attack,
+            "a".repeat(total - at - attack_len)
+        )
     }
 
     /// A 3,000-char field (several chunks at max_payload 1024) with `k` FDFA
@@ -735,28 +776,75 @@ mod tests {
 
     #[test]
     fn interior_cut_within_the_overlap_is_not_a_limit() {
-        // 5 FDFA in chunk 0: post-fold overflow is 85 chars (<= 256), and chunk 1
-        // re-inspects that tail through the overlap.
-        let mut req = Request::get("/items");
-        req.query.push(("q".into(), field_with_fdfa(0, 5)));
-        assert!(!has_limit(&Shield::new(small_payload_cfg()).inspect(&req)));
+        // 5 FDFA in chunk 0 fold it 85 chars past the cap; splitting inspects it all.
+        let j = Shield::new(small_payload_cfg()).inspect(&query_req(field_with_fdfa(0, 5)));
+        assert!(!has_limit(&j));
     }
 
     #[test]
-    fn interior_cut_beyond_the_overlap_is_a_limit() {
-        // 20 FDFA in chunk 0: overflow is 340 chars (> 256).
-        let mut req = Request::get("/items");
-        req.query.push(("q".into(), field_with_fdfa(0, 20)));
-        assert!(has_limit(&Shield::new(small_payload_cfg()).inspect(&req)));
+    fn interior_cut_is_inspected_losslessly() {
+        // 20 FDFA push the attack (raw offset 700) past chunk 0's folded cap of 1024;
+        // no other chunk covers it. Splitting finds it.
+        let j = Shield::new(small_payload_cfg()).inspect(&query_req(field_with(20, 700, SQLI, 3000)));
+        assert!(!has_limit(&j));
+        assert!(has_construct(&j, "sqli.union-select"));
+        assert_eq!(j.verdict, Verdict::Block);
     }
 
     #[test]
-    fn last_chunk_cut_is_a_limit() {
-        // 20 FDFA at the end: the last chunk (696 chars) folds past 1024 and no
-        // later chunk re-inspects the cut text.
-        let mut req = Request::get("/items");
-        req.query.push(("q".into(), field_with_fdfa(2950, 20)));
-        assert!(has_limit(&Shield::new(small_payload_cfg()).inspect(&req)));
+    fn last_chunk_cut_is_inspected_losslessly() {
+        // 20 FDFA fold the last chunk (696 raw chars) to 1,036, so its end is cut.
+        let v = format!("{}{}{}{}", "a".repeat(2400), FDFA.to_string().repeat(20), "a".repeat(547), SQLI);
+        assert_eq!(v.chars().count(), 3000);
+        let j = Shield::new(small_payload_cfg()).inspect(&query_req(v));
+        assert!(!has_limit(&j));
+        assert!(has_construct(&j, "sqli.union-select"));
+        assert_eq!(j.verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn seam_attacks_after_a_cut_chunk_are_found() {
+        // 15 FDFA fold chunk 0 (1,024 raw chars) to 1,279 chars, so it is cut, while
+        // the first 768 raw chars fold to 1,023. The attack straddles raw 768, where
+        // the next chunk starts.
+        for at in [756, 760, 764] {
+            let j = Shield::new(small_payload_cfg()).inspect(&query_req(field_with(15, at, SQLI, 3000)));
+            assert!(has_construct(&j, "sqli.union-select"), "at {at}");
+            assert!(!has_limit(&j), "at {at}");
+            assert_eq!(j.verdict, Verdict::Block, "at {at}");
+        }
+    }
+
+    #[test]
+    fn seam_attacks_at_the_default_chunk_size_are_found() {
+        // Same construction at the 64 KiB default: the seam is at raw 65,280.
+        let j = Shield::new(Config::default()).inspect(&query_req(field_with(15, 65_276, SQLI, 70_000)));
+        assert!(has_construct(&j, "sqli.union-select"));
+        assert!(!has_limit(&j));
+        assert_eq!(j.verdict, Verdict::Block);
+        let xss = "<script>alert(document.cookie)</script>";
+        let j = Shield::new(Config::default()).inspect(&query_req(field_with(15, 65_276, xss, 70_000)));
+        assert!(j.contributions.iter().any(|c| c.construct.as_deref().is_some_and(|id| id.starts_with("xss."))));
+        assert!(!has_limit(&j));
+        assert_eq!(j.verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn a_field_of_nfkc_expanding_chars_is_split_not_dropped() {
+        // 3,700 FDFA fold to ~66,600 chars, past the default 65,536 cap.
+        let v = format!("{}{}", FDFA.to_string().repeat(3700), SQLI);
+        let j = Shield::new(Config::default()).inspect(&query_req(v));
+        assert!(has_construct(&j, "sqli.union-select"));
+        assert!(!has_limit(&j));
+        assert_eq!(j.verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn a_piece_that_cannot_be_split_further_is_a_real_loss() {
+        // 400 FDFA is 400 raw chars (<= 2 x overlap, so unsplittable) folding to 7,200.
+        let j = Shield::new(small_payload_cfg()).inspect(&query_req(FDFA.to_string().repeat(400)));
+        assert!(has_limit(&j));
+        assert_eq!(j.verdict, Verdict::Block);
     }
 
     #[test]
@@ -765,27 +853,29 @@ mod tests {
         cfg.shield.max_inspect_bytes = 1024;
         let mut req = Request::get("/items");
         for i in 0..3 {
-            req.query.push((format!("q{i}"), FDFA.to_string().repeat(80))); // 240 bytes, folds to 1,440 chars
+            req.query.push((format!("q{i}"), FDFA.to_string().repeat(80)));
         }
-        req.query.push(("tail".into(), "a".repeat(500))); // past the budget
-        assert_eq!(count_limit(&Shield::new(cfg).inspect(&req)), 1);
+        req.query.push(("tail".into(), "a".repeat(2000))); // past the budget
+        let j = Shield::new(cfg).inspect(&req);
+        assert_eq!(count_limit(&j), 1);
+        assert_eq!(j.verdict, Verdict::Block);
     }
 
     #[test]
     fn limit_can_be_disabled() {
         let mut cfg = small_payload_cfg();
+        cfg.shield.max_inspect_bytes = 1024;
         cfg.shield.disabled = vec!["limit.payload-truncated".into()];
-        let mut req = Request::get("/items");
-        req.query.push(("q".into(), field_with_fdfa(2950, 20)));
-        assert_eq!(count_limit(&Shield::new(cfg).inspect(&req)), 0);
+        let j = Shield::new(cfg).inspect(&query_req("a".repeat(3000))); // budget exhausted
+        assert_eq!(count_limit(&j), 0);
+        assert_ne!(j.verdict, Verdict::Block);
     }
 
     #[test]
     fn attack_at_the_end_of_a_one_mib_body_blocks() {
-        let tail = " 1 union select a,b from users-- ";
         let mut req = Request::get("/items");
         req.method = "POST".into();
-        req.body = format!("{}{}", "a".repeat(1_048_510 - tail.len()), tail).into_bytes();
+        req.body = format!("{}{}", "a".repeat(1_048_510 - SQLI.len()), SQLI).into_bytes();
         assert_eq!(req.body.len(), 1_048_510);
         assert_eq!(Shield::new(Config::default()).inspect(&req).verdict, Verdict::Block);
     }
@@ -798,39 +888,36 @@ mod tests {
         assert!(!has_limit(&Shield::new(Config::default()).inspect(&req)));
     }
 
-    /// The review's bypass: folding shrinks and expands text unevenly, so a cut of
-    /// <= 256 folded chars can hide far more raw chars that no chunk re-reads.
-    fn crafted_bypass_field() -> String {
-        let tail = " 1 union select a,b from users-- ";
-        format!(
+    #[test]
+    fn crafted_fold_shrink_and_expand_field_is_found() {
+        // The re-review field: FDFA expands, %61 shrinks, so the chunk's folded
+        // overflow says little about which raw text was cut.
+        let field = format!(
             "{}{}{}{}{}{}",
             FDFA.to_string().repeat(30),
-            "a".repeat(613 - tail.len() - 10),
-            tail,
+            "a".repeat(613 - SQLI.len() - 10),
+            SQLI,
             "b".repeat(10),
             "%61".repeat(127),
             "b".repeat(2000)
-        )
-    }
-
-    #[test]
-    fn folded_overflow_cannot_hide_uninspected_raw_text() {
-        let field = crafted_bypass_field();
-        assert_eq!(field.chars().take(1024).count(), 1024);
-        let mut req = Request::get("/items");
-        req.query.push(("q".into(), field));
-        let j = Shield::new(small_payload_cfg()).inspect(&req);
-        // The chunk minus its overlap still folds past the cap, so the loss is
-        // reported (fail closed) instead of being silently exempted.
-        assert!(has_limit(&j), "verdict {:?} score {} reason {}", j.verdict, j.score, j.reason);
+        );
+        let j = Shield::new(small_payload_cfg()).inspect(&query_req(field));
+        assert!(has_construct(&j, "sqli.union-select"));
+        assert_eq!(j.verdict, Verdict::Block);
     }
 
     #[test]
     fn overlap_is_charged_once() {
         let mut cfg = small_payload_cfg();
         cfg.shield.max_inspect_bytes = 3000;
-        let mut req = Request::get("/items");
-        req.query.push(("q".into(), "a".repeat(3000)));
-        assert!(!has_limit(&Shield::new(cfg).inspect(&req)));
+        assert!(!has_limit(&Shield::new(cfg).inspect(&query_req("a".repeat(3000)))));
+    }
+
+    #[test]
+    fn a_long_path_is_split_not_dropped() {
+        let mut req = Request::get(format!("/{}", "a".repeat(70_000)));
+        req.query.push(("q".into(), "x".into()));
+        let j = Shield::new(Config::default()).inspect(&req);
+        assert!(!has_limit(&j));
     }
 }

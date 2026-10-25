@@ -70,6 +70,40 @@ fn huge_payload_exhausts_the_default_budget() {
     // Deterministic (no timing): 6 MB sent, 4 MiB default budget.
     let j = Shield::new(Config::default()).inspect(&huge_request());
     assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.payload-truncated")));
+    assert_eq!(j.verdict, vft_core::Verdict::Block);
+}
+
+#[test]
+fn nfkc_expansion_flood_terminates() {
+    // 300,000 x U+FDFA (NFKC expands each to 18 chars) forces maximal splitting.
+    let flood = "\u{FDFA}".repeat(300_000);
+    let shield = Shield::new(Config::default());
+    let mut req = Request::get("/p");
+    req.query.push(("q".into(), flood));
+    let t = Instant::now();
+    let j = shield.inspect(&req);
+    let dur = t.elapsed();
+    eprintln!("fdfa flood: verdict {:?} in {dur:?}", j.verdict);
+    assert!(dur < Duration::from_secs(60), "took {dur:?}");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn splitting_terminates_on_expanding_and_shrinking_text(
+        parts in proptest::collection::vec(
+            prop_oneof![Just("\u{FDFA}"), Just("%61"), Just("%2561"), Just("a"), Just(" union select 1 ")],
+            0..3000,
+        )
+    ) {
+        let mut cfg = Config::default();
+        cfg.shield.max_payload = 1024;
+        let mut req = Request::get("/p");
+        req.query.push(("q".into(), parts.concat()));
+        let j = Shield::new(cfg).inspect(&req);
+        prop_assert!(j.score <= 100);
+    }
 }
 
 #[test]
