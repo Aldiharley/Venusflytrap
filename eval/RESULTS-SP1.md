@@ -54,3 +54,50 @@ request target holds raw `<` and `>`; the lenient in-process parser percent-enco
 front-end difference, not an engine mismatch. Caveat: the 1,000-sample prefix holds only 16 `.black` samples (20 requests were blocked in total, counting
 benign false positives), so the 403 path is exercised far less than the 200 path. A connect failure, a stalled
 write with no reply, or a reply without a status line counts as a mismatch, never an abort.
+
+## Final measurement (Task 12)
+
+Release build of the final tree, all outputs in `$EVAL/sp1/final-*.{json,csv}`. Recall is given over the 656
+scored malicious files and over all 658 (the two unreadable `.black` files counted as missed).
+
+| Run | Path | TP | FP | FN (656 / 658) | Recall (656 / 658) | Precision | F1 (656 / 658) | FP rate | Latency p50/p95/p99 (us) |
+|---|---|---|---|---|---|---|---|---|---|
+| final library | lib (raw corpus) | 283 | 269 | 373 / 375 | 43.14% / 43.01% | 51.27% | 0.4685 / 0.4678 | 0.81% | 72 / 210 / 718 |
+| final serve distinct | serve | 283 | 269 | 373 / 375 | 43.14% / 43.01% | 51.27% | 0.4685 / 0.4678 | 0.81% | 71 / 208 / 713 |
+| final serve pooled:100 | serve | 446 | 15,847 | 210 / 212 | 67.99% / 67.78% | 2.74% | 0.0526 / 0.0526 | 47.70% | 42 / 160 / 368 |
+| final bench_http corpus (Python-parsed JSONL) | lib | 283 | 268 | 375 | 43.01% (of 658) | 51.36% | 0.4682 | 0.81% | 68 / 202 / 743 |
+| libinjection (Python-parsed JSONL) | baseline | 214 | 93 | 444 | 32.52% | 69.71% | 0.4435 | 0.28% | 15 / 58 / 131 |
+| regex baseline (Python-parsed JSONL) | baseline | 127 | 126 | 531 | 19.30% | 50.20% | 0.2788 | 0.38% | 10 / 199 / 1421 |
+
+Serve distinct: verdicts identical to library; benign_sources 33,219, benign_sources_banned 72, collateral_fp 0,
+bans_from_allowed 0, invariant_violations 0. Serve pooled:100: benign_sources 100, benign_sources_banned 80,
+collateral_fp 15,578, bans_from_allowed 0, invariant_violations 0. **Acceptance check "collateral FP <= request-level
+FP" FAILS for pooled:100 (15,578 vs 269 library FP; serve FP rate 47.70%).** Cause: one blocked exfiltration
+request bans a shared source for 1 h; with 100 shared sources, 80 were banned. Ban-policy redesign is a planned
+follow-up; no policy or config changed. Baselines read the Python-parsed JSONL, a different input from the Rust eval.
+
+Mutation (bench_http on `seeds.jsonl` / `mutants.jsonl`): seeds 19/22 (86.36%), mutants 548/660 (83.03%),
+retention 96.1%, identical to Task 0. libinjection and regex retention (57% and 54%) are from the original run,
+not re-measured.
+
+Throughput (`decide_throughput`, 3 runs, ratio stateless / stateful): 0.185 s / 0.188 s = 0.99; 0.175 s / 0.179 s =
+0.98; 0.185 s / 0.184 s = 1.01 (acceptance >= 0.75, met).
+
+### TCP replay
+
+| Run | replayed | matched_block | matched_allow | proxy_rejected | not_replayable | mismatched |
+|---|---|---|---|---|---|---|
+| first 1,000 (re-run on final tree) | 992 | 20 | 971 | 1 | 8 | 0 |
+| full corpus (`--limit 40000`, exit 3) | 33,711 | 550 | 32,207 | 5 | 166 | 949 |
+
+Full-corpus run is NOT clean (949 mismatched). All 20 listed mismatches are `502` on benign samples with
+`in_process_block=false`: the proxy made the same Allow decision, then failed to reach the stub upstream (harness
+failure, not an engine/proxy disagreement). The other 929 are not individually listed. Likely cause, inferred:
+ephemeral-port exhaustion on Windows (two `Connection: close` loopback sockets per request; 16,384-port dynamic
+range; 8,107 sockets in TIME_WAIT right after the run). A separate fast replay of 24,000 small benign samples
+reproduced it (6,437 mismatches, listed ones all 502/Allow, first ~17k clean, dense from `88/*`). The four earliest
+mismatches (`09/8a` 573 KB, `11/27` 858 KB, `1b/12` 66 KB, `30/56` 74 KB) are large bodies; the first two reproduce
+a 502 in isolation because the stub upstream reads once and closes without draining. `88/58` (1 KB) mismatched in the
+full run but passes in a small corpus (load-dependent). proxy_rejected 5:
+400 x4 and 413 x1. matched_block 550 shows the block path was exercised on the full corpus. No engine or
+proxy code was changed for this.

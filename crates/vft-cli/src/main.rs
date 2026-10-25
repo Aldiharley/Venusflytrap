@@ -45,7 +45,7 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
-    /// Run the benchmark and write docs/BENCHMARK.md.
+    /// Run the synthetic smoke benchmark (not a result; real-corpus numbers are in docs/BENCHMARK.md).
     Bench {
         #[arg(long, default_value_t = 1337)]
         seed: u64,
@@ -53,7 +53,7 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         n: usize,
         /// Output path for the markdown report.
-        #[arg(long, default_value = "docs/BENCHMARK.md")]
+        #[arg(long, default_value = "target/bench/BENCHMARK-synthetic.md")]
         out: PathBuf,
     },
     /// Start the reverse proxy.

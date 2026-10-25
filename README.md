@@ -30,21 +30,21 @@ request → normalize → token-graph taint → detectors → four-valued lattic
 
 ## Measured results
 
-From `venusflytrap bench` on an open, deterministic synthetic corpus (6,000
-samples; see [`docs/BENCHMARK.md`](docs/BENCHMARK.md)):
+Measured on a real labelled corpus (33,877 HTTP requests: 33,219 benign, 658 malicious), through both the
+stateless library path and the stateful serve path that the proxy runs. Recall is over the 656 malicious
+files that were readable on the measuring machine (43.01% if the two unreadable files count as missed).
+Full method, ban effects, mutation robustness, latency and limits are in
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md); a pooled-source run there fails one acceptance check, and that
+is stated plainly.
 
-| Engine | Recall (obfuscated) | Precision | FP rate | p95 latency |
-|---|---|---|---|---|
-| Regex baseline | 17.8% | 100% | 0% | <1 µs |
-| Tokenizer baseline | 100% | 85.2% | 34.7% | 5 µs |
-| **Venusflytrap (full)** | **96.1%** | **100%** | **0.0%** | **9 µs** |
+| Engine | TP | FP | Recall | Precision | FP rate |
+|---|---|---|---|---|---|
+| Venusflytrap, library | 283 | 269 | 43.14% | 51.27% | 0.81% |
+| Venusflytrap, serve (distinct sources) | 283 | 269 | 43.14% | 51.27% | 0.81% |
+| libinjection | 214 | 93 | 32.52% | 69.71% | 0.28% |
 
-The regex baseline collapses under encoding/case/comment mutation; the naive
-tokenizer recovers recall but is noisy (high FP); the full engine keeps
-obfuscated recall high **and** false positives low — because the graph/taint
-reachability step separates a formed attack from a coincidental keyword. That is
-the whole point of the architecture, shown rather than asserted. (0% FP is this
-corpus's measured number, not a guarantee — real traffic will differ.)
+These are modest numbers and they are reported as measured. The baseline reads a slightly different
+parse of the same corpus. `venusflytrap bench` is a synthetic smoke test, not a result.
 
 ## Usage
 
@@ -52,8 +52,12 @@ corpus's measured number, not a guarantee — real traffic will differ.)
 # Inspect one request (exit code 2 if blocked)
 venusflytrap scan --path "/items" --query "1 union select password from users"
 
-# Reproduce the benchmark
-venusflytrap bench --seed 1337 --n 2000 --out docs/BENCHMARK.md
+# Synthetic smoke test (writes target/bench/BENCHMARK-synthetic.md; not a result)
+venusflytrap bench --seed 1337 --n 2000
+
+# Real-corpus evaluation (library path, or serve path through Pipeline::decide)
+venusflytrap eval --corpus path/to/testcases --mode library
+venusflytrap eval --corpus path/to/testcases --mode serve --sources pooled:100
 
 # Reverse proxy in front of a local app (observation mode with --monitor-only)
 venusflytrap serve --bind 127.0.0.1:8080 --upstream http://127.0.0.1:3000 --audit audit.jsonl
@@ -84,7 +88,7 @@ assert_eq!(shield.inspect(&req).verdict, Verdict::Block);
 - [`docs/PRD.md`](docs/PRD.md) — requirements and non-goals.
 - [`docs/TECH_SPEC.md`](docs/TECH_SPEC.md) — architecture and data model.
 - [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — build phases.
-- [`docs/BENCHMARK.md`](docs/BENCHMARK.md) — generated results.
+- [`docs/BENCHMARK.md`](docs/BENCHMARK.md) — real-corpus results, library and serve side by side.
 
 ## Safety & limits
 
