@@ -168,6 +168,15 @@ fn strip_hop_by_hop(h: &mut HeaderMap) {
     }
 }
 
+/// The 403 for a stopped request. Challenge has its own generic body (spec
+/// decision 10); the audit line carries the verdict as the cause.
+fn refusal(v: Verdict) -> Response<Body> {
+    match v {
+        Verdict::Challenge => text(StatusCode::FORBIDDEN, "Request requires verification.\n"),
+        _ => text(StatusCode::FORBIDDEN, "Request blocked.\n"),
+    }
+}
+
 fn wants_upgrade(h: &HeaderMap) -> bool {
     h.contains_key(hyper::header::UPGRADE)
         || h.get_all(hyper::header::CONNECTION)
@@ -178,14 +187,24 @@ fn wants_upgrade(h: &HeaderMap) -> bool {
 
 async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming>) -> Result<Response<Body>, hyper::Error> {
     let lim = &state.limits;
-    if req.headers().len() > lim.max_headers {
+    let (parts, body) = req.into_parts();
+    if parts.headers.len() > lim.max_headers {
         return Ok(text(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE, "Request header fields too large.\n"));
     }
-    if wants_upgrade(req.headers()) {
+    if wants_upgrade(&parts.headers) {
         return Ok(text(StatusCode::NOT_IMPLEMENTED, "Protocol upgrade is not supported.\n"));
     }
-    let declared_len = req
-        .headers()
+    // Spec §5.3 step 3: a banned source is answered from the head, before its
+    // body is read (so it cannot hold a body-read slot either).
+    if state.enforce {
+        if let Some(d) = state.pipeline.fast_track(&parts, Some(peer.ip()), now_ms()) {
+            let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state.audit.record(&d.request, &d.judgment, now_ms(), id);
+            return Ok(refusal(d.judgment.verdict));
+        }
+    }
+    let declared_len = parts
+        .headers
         .get(hyper::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
@@ -193,7 +212,6 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
         return Ok(text(StatusCode::PAYLOAD_TOO_LARGE, "Payload too large.\n"));
     }
 
-    let (parts, body) = req.into_parts();
     let read = Limited::new(body, lim.max_body).collect();
     let collected = match tokio::time::timeout(Duration::from_millis(lim.body_read_timeout_ms), read).await {
         Err(_) => return Ok(text(StatusCode::REQUEST_TIMEOUT, "Request timeout.\n")),
@@ -210,7 +228,7 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     let j = decision.judgment;
 
     if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {
-        return Ok(text(StatusCode::FORBIDDEN, "Request blocked.\n"));
+        return Ok(refusal(j.verdict));
     }
     Ok(forward(&state, &parts, collected, peer, &j).await)
 }
@@ -221,11 +239,21 @@ async fn forward(state: &ProxyState, parts: &http::request::Parts, body: Bytes, 
     let mut headers = parts.headers.clone();
     strip_hop_by_hop(&mut headers);
     headers.remove(hyper::header::HOST);
-    let xff = match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        Some(prev) => format!("{prev}, {}", peer.ip()),
-        None => peer.ip().to_string(),
-    };
-    if let Ok(v) = HeaderValue::from_str(&xff) {
+    // Decision headers are only ever set by the proxy: drop any the client sent.
+    let spoofed: Vec<HeaderName> =
+        headers.keys().filter(|k| k.as_str().starts_with("x-venusflytrap-")).cloned().collect();
+    for k in spoofed {
+        headers.remove(k);
+    }
+    // Every X-Forwarded-For line in order, then the peer (not just the first line).
+    let mut xff: Vec<u8> = Vec::new();
+    for v in headers.get_all("x-forwarded-for") {
+        xff.extend_from_slice(v.as_bytes());
+        xff.extend_from_slice(b", ");
+    }
+    xff.extend_from_slice(peer.ip().to_string().as_bytes());
+    // Every piece is already a valid header value, so this does not fail.
+    if let Ok(v) = HeaderValue::from_bytes(&xff) {
         headers.insert("x-forwarded-for", v);
     }
     headers.append(hyper::header::VIA, HeaderValue::from_static("1.1 venusflytrap"));
