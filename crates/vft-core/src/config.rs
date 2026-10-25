@@ -10,6 +10,15 @@ pub struct Config {
     pub scoring: ScoringConfig,
     pub chain: ChainConfig,
     pub honeypot: HoneypotConfig,
+    pub proxy: ProxyConfig,
+}
+
+/// Data-plane settings that the engine itself does not use.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProxyConfig {
+    /// Peers whose `X-Forwarded-For` is trusted (exact IPs).
+    pub trusted_proxies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +297,12 @@ impl Config {
             bad("chain.ban_policy.max_bans", format!("must be >= 64, got {}", b.max_bans));
         }
 
+        for p in &self.proxy.trusted_proxies {
+            if p.parse::<std::net::IpAddr>().is_err() {
+                bad("proxy.trusted_proxies", format!("not an IP address: {p:?}"));
+            }
+        }
+
         for (key, list) in [
             ("honeypot.decoy_paths", &self.honeypot.decoy_paths),
             ("honeypot.sensitive_paths", &self.honeypot.sensitive_paths),
@@ -336,6 +351,10 @@ mod tests {
         assert!(issues("chain:\n  ban_policy:\n    ttl_max_secs: 1\n")
             .iter()
             .any(|i| i.key == "chain.ban_policy.ttl_max_secs"));
+        assert!(issues("proxy:\n  trusted_proxies: [\"10.0.0.1\", \"proxy.example\"]\n")
+            .iter()
+            .any(|i| i.key == "proxy.trusted_proxies"));
+        assert!(issues("proxy:\n  trusted_proxies: [\"10.0.0.1\", \"::1\"]\n").is_empty());
     }
 
     #[test]

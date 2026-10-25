@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -14,28 +14,26 @@ use hyper::{Request as HyperReq, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-use vft_core::{ChainTracker, Judgment, Request as VftRequest, Shield, Verdict};
+use vft_core::{Judgment, Shield, Verdict};
 
 pub mod adapt;
+pub mod pipeline;
 pub mod audit;
 pub use hyper::http;
 
 /// Shared proxy state.
 pub struct ProxyState {
-    pub shield: Shield,
-    pub chain: Mutex<ChainTracker>,
+    pub pipeline: pipeline::Pipeline,
     pub upstream: String,
     pub audit: audit::AuditLog,
-    /// If true, Monitor/Allow forward and only Block/Challenge are stopped.
+    /// If true, Block/Challenge are stopped; otherwise everything is forwarded.
     pub enforce: bool,
 }
 
 impl ProxyState {
     pub fn new(shield: Shield, upstream: String, audit_path: Option<String>, enforce: bool) -> Self {
-        let chain = ChainTracker::new(&shield.config().chain);
         ProxyState {
-            shield,
-            chain: Mutex::new(chain),
+            pipeline: pipeline::Pipeline::new(Arc::new(shield)),
             upstream,
             audit: audit::AuditLog::new(audit_path),
             enforce,
@@ -43,17 +41,11 @@ impl ProxyState {
     }
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// Judge a request without forwarding — used by the handler and by tests.
-pub fn judge(state: &ProxyState, req: &VftRequest) -> Judgment {
-    let mut chain = state.chain.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    state.shield.inspect_stateful(req, &mut chain, now_ms())
 }
 
 async fn handle(
@@ -63,9 +55,9 @@ async fn handle(
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let (parts, body) = req.into_parts();
     let collected = body.collect().await?.to_bytes();
-    let vreq = adapt::from_parts(&parts, &collected, peer.map(|p| p.ip()));
-    let judgment = judge(&state, &vreq);
-    state.audit.record(&vreq, &judgment);
+    let decision = state.pipeline.decide(&parts, &collected, peer.map(|p| p.ip()), now_ms());
+    state.audit.record(&decision.request, &decision.judgment);
+    let judgment = decision.judgment;
 
     let blocked = state.enforce
         && matches!(judgment.verdict, Verdict::Block | Verdict::Challenge);
@@ -186,10 +178,14 @@ mod tests {
     #[test]
     fn judges_sqli_as_block() {
         let st = state();
-        let mut req = VftRequest::get("/x");
-        req.query.push(("id".into(), "1 union select a,b".into()));
-        let j = judge(&st, &req);
-        assert_eq!(j.verdict, Verdict::Block);
+        let parts = hyper::http::Request::builder()
+            .uri("/x?id=1%20union%20select%20a,b")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let d = st.pipeline.decide(&parts, b"", None, 0);
+        assert_eq!(d.judgment.verdict, Verdict::Block);
     }
 
     #[test]
@@ -198,14 +194,14 @@ mod tests {
         // folding the engine should catch it.
         let st = state();
         let fw = "\u{ff35}\u{ff2e}\u{ff29}\u{ff2f}\u{ff2e} \u{ff33}\u{ff25}\u{ff2c}\u{ff25}\u{ff23}\u{ff34} 1";
-        let enc: String = fw
-            .bytes()
-            .map(|b| format!("%{b:02X}"))
-            .collect();
-        let q = adapt::form_urlencoded_parse(&format!("id={enc}"));
-        let mut req = VftRequest::get("/x");
-        req.query = q;
-        let j = judge(&st, &req);
+        let enc: String = fw.bytes().map(|b| format!("%{b:02X}")).collect();
+        let parts = hyper::http::Request::builder()
+            .uri(format!("/x?id={enc}"))
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let j = st.pipeline.decide(&parts, b"", None, 0).judgment;
         assert!(
             matches!(j.verdict, Verdict::Block | Verdict::Challenge),
             "fullwidth-encoded sqli evaded: {:?} {}",
