@@ -76,7 +76,9 @@ pub struct ShieldConfig {
     /// Token windows (4096 tokens, overlapping by 64) analyzed per field before
     /// giving up. When they run out the field is reported as `limit.graph-truncated`.
     pub max_graph_windows: usize,
-    /// Bytes of one request's fields inspected, summed across fields and chunks.
+    /// Bytes of one request's fields inspected (each field charged once, so
+    /// chunk overlap is free). Default 4 MiB: a 1 MiB body after lossy UTF-8
+    /// inflation, plus headers.
     /// Past it the rest is skipped and the request is reported as
     /// `limit.payload-truncated`. Must be >= `max_payload`.
     pub max_inspect_bytes: usize,
@@ -92,7 +94,7 @@ impl Default for ShieldConfig {
             decode_cap: 14,
             deep_threshold: 3,
             max_graph_windows: 32,
-            max_inspect_bytes: 1024 * 1024,
+            max_inspect_bytes: 4 * 1024 * 1024,
             disabled: Vec::new(),
         }
     }

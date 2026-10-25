@@ -45,7 +45,9 @@ proptest! {
 fn huge_payload_is_bounded() {
     let big = "A".repeat(2_000_000);
     let dur = inspect_value(&big);
-    assert!(dur < Duration::from_secs(1), "took {dur:?}");
+    // The default inspection budget is 4 MiB per request, so this inspects ~4 MiB
+    // of the 6 MB sent: ~2 s in a debug build, ~0.13 s in release. Bounded either way.
+    assert!(dur < Duration::from_secs(5), "took {dur:?}");
 }
 
 #[test]

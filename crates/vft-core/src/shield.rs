@@ -96,14 +96,24 @@ impl Shield {
         let mut payload_truncated = false;
         'fields: for field in req.fields() {
             let fref = FieldRef::of(&field);
-            for chunk in crate::normalize::chunks(&field.raw, self.cfg.shield.max_payload) {
-                if chunk.len() > budget {
+            let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
+            let last = ranges.len().saturating_sub(1);
+            let mut prev_end = 0usize;
+            for (i, range) in ranges.into_iter().enumerate() {
+                // Each field's text is charged once: a chunk pays only for the
+                // bytes it adds beyond the previous chunk's end.
+                let added = range.end.saturating_sub(prev_end);
+                if added > budget {
                     payload_truncated = true;
                     break 'fields;
                 }
-                budget -= chunk.len();
+                budget -= added;
+                prev_end = range.end;
+                let chunk = &field.raw[range];
                 let n = normalize(chunk, &self.norm_opts);
-                payload_truncated |= n.truncated;
+                // Only a real loss counts: the field's last chunk, or a cut
+                // longer than the overlap that the next chunk re-inspects.
+                payload_truncated |= n.truncated && (i == last || n.cut_chars > crate::normalize::CHUNK_OVERLAP);
                 max_layers = max_layers.max(n.layers);
                 let analysis = graph::analyze_with(&n.text, &gopts);
                 if analysis.graph_truncated {
@@ -664,5 +674,96 @@ mod tests {
         req.query.push(("q".into(), "a".repeat(200_000)));
         let j = Shield::new(cfg).inspect(&req);
         assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.payload-truncated")));
+    }
+
+    const FDFA: char = '\u{FDFA}'; // NFKC expands this one char into 18
+
+    fn count_limit(j: &Judgment) -> usize {
+        j.contributions.iter().filter(|c| c.construct.as_deref() == Some("limit.payload-truncated")).count()
+    }
+
+    fn has_limit(j: &Judgment) -> bool {
+        count_limit(j) > 0
+    }
+
+    fn small_payload_cfg() -> Config {
+        let mut cfg = Config::default();
+        cfg.shield.max_payload = 1024;
+        cfg
+    }
+
+    /// A 3,000-char field (several chunks at max_payload 1024) with `k` FDFA
+    /// chars at char offset `at`.
+    fn field_with_fdfa(at: usize, k: usize) -> String {
+        let mut v: Vec<char> = "a".repeat(3000).chars().collect();
+        for c in v.iter_mut().skip(at).take(k) {
+            *c = FDFA;
+        }
+        v.into_iter().collect()
+    }
+
+    #[test]
+    fn interior_cut_within_the_overlap_is_not_a_limit() {
+        // 5 FDFA in chunk 0: post-fold overflow is 85 chars (<= 256), and chunk 1
+        // re-inspects that tail through the overlap.
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), field_with_fdfa(0, 5)));
+        assert!(!has_limit(&Shield::new(small_payload_cfg()).inspect(&req)));
+    }
+
+    #[test]
+    fn interior_cut_beyond_the_overlap_is_a_limit() {
+        // 20 FDFA in chunk 0: overflow is 340 chars (> 256).
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), field_with_fdfa(0, 20)));
+        assert!(has_limit(&Shield::new(small_payload_cfg()).inspect(&req)));
+    }
+
+    #[test]
+    fn last_chunk_cut_is_a_limit() {
+        // 20 FDFA at the end: the last chunk (696 chars) folds past 1024 and no
+        // later chunk re-inspects the cut text.
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), field_with_fdfa(2950, 20)));
+        assert!(has_limit(&Shield::new(small_payload_cfg()).inspect(&req)));
+    }
+
+    #[test]
+    fn many_cuts_and_an_exhausted_budget_emit_one_limit() {
+        let mut cfg = small_payload_cfg();
+        cfg.shield.max_inspect_bytes = 1024;
+        let mut req = Request::get("/items");
+        for i in 0..3 {
+            req.query.push((format!("q{i}"), FDFA.to_string().repeat(80))); // 240 bytes, folds to 1,440 chars
+        }
+        req.query.push(("tail".into(), "a".repeat(500))); // past the budget
+        assert_eq!(count_limit(&Shield::new(cfg).inspect(&req)), 1);
+    }
+
+    #[test]
+    fn limit_can_be_disabled() {
+        let mut cfg = small_payload_cfg();
+        cfg.shield.disabled = vec!["limit.payload-truncated".into()];
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), field_with_fdfa(2950, 20)));
+        assert_eq!(count_limit(&Shield::new(cfg).inspect(&req)), 0);
+    }
+
+    #[test]
+    fn attack_at_the_end_of_a_one_mib_body_blocks() {
+        let tail = " 1 union select a,b from users-- ";
+        let mut req = Request::get("/items");
+        req.method = "POST".into();
+        req.body = format!("{}{}", "a".repeat(1_048_510 - tail.len()), tail).into_bytes();
+        assert_eq!(req.body.len(), 1_048_510);
+        assert_eq!(Shield::new(Config::default()).inspect(&req).verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn lossy_inflated_body_within_the_default_budget_is_not_a_limit() {
+        let mut req = Request::get("/items");
+        req.method = "POST".into();
+        req.body = vec![0xFF; 400 * 1024]; // each invalid byte becomes a 3-byte U+FFFD
+        assert!(!has_limit(&Shield::new(Config::default()).inspect(&req)));
     }
 }

@@ -31,6 +31,10 @@ pub struct Normalized {
     pub flags: Flags,
     /// Normalization cut text: the input exceeded `max_payload`, or NFKC expansion did.
     pub truncated: bool,
+    /// Chars cut when `truncated` is set: the input overflow plus the post-fold
+    /// overflow. A cut of at most [`CHUNK_OVERLAP`] chars from an interior chunk
+    /// is re-inspected by the next chunk's overlap.
+    pub cut_chars: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +60,9 @@ impl Default for Options {
 /// Normalize a single field value.
 pub fn normalize(input: &str, opts: &Options) -> Normalized {
     // Bound the work first.
-    let mut truncated = input.chars().count() > opts.max_payload;
+    let input_chars = input.chars().count();
+    let mut truncated = input_chars > opts.max_payload;
+    let mut cut_chars = input_chars.saturating_sub(opts.max_payload);
     let bounded: String = input.chars().take(opts.max_payload).collect();
 
     let mut flags = Flags::default();
@@ -72,9 +78,11 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
     let mut folded = fold_unicode(&decoded);
     // Cap post-fold length: NFKC can expand some code points many-fold, so bound
     // the string again before tokenization (L3).
-    if folded.chars().count() > opts.max_payload {
+    let folded_chars = folded.chars().count();
+    if folded_chars > opts.max_payload {
         folded = folded.chars().take(opts.max_payload).collect();
         truncated = true;
+        cut_chars += folded_chars - opts.max_payload;
     }
     let canon = canonicalize_ws_comments(&folded, &mut flags);
 
@@ -84,6 +92,7 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
         layers,
         flags,
         truncated,
+        cut_chars,
     }
 }
 
@@ -93,10 +102,16 @@ pub const CHUNK_OVERLAP: usize = 256;
 /// Split `s` into chunks of at most `max` chars that overlap by
 /// [`CHUNK_OVERLAP`] chars. A string of at most `max` chars is one chunk.
 pub fn chunks(s: &str, max: usize) -> Vec<&str> {
+    chunk_ranges(s, max).into_iter().map(|r| &s[r]).collect()
+}
+
+/// The byte ranges of [`chunks`]: ascending, on char boundaries, and each one
+/// ends after the previous one, so `end - previous_end` is the bytes it adds.
+pub fn chunk_ranges(s: &str, max: usize) -> Vec<std::ops::Range<usize>> {
     let idx: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
     let n = idx.len();
     if n <= max {
-        return vec![s];
+        return std::iter::once(0..s.len()).collect();
     }
     let step = max.saturating_sub(CHUNK_OVERLAP).max(1);
     let mut out = Vec::new();
@@ -105,7 +120,7 @@ pub fn chunks(s: &str, max: usize) -> Vec<&str> {
         let end = (start + max).min(n);
         let lo = idx[start];
         let hi = if end == n { s.len() } else { idx[end] };
-        out.push(&s[lo..hi]);
+        out.push(lo..hi);
         if end == n {
             break;
         }
