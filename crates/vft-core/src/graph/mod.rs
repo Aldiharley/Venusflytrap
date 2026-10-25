@@ -34,13 +34,21 @@ impl Analysis {
     }
 }
 
+/// How to run the token graph over one field.
+pub struct GraphOpts<'a> {
+    pub disabled: &'a Disabled,
+    /// Token windows of `MAX_NODES` to analyze before giving up (fail-closed
+    /// handling arrives with windowing; 1 = today's single truncated window).
+    pub max_windows: usize,
+}
+
 /// Analyze one normalized field value with every construct enabled.
 pub fn analyze(text: &str) -> Analysis {
-    analyze_with(text, &Disabled::default())
+    analyze_with(text, &GraphOpts { disabled: &Disabled::default(), max_windows: 1 })
 }
 
 /// Analyze one normalized field value, skipping disabled constructs.
-pub fn analyze_with(text: &str, disabled: &Disabled) -> Analysis {
+pub fn analyze_with(text: &str, opts: &GraphOpts) -> Analysis {
     let mut tokens = tokenize(text);
     let graph_truncated = tokens.len() > MAX_NODES;
     if graph_truncated {
@@ -51,7 +59,7 @@ pub fn analyze_with(text: &str, disabled: &Disabled) -> Analysis {
     // structural sink we find *is* reachable from the tainted source. We still
     // distinguish "formed a dangerous construct" (reachable) from "contains a
     // lone dangerous token" (latent) to keep false positives down.
-    let mut hits = Hits::new(disabled);
+    let mut hits = Hits::new(opts.disabled);
     let cx = SinkCtx { tokens: &tokens, text };
     sinks::sql::detect(&cx, &mut hits);
     sinks::xss::detect(&cx, &mut hits);

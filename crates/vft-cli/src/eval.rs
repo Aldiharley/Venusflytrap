@@ -526,9 +526,59 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
     })
 }
 
+#[derive(Debug, Serialize)]
+pub struct AblationRow {
+    pub id: &'static str,
+    pub kind: String,
+    pub tp: u64,
+    pub fp: u64,
+    /// True positives this construct contributes: baseline TP minus TP with it disabled.
+    pub d_tp: i64,
+    /// False positives this construct contributes.
+    pub d_fp: i64,
+}
+
+/// Leave-one-out over `ids` in library mode: one baseline run, then one run per
+/// id with only that id added to `shield.disabled`.
+pub fn ablate(cfg: &Config, samples: &[Sample], ids: &[&'static str]) -> anyhow::Result<Vec<AblationRow>> {
+    let lib = |c: Config| -> anyhow::Result<Metrics> {
+        let sources: Sources = "distinct".parse().map_err(anyhow::Error::msg)?;
+        Ok(run(c, samples, false, sources, 100, None)?.library)
+    };
+    let base = lib(cfg.clone())?;
+    let mut rows = Vec::new();
+    for &id in ids {
+        let info = vft_core::graph::sinks::lookup(id).ok_or_else(|| anyhow::anyhow!("unknown construct id {id:?}"))?;
+        let mut c = cfg.clone();
+        if !c.shield.disabled.iter().any(|d| d == id) {
+            c.shield.disabled.push(id.to_string());
+        }
+        let m = lib(c)?;
+        rows.push(AblationRow {
+            id: info.id,
+            kind: format!("{:?}", info.kind),
+            tp: m.tp,
+            fp: m.fp,
+            d_tp: base.tp as i64 - m.tp as i64,
+            d_fp: base.fp as i64 - m.fp as i64,
+        });
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ablate_reports_what_a_construct_contributes() {
+        let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let rows = ablate(&Config::default(), &[attack, benign], &["sqli.union-select"]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "sqli.union-select");
+        assert_eq!((rows[0].d_tp, rows[0].d_fp), (1, 0));
+    }
 
     #[test]
     fn replay_io_failures_are_errors_and_early_replies_are_read() {

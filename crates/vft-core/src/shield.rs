@@ -7,7 +7,7 @@ use crate::detect::{
     intent_evidence, AiDetector, AiOracle, ApiSafetyDetector, FieldCtx, FieldDetector,
     GraphTaintDetector, HeuristicOracle, SignatureDetector,
 };
-use crate::graph;
+use crate::graph::{self, sinks, sinks::Disabled};
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
 use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
@@ -22,6 +22,7 @@ pub struct Shield {
     honeypot: Honeypot,
     intel: Intel,
     oracle: Box<dyn AiOracle>,
+    disabled: Disabled,
 }
 
 impl Shield {
@@ -37,12 +38,14 @@ impl Shield {
         };
         let honeypot = Honeypot::new(&cfg.honeypot);
         let intel = Intel::with_defaults();
+        let disabled = Disabled::resolve(&cfg.shield.disabled);
         Shield {
             cfg,
             norm_opts,
             honeypot,
             intel,
             oracle,
+            disabled,
         }
     }
 
@@ -83,15 +86,17 @@ impl Shield {
         let ai = AiDetector {
             oracle: self.oracle.as_ref(),
         };
+        let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: 1 };
 
         for field in req.fields() {
             let n = normalize(&field.raw, &self.norm_opts);
             max_layers = max_layers.max(n.layers);
-            let analysis = graph::analyze(&n.text);
+            let analysis = graph::analyze_with(&n.text, &gopts);
             let ctx = FieldCtx {
                 field: &field,
                 norm: &n,
                 analysis: &analysis,
+                disabled: &self.disabled,
             };
             let fref = FieldRef::of(&field);
             for (det, w) in &field_detectors {
@@ -103,7 +108,7 @@ impl Shield {
             rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref), e);
         }
 
-        if let Some(first) = req.non_utf8_headers.first() {
+        if let Some(first) = req.non_utf8_headers.first().filter(|_| !self.disabled.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
             rec.record(
                 "adapter",
                 self.cfg.scoring.weight_api,
@@ -111,7 +116,7 @@ impl Shield {
                 Evidence::new(
                     FourValued::Suspicious,
                     0.6,
-                    vec![crate::graph::sinks::LIMIT_HEADER_NON_UTF8.pattern()],
+                    vec![sinks::LIMIT_HEADER_NON_UTF8.pattern()],
                     format!("non-UTF-8 bytes in header(s): {}", req.non_utf8_headers.join(", ")),
                 ),
             );
@@ -121,7 +126,7 @@ impl Shield {
         {
             let n = normalize(&req.path, &self.norm_opts);
             max_layers = max_layers.max(n.layers);
-            let analysis = graph::analyze(&n.text);
+            let analysis = graph::analyze_with(&n.text, &gopts);
             if !analysis.reachable.is_empty() {
                 let e = Evidence::new(
                     FourValued::Dangerous,
@@ -139,21 +144,23 @@ impl Shield {
         }
 
         // Request-level intent (recon of sensitive paths).
-        let intent = intent_evidence(req, &self.cfg);
+        let intent = intent_evidence(req, &self.cfg, &self.disabled);
         rec.record("intent", self.cfg.scoring.weight_intent, Some(FieldRef::path()), intent);
 
         // Intel UA fingerprint.
-        let ua_e = self.intel.ua_evidence(req.user_agent());
-        rec.record(
-            "intel",
-            self.cfg.scoring.weight_intent,
-            Some(FieldRef::header("user-agent")),
-            ua_e,
-        );
+        if !self.disabled.is(&sinks::INTEL_SCANNER_UA) {
+            let ua_e = self.intel.ua_evidence(req.user_agent());
+            rec.record(
+                "intel",
+                self.cfg.scoring.weight_intent,
+                Some(FieldRef::header("user-agent")),
+                ua_e,
+            );
+        }
 
         // Honeypot.
         let mut hard_block = denied;
-        let honeypot_hit = self.honeypot.check(req);
+        let honeypot_hit = if self.disabled.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
         if let Some(e) = honeypot_hit {
             hard_block = true;
             rec.record("honeypot", 1.0, Some(FieldRef::path()), e);
@@ -402,6 +409,29 @@ mod tests {
         assert_eq!(c.field, Some(FieldRef { loc: Location::Query, name: "id".into() }));
         assert_eq!(c.family, Some(Family::Sqli));
         assert_eq!(c.value, FourValued::Dangerous);
+    }
+
+    #[test]
+    fn disabling_a_construct_removes_it_from_judgments() {
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), "1 union select password from users".into()));
+        let on = Shield::new(Config::default()).inspect(&req);
+        assert!(on.contributions.iter().any(|c| c.construct.as_deref() == Some("sqli.union-select")));
+        let mut cfg = Config::default();
+        cfg.shield.disabled = vec!["sqli.union-select".into()];
+        let off = Shield::new(cfg).inspect(&req);
+        assert!(!off.contributions.iter().any(|c| c.construct.as_deref() == Some("sqli.union-select")));
+    }
+
+    #[test]
+    fn disabling_the_honeypot_skips_it() {
+        let cfg = Config::default();
+        let decoy = cfg.honeypot.decoy_paths.first().cloned().expect("default config has a decoy path");
+        let req = Request::get(decoy);
+        let mut off_cfg = Config::default();
+        off_cfg.shield.disabled = vec!["honeypot.decoy-hit".into()];
+        let j = Shield::new(off_cfg).inspect(&req);
+        assert!(!j.contributions.iter().any(|c| c.construct.as_deref() == Some("honeypot.decoy-hit")));
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub struct ShieldConfig {
     pub max_payload: usize,
     pub decode_cap: u8,
     pub deep_threshold: u8,
+    /// Construct or decoder ids switched off (see `venusflytrap ablate`).
+    /// Every id must be registered; unknown ids fail validation.
+    pub disabled: Vec<String>,
 }
 
 impl Default for ShieldConfig {
@@ -81,6 +84,7 @@ impl Default for ShieldConfig {
             max_payload: 64 * 1024,
             decode_cap: 14,
             deep_threshold: 3,
+            disabled: Vec::new(),
         }
     }
 }
@@ -281,6 +285,9 @@ impl Config {
         if sh.deep_threshold == 0 || sh.deep_threshold > sh.decode_cap {
             bad("shield.deep_threshold", format!("must be in 1..=decode_cap, got {}", sh.deep_threshold));
         }
+        for id in crate::graph::sinks::unknown_ids(&sh.disabled) {
+            bad("shield.disabled", format!("unknown construct id {id:?}"));
+        }
 
         let s = &self.scoring;
         for (key, w) in [
@@ -396,6 +403,12 @@ mod tests {
     fn issues(yaml: &str) -> Vec<ConfigIssue> {
         let cfg: Config = serde_yaml::from_str(yaml).expect("parses");
         cfg.validate().err().unwrap_or_default()
+    }
+
+    #[test]
+    fn disabled_ids_must_be_registered() {
+        assert!(issues("shield:\n  disabled: [nope.nope]\n").iter().any(|i| i.key == "shield.disabled"));
+        assert!(issues("shield:\n  disabled: [sqli.union-select]\n").is_empty());
     }
 
     #[test]

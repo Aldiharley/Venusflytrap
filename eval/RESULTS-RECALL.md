@@ -41,3 +41,43 @@ and regex baselines read the Python-parsed JSONL, which still holds those 2 requ
 ## M1 — registry refactor
 
 Decision diffs vs M0 build: library 0, serve 0, seeds 0, mutants 0 (33,877 + 33,877 + 22 + 660 requests).
+
+## M1 — existing constructs, leave-one-out on dev
+
+These constructs predate recall-lift: reported only, nothing is dropped (spec §4.3). `d_tp`/`d_fp` are the true/false positives each construct contributes on the dev half (library mode, baseline TP 147, FP 142); `net` = `d_tp` - `d_fp`.
+
+| id | kind | tp | fp | d_tp | d_fp | net |
+|---|---|---|---|---|---|---|
+| sqli.union-select | Sink | 144 | 102 | 3 | 40 | -37 |
+| sqli.boolean-tautology | Sink | 134 | 117 | 13 | 25 | -12 |
+| sqli.quote-breakout | Sink | 136 | 135 | 11 | 7 | 4 |
+| sqli.stacked-query | Sink | 144 | 134 | 3 | 8 | -5 |
+| sqli.sql-keyword | Latent | 147 | 142 | 0 | 0 | 0 |
+| sqli.fn-sleep | Latent | 147 | 142 | 0 | 0 | 0 |
+| sqli.fn-benchmark | Latent | 147 | 142 | 0 | 0 | 0 |
+| sqli.fn-updatexml | Latent | 147 | 142 | 0 | 0 | 0 |
+| sqli.fn-extractvalue | Latent | 147 | 142 | 0 | 0 | 0 |
+| sqli.fn-load-file | Latent | 147 | 142 | 0 | 0 | 0 |
+| sqli.fn-pg-sleep | Latent | 147 | 142 | 0 | 0 | 0 |
+| xss.script-tag | Sink | 137 | 134 | 10 | 8 | 2 |
+| xss.event-handler | Sink | 141 | 138 | 6 | 4 | 2 |
+| xss.dangerous-proto | Sink | 117 | 134 | 30 | 8 | 22 |
+| xss.tag-with-handler | Sink | 147 | 142 | 0 | 0 | 0 |
+| xss.html-tag | Latent | 147 | 142 | 0 | 0 | 0 |
+| cmd.cmd-substitution | Sink | 144 | 142 | 3 | 0 | 3 |
+| cmd.chained-command | Sink | 141 | 105 | 6 | 37 | -31 |
+| cmd.shell-meta | Latent | 147 | 142 | 0 | 0 | 0 |
+| path.directory-traversal | Sink | 143 | 141 | 4 | 1 | 3 |
+| path.dotdot-segment | Latent | 147 | 142 | 0 | 0 | 0 |
+| sig.union-all-select | Signature | 147 | 142 | 0 | 0 | 0 |
+| sig.classic-or | Signature | 147 | 142 | 0 | 0 | 0 |
+| sig.schema-enum | Signature | 146 | 142 | 1 | 0 | 1 |
+| sig.alert-script | Signature | 147 | 142 | 0 | 0 | 0 |
+| sig.onerror | Signature | 147 | 142 | 0 | 0 | 0 |
+| sig.etc-passwd | Signature | 144 | 142 | 3 | 0 | 3 |
+| sig.cat-subst | Signature | 147 | 142 | 0 | 0 | 0 |
+| api.type-violation | Signature | 147 | 142 | 0 | 0 | 0 |
+| recon.sensitive-path-probe | Signature | 147 | 142 | 0 | 0 | 0 |
+| honeypot.decoy-hit | Signature | 147 | 142 | 0 | 0 | 0 |
+| intel.scanner-ua | Signature | 147 | 142 | 0 | 0 | 0 |
+| limit.header-non-utf8 | Limit | 147 | 142 | 0 | 0 | 0 |
