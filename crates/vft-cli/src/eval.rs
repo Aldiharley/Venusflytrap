@@ -366,7 +366,10 @@ pub fn rewrite_for_replay(raw: &[u8], xff: IpAddr) -> Option<Vec<u8>> {
 pub struct TcpReport {
     pub replayed: u64,
     pub not_replayable: u64,
-    pub matched: u64,
+    /// Status 403 and the in-process verdict is Block/Challenge.
+    pub matched_block: u64,
+    /// Status 200 and the in-process verdict is Allow/Monitor.
+    pub matched_allow: u64,
     /// The proxy refused the request at the HTTP layer (400/413/431/501) while
     /// the lenient in-process parser accepted it.
     pub proxy_rejected: u64,
@@ -374,6 +377,38 @@ pub struct TcpReport {
     pub mismatch_examples: Vec<String>,
     /// First 20 proxy-rejected files, as `rel status=<code>`.
     pub proxy_rejected_examples: Vec<String>,
+}
+
+const REPLAY_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Send `raw` to `addr` and return the HTTP status of the reply. Connect, write and read are each bounded by
+/// `limit`. A write failure or timeout (the proxy may answer 413/431 and close
+/// before reading the whole request) still gets a bounded read of whatever the
+/// proxy sent; when no status arrived the result is an error (the write failure if there was one).
+async fn send_and_read(addr: std::net::SocketAddr, raw: &[u8], limit: std::time::Duration) -> Result<u16, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sock = match tokio::time::timeout(limit, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(format!("connect: {e}")),
+        Err(_) => return Err("connect timeout".into()),
+    };
+    let write_err = match tokio::time::timeout(limit, sock.write_all(raw)).await {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(format!("write: {e}")),
+        Err(_) => Some("write timeout".to_string()),
+    };
+    let mut resp = Vec::new();
+    let _ = tokio::time::timeout(limit, sock.read_to_end(&mut resp)).await;
+    let status: u16 = std::str::from_utf8(&resp)
+        .ok()
+        .and_then(|t| t.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    match (status, write_err) {
+        (0, Some(e)) => Err(e),
+        (0, None) => Err("no parsable status line in reply".to_string()),
+        (code, _) => Ok(code),
+    }
 }
 
 pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<TcpReport> {
@@ -421,18 +456,22 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
                 continue;
             };
             let d = local.decide(&p.parts, &p.body, Some(loopback), vft_proxy::now_ms());
-            let mut sock = tokio::net::TcpStream::connect(proxy_addr).await?;
-            sock.write_all(&raw).await?;
-            let mut resp = Vec::new();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), sock.read_to_end(&mut resp)).await;
-            let status: u16 = std::str::from_utf8(&resp)
-                .ok()
-                .and_then(|t| t.split_whitespace().nth(1))
-                .and_then(|c| c.parse().ok())
-                .unwrap_or(0);
+            let status = send_and_read(proxy_addr, &raw, REPLAY_IO_TIMEOUT).await;
             r.replayed += 1;
-            match (status, attack(d.judgment.verdict)) {
-                (403, true) | (200, false) => r.matched += 1,
+            let blocked = attack(d.judgment.verdict);
+            let status = match status {
+                Ok(code) => code,
+                Err(e) => {
+                    r.mismatched += 1;
+                    if r.mismatch_examples.len() < 20 {
+                        r.mismatch_examples.push(format!("{} io_failure={e} in_process_block={blocked}", s.rel));
+                    }
+                    continue;
+                }
+            };
+            match (status, blocked) {
+                (403, true) => r.matched_block += 1,
+                (200, false) => r.matched_allow += 1,
                 (400 | 413 | 431 | 501, _) => {
                     r.proxy_rejected += 1;
                     if r.proxy_rejected_examples.len() < 20 {
@@ -454,6 +493,62 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_io_failures_are_errors_and_early_replies_are_read() {
+        use tokio::io::AsyncWriteExt;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let limit = std::time::Duration::from_millis(300);
+            // Nothing is listening: a connect failure is an Err, not a panic.
+            let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dead_addr = dead.local_addr().unwrap();
+            drop(dead);
+            let e = send_and_read(dead_addr, b"GET / HTTP/1.1
+
+", limit).await.unwrap_err();
+            assert!(e.starts_with("connect"), "{e}");
+            let big = vec![b'a'; 64 << 20];
+            // Replies 413 at once and never reads: the write stalls, the reply is still classified.
+            let early = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let early_addr = early.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut s, _) = early.accept().await.unwrap();
+                let _ = s.write_all(b"HTTP/1.1 413 Payload Too Large
+Content-Length: 0
+Connection: close
+
+").await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+            assert_eq!(send_and_read(early_addr, &big, limit).await, Ok(413));
+            // Accepts, never reads, never replies: no reply is an Err (stalled write or empty read).
+            let mute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mute_addr = mute.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (_s, _) = mute.accept().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+            assert!(send_and_read(mute_addr, &big, limit).await.is_err());
+        });
+    }
+
+    #[test]
+    fn tcp_report_separates_block_and_allow_matches() {
+        let mk = |rel: &str, label, raw: &[u8]| Sample { rel: rel.into(), label, raw: raw.to_vec(), unreadable: None };
+        let samples = vec![
+            mk("a.white", 0, b"GET /index.html?page=2 HTTP/1.1
+Host: x
+
+"),
+            mk("b.black", 1, b"GET /?id=1%20UNION%20SELECT%20password%20FROM%20users-- HTTP/1.1
+Host: x
+
+"),
+        ];
+        let r = run_tcp(Config::default(), &samples, 10).unwrap();
+        assert_eq!((r.matched_allow, r.matched_block, r.mismatched, r.proxy_rejected), (1, 1, 0, 0), "{r:?}");
+    }
 
     #[test]
     fn replay_rewrite_sets_framing_and_xff() {

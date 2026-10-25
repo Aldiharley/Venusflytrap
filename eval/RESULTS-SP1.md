@@ -44,12 +44,13 @@ are `.black`) over sockets: own `X-Forwarded-For` per sample (`proxy.trusted_pro
 `Connection: close`, exact `Content-Length`. The in-process `Pipeline::decide` runs on an identically configured
 pipeline immediately before each send; 403 must equal Block/Challenge and 200 must equal Allow/Monitor.
 
-| Run | replayed | matched | proxy_rejected | not_replayable | mismatched |
-|---|---|---|---|---|---|
-| first 1,000 (distinct sources) | 992 | 991 | 1 | 8 | 0 |
+| Run | replayed | matched_block (403) | matched_allow (200) | proxy_rejected | not_replayable | mismatched |
+|---|---|---|---|---|---|---|
+| first 1,000 (distinct sources) | 992 | 20 | 971 | 1 | 8 | 0 |
 
 `not_replayable` (8): Transfer-Encoding or Upgrade samples, or requests the lenient parser cannot read after
 normalisation. `proxy_rejected` (1): `00/06/005a52981dd324c40488a1a588f9.white` answered 400 by hyper because its
 request target holds raw `<` and `>`; the lenient in-process parser percent-encodes them. This is a known
-front-end difference, not an engine mismatch. Caveat: the 1,000-sample prefix holds only 16 attack samples, so the
-403 path is exercised far less than the 200 path.
+front-end difference, not an engine mismatch. Caveat: the 1,000-sample prefix holds only 16 `.black` samples (20 requests were blocked in total, counting
+benign false positives), so the 403 path is exercised far less than the 200 path. A connect failure, a stalled
+write with no reply, or a reply without a status line counts as a mismatch, never an abort.
