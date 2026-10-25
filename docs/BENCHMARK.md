@@ -24,7 +24,12 @@ and it is not a result; its output goes to `target/bench/` and is not published 
   advances 100 ms per request. Two source models:
   - `distinct`: every request has its own source address, so a ban can never affect a later request.
   - `pooled:100`: requests are hashed by file name onto 100 shared source addresses. This models many
-    benign clients behind a NAT or an unconfigured trusted proxy.
+    benign clients behind a NAT or an unconfigured trusted proxy. `pooled:10` and `pooled:1000` are
+    reported in section 3 as well.
+- **Ban policy:** the shipped defaults after the ban-policy redesign. Every automatic ban (honeypot hit,
+  3 exploitation blocks within 600 s) also needs at least half of the source's requests in the last
+  600 s to be hostile (`chain.ban_policy.min_hostile_share: 0.5`), and a single exfiltration block is no
+  longer a ban trigger. SP1's policy is shown as "before" in sections 2 and 3.
 - **TCP replay:** the real proxy (`serve_listener`, enforcement on) on loopback in front of a stub
   upstream. The replay was run twice: over the first 1,000 samples (sorted by path) and over the whole corpus (33,877 samples). Every replayable sample is sent over a socket, and the proxy's answer
   (403 or 200) is compared with the in-process `Pipeline::decide` run on an identically configured
@@ -45,7 +50,8 @@ unreadable files counted as missed). The baselines read all 658 and have one fig
 |---|---|---|---|---|---|---|---|
 | Venusflytrap, library | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
 | Venusflytrap, serve, distinct | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
-| Venusflytrap, serve, pooled:100 | 446 | 15,848 | 210 / 212 | 67.99% / 67.78% | 2.74% | 0.0526 / 0.0526 | 47.71% |
+| Venusflytrap, serve, pooled:100 | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| Venusflytrap, serve, pooled:100, SP1 ban policy (before) | 446 | 15,848 | 210 / 212 | 67.99% / 67.78% | 2.74% | 0.0526 / 0.0526 | 47.71% |
 | libinjection (Python-parsed input) | 214 | 93 | 444 | 32.52% | 69.71% | 0.4435 | 0.28% |
 | Regex baseline (Python-parsed input) | 127 | 126 | 531 | 19.30% | 50.20% | 0.2788 | 0.38% |
 
@@ -63,30 +69,44 @@ How to read this:
   source per request, state never changes a block/allow decision, which is the expected check. The
   verdict labels are not all identical: 10 malicious requests are Challenge in the library and Block in
   serve, because the first exploitation event from a source adds the chain-stage bonus.
-- **Serve-pooled:100 is not a better detector.** Its extra true positives (446 vs 284) and its 47.71%
-  FP rate both come from bans: once a shared source is banned, every later request from it is rejected,
-  malicious or benign.
+- **Serve-pooled:100 now makes the same block/allow decision as library**, request for request: no
+  shared source is banned. Under SP1's ban policy it reported 446 true positives at a 47.71% FP rate;
+  both came from bans, because once a shared source was banned every later request from it was
+  rejected, malicious or benign. Those 162 extra true positives are gone with the redesign, and so are
+  15,577 collateral false positives.
 
 ## 3. Ban effects
 
-| Run | benign sources | benign sources banned | collateral FP | bans from allowed requests | invariant violations |
-|---|---|---|---|---|---|
-| serve, distinct | 33,219 | 72 | 0 | 0 | 0 |
-| serve, pooled:100 | 100 | 80 | 15,577 | 0 | 0 |
+Before = SP1's ban policy; after = the shipped defaults (hostile-share gate, no single-exfiltration ban).
 
-- `benign_sources_banned`: sources that sent at least one benign request and were banned. In the
-  distinct run these are 72 sources whose own benign request was blocked (a false positive) and then
-  banned.
+| Run | benign sources | benign sources banned (before / after) | collateral FP (before / after) | bans from allowed requests | invariant violations |
+|---|---|---|---|---|---|
+| serve, distinct | 33,219 | 72 / 0 | 0 / 0 | 0 | 0 |
+| serve, pooled:10 | 10 | 10 / 0 | 31,969 / 0 | 0 | 0 |
+| serve, pooled:100 | 100 | 80 / 0 | 15,577 / 0 | 0 | 0 |
+| serve, pooled:1000 | 1,000 | 107 / 1 | 1,723 / 8 | 0 | 0 |
+
+- `benign_sources_banned`: sources that sent at least one benign request and were banned. Before the
+  redesign, the 72 in the distinct run were sources whose own benign request was blocked (a false
+  positive) and then banned by the single-exfiltration trigger, which is now off.
 - `collateral_fp`: benign requests blocked in the serve run that the library path allowed, i.e. blocked
   only because their shared source was already banned.
 - `bans_from_allowed` is 0: no request that was allowed ever caused a ban.
 - `invariant_violations` is 0: every Allow in the corpus is recorded as benign in the attack chain.
 
-**Failed acceptance check.** The SP1 check "collateral FP is no larger than request-level FP" **fails**
-for pooled:100: collateral FP is 15,577 against 271 request-level false positives on the library path.
-The cause is that a single blocked exfiltration request bans a shared source for one hour, and with 100
-shared sources, 80 were banned. Redesigning the ban policy is a planned follow-up; this run changes no
-policy or configuration.
+**Acceptance check.** The SP1 check "collateral FP is no larger than request-level FP" failed under
+SP1's policy (pooled:100: 15,577 against 271): one blocked exfiltration request banned a shared source
+for an hour, and 80 of 100 shared sources were banned. With the redesigned policy it **passes**: 0
+against 271. At pooled:1000 one source, which sends about one request every 100 s, was banned by its
+third exploitation block within 10 minutes, and that 1 h ban blocked 8 later benign requests. Before
+choosing, shorter first TTLs (60 s: 1,943 collateral), a higher count threshold (5 blocks: 0 at
+pooled:100 but 29,923 at pooled:10) and honeypot-only bans (0, but the corpus has no honeypot hits)
+were measured too; the full table is in `eval/RESULTS-SP1.md`.
+
+**What the redesign gives up** (unit-tested, not visible in this corpus): a single exfiltration request
+from a fresh address is blocked but no longer bans the address; an attacker who sends at least one
+benign request per hostile one, or who sits behind a busy NAT, is never banned automatically; a honeypot
+hit from a busy source no longer bans it.
 
 ## 4. Mutation robustness
 
@@ -119,14 +139,15 @@ same inspection.
 |---|---|---|---|
 | Library (`Shield::inspect`), run 1 / run 2 | 72 / 70 | 224 / 213 | 659 / 645 |
 | Serve, distinct (`Pipeline::decide`), run 1 / run 2 | 70 / 73 | 217 / 233 | 641 / 715 |
-| Serve, pooled:100 (not comparable) | 47 | 214 | 458 |
+| Serve, pooled:100, SP1 ban policy (not comparable) | 47 | 214 | 458 |
 
 The library and serve-distinct rows come from an A/B run on one machine state, interleaving the binary
 from before the final-review fix wave with the current one. The earlier binary measured 64 / 191 / 653
 and 63 / 190 / 659 (library) and 63 / 187 / 642 and 63 / 187 / 669 (serve distinct) in the same session,
 so the fix wave costs about 10% at p50 and 12 to 25% at p95: query keys, cookie names and
-`Accept-Encoding` are now inspected fields. The pooled row is a single run; it is lower only because
-requests from banned sources are rejected before inspection.
+`Accept-Encoding` are now inspected fields. The pooled row is a single run under SP1's ban policy; it is lower only because
+requests from banned sources were rejected before inspection. It was not re-measured after the ban
+redesign, under which no pooled:100 source is banned.
 
 **Throughput.** `Pipeline::decide` (64-shard chain store, no lock held during inspection) against
 stateless `Shield::inspect`: 8 threads x 50 requests, each request from its own source (50 distinct

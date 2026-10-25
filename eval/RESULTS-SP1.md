@@ -192,3 +192,78 @@ in-process Allow, `82/*` to `87/*`; no proxy decision observed. 33,244 sockets w
 after the run (16,384-port dynamic range), consistent with loopback port exhaustion as the cause of both
 the 502s from `81/*` on and the connect timeouts; inferred, not confirmed. The run took 3.5 minutes.
 proxy_rejected 5: 400 x4, 413 x1 (unchanged). No engine or proxy code was changed for this.
+
+## Ban policy redesign (successor log)
+
+Follow-up to SP1. Spec: `docs/superpowers/specs/2026-10-26-ban-policy-redesign-design.md`. Change: every automatic
+ban (honeypot, exfiltration, repeated exploitation) also needs hostile requests to be at least
+`chain.ban_policy.min_hostile_share` (new, default 0.5) of the source's requests in the last `within_secs` (600 s,
+tallied in 10 buckets). `on_exfiltration_block` now defaults to false, so a single exfiltration block no longer bans;
+exfiltration blocks still count toward the 3-in-600 s rule. TTLs and manual bans are unchanged. Library path, scoring,
+`event_for`, `Pipeline` and the eval harness are unchanged. Release build, default config (no `--config`); outputs in
+the session scratchpad `m/final-*.{json,csv}`.
+
+### Candidates measured before choosing (pooled serve runs, SP1 release build or an uncommitted prototype)
+
+Library FP is 271 in every run; bans_from_allowed and invariant_violations are 0 in every run. "Banned" =
+benign_sources_banned. "–" = not run.
+
+| Candidate | pooled:10 collateral | pooled:100 collateral / banned | pooled:1000 collateral | distinct banned |
+|---|---|---|---|---|
+| SP1 defaults | 31,969 | 15,577 / 80 | 1,723 | 72 |
+| first TTL 300 s | – | 5,230 / 80 | – | – |
+| first TTL 60 s | – | 1,943 / 80 | – | – |
+| no single-exfil ban | 31,678 | 9,366 / 57 | – | – |
+| no single-exfil ban, TTL 60 s | – | 898 / 57 | – | – |
+| no single-exfil ban, 5 blocks in 600 s | 29,923 | 0 / 1 | 0 | 0 |
+| honeypot only | – | 0 / 0 | – | – |
+| no bans at all | – | 0 / 0 | – | – |
+| hostile share >= 0.05 / 0.10 / 0.25 / 0.5, single-exfil ban kept | – | 7,698 / 46; 1,258 / 4; 327 / 1; 327 / 1 | – | – |
+| hostile share >= 0.25, no single-exfil ban | – | 0 / 0 | – | – |
+| **hostile share >= 0.5, no single-exfil ban (chosen)** | **0** | **0 / 0** | **8** | **0** |
+
+Shorter TTLs alone stay above 271. A count threshold (5 blocks) passes pooled:100 but not pooled:10. Honeypot-only
+passes because the corpus has no honeypot hits, so it measures nothing about honeypot bans. With the single-exfil ban
+kept, a pooled source whose first request is an exfiltration block has share 1/1 and is banned (327 collateral).
+Keys that add the User-Agent were not built: 33,398 of the 33,875 readable files (98.6%) carry one User-Agent
+string (191 distinct), so such a key would barely split the pooled sources.
+
+### Result (shipped defaults)
+
+| Run | Path | TP | FP | FN (656 / 658) | Recall (656 / 658) | Precision | F1 (656 / 658) | FP rate |
+|---|---|---|---|---|---|---|---|---|
+| library | lib (raw corpus) | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| serve distinct | serve | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| serve pooled:10 | serve | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| serve pooled:100 | serve | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| serve pooled:1000 | serve | 284 | 279 | 372 / 374 | 43.29% / 43.16% | 50.44% | 0.4660 / 0.4652 | 0.84% |
+
+| Run | benign sources | benign sources banned (SP1 -> now) | collateral FP (SP1 -> now) | bans_from_allowed | invariant_violations |
+|---|---|---|---|---|---|
+| serve distinct | 33,219 | 72 -> 0 | 0 -> 0 | 0 | 0 |
+| serve pooled:10 | 10 | 10 -> 0 | 31,969 -> 0 | 0 | 0 |
+| serve pooled:100 | 100 | 80 -> 0 | 15,577 -> 0 | 0 | 0 |
+| serve pooled:1000 | 1,000 | 107 -> 1 | 1,723 -> 8 | 0 | 0 |
+
+- **The acceptance check "collateral FP <= request-level FP" now passes for pooled:100: 0 against 271.** Pooled:100
+  serve makes the same block/allow decision as the library for every request.
+- Pooled:1000: one source was banned by its third exploitation block within 10 minutes (the third was the
+  malicious `b1/71/3c058c3be65f080c2443252dab2b.black`), with too little benign traffic to dilute it; the 1 h ban then blocked 8
+  later benign requests from that source. The ban caught no extra malicious request (serve TP 284 = library TP).
+- **Regression, stated plainly: pooled serve TP falls from 446 (SP1) to 284 at pooled:100.** Those 162 extra true
+  positives came only from bans rejecting everything a shared source sent after it was banned, at the cost of
+  15,577 benign requests. In this corpus no ban now adds a true positive.
+- Serve distinct: block/allow decisions identical to library for every request; the same 10 Challenge-vs-Block label
+  differences (chain-stage bonus) as SP1; serve verdicts identical to SP1's fix-wave run for every request.
+  benign_sources_banned falls from 72 to 0: those were single benign requests that were false positives and were
+  banned by the removed single-exfiltration trigger. bans_from_allowed 0, invariant_violations 0.
+- Library verdicts are identical to SP1's fix-wave run for all 33,875 scored files (the library path never touches
+  the chain). Read failures 2 (the same two files), parse failures 0.
+- Mutation (bench_http on `seeds.jsonl` / `mutants.jsonl`): seeds 19/22 (86.36%), mutants 548/660 (83.03%),
+  retention 96.1%; label/prediction/score columns identical to SP1's fix-wave outputs per sample.
+- What gets worse beyond the numbers (covered by unit tests, not by this corpus): a single exfiltration request from
+  a fresh address is blocked but no longer bans it; an attacker who sends at least one benign request per hostile one,
+  or who sits behind a busy NAT, is never banned automatically; a honeypot hit on a busy source no longer bans it
+  (the corpus has no honeypot hits, so this is unmeasured here).
+- Latency: the five runs above ran concurrently on one machine, so their latencies (p50 72 to 74 us, p95 223 to
+  227 us, p99 658 to 681 us) are not comparable with SP1's single-run figures and are not published as a result.
