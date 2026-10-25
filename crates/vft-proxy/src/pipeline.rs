@@ -243,17 +243,44 @@ mod tests {
         }
     }
 
+    const EXFIL: &str = "/items?id=1%20union%20select%20password%20from%20users";
+
+    fn blocked(v: Verdict) -> bool {
+        matches!(v, Verdict::Block | Verdict::Challenge)
+    }
+
     #[test]
-    fn exfiltration_block_bans_and_fast_tracks() {
+    fn three_exfiltration_blocks_ban_and_fast_track() {
         let p = pipeline();
         let peer: IpAddr = "203.0.113.9".parse().unwrap();
-        let d1 = p.decide(&parts("/items?id=1%20union%20select%20password%20from%20users", CHROME), b"", Some(peer), 0);
-        assert!(d1.judgment.banned_source);
+        let d1 = p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 0);
+        assert!(blocked(d1.judgment.verdict), "{}", d1.judgment.reason);
+        assert!(!d1.judgment.banned_source, "a single exfiltration block no longer bans");
+        let _ = p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 500);
+        assert!(p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 900).judgment.banned_source);
         let d2 = p.decide(&parts("/", CHROME), b"", Some(peer), 1_000);
         assert!(d2.judgment.banned_source);
         assert_eq!(d2.judgment.verdict, Verdict::Block);
         let other: IpAddr = "203.0.113.10".parse().unwrap();
         assert_eq!(p.decide(&parts("/", CHROME), b"", Some(other), 1_000).judgment.verdict, Verdict::Allow);
+    }
+
+    #[test]
+    fn busy_shared_source_is_not_banned_for_a_few_blocks() {
+        // A NAT: mostly benign traffic with three blocked attacks among it.
+        let p = pipeline();
+        let nat: IpAddr = "198.51.100.200".parse().unwrap();
+        for i in 0..50 {
+            let d = p.decide(&parts("/products?page=2", CHROME), b"", Some(nat), i * 1_000);
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "#{i}: {}", d.judgment.reason);
+        }
+        for i in 0..3 {
+            let d = p.decide(&parts(EXFIL, CHROME), b"", Some(nat), 50_000 + i * 1_000);
+            assert!(blocked(d.judgment.verdict), "attack #{i}: {}", d.judgment.reason);
+            assert!(!d.judgment.banned_source, "attack #{i} banned the shared source");
+        }
+        let d = p.decide(&parts("/products?page=2", CHROME), b"", Some(nat), 60_000);
+        assert_eq!(d.judgment.verdict, Verdict::Allow, "{}", d.judgment.reason);
     }
 
     /// Every probe goes through `decide`; failures are collected so one run shows them all.
