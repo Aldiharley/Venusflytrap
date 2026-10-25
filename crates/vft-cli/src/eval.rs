@@ -331,9 +331,143 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
     })
 }
 
+/// Normalize framing for a socket replay: CRLF line endings, our own
+/// `X-Forwarded-For`, `Connection: close`, an exact `Content-Length`. Samples
+/// that use Transfer-Encoding or Upgrade are not replayable (`None`).
+pub fn rewrite_for_replay(raw: &[u8], xff: IpAddr) -> Option<Vec<u8>> {
+    let (head, body) = if let Some(i) = find(raw, b"\r\n\r\n") {
+        (&raw[..i], &raw[i + 4..])
+    } else if let Some(i) = find(raw, b"\n\n") {
+        (&raw[..i], &raw[i + 2..])
+    } else {
+        (raw, &raw[raw.len()..])
+    };
+    let mut lines = head.split(|&b| b == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l));
+    let mut out = lines.next()?.to_vec();
+    out.extend_from_slice(b"\r\n");
+    for line in lines {
+        let name = line.split(|&b| b == b':').next().unwrap_or(b"").trim_ascii().to_ascii_lowercase();
+        match name.as_slice() {
+            b"transfer-encoding" | b"upgrade" => return None,
+            b"connection" | b"content-length" | b"x-forwarded-for" | b"keep-alive" | b"proxy-connection" => continue,
+            _ => {}
+        }
+        if !line.is_empty() {
+            out.extend_from_slice(line);
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+    out.extend_from_slice(format!("X-Forwarded-For: {xff}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes());
+    out.extend_from_slice(body);
+    Some(out)
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct TcpReport {
+    pub replayed: u64,
+    pub not_replayable: u64,
+    pub matched: u64,
+    /// The proxy refused the request at the HTTP layer (400/413/431/501) while
+    /// the lenient in-process parser accepted it.
+    pub proxy_rejected: u64,
+    pub mismatched: u64,
+    pub mismatch_examples: Vec<String>,
+    /// First 20 proxy-rejected files, as `rel status=<code>`.
+    pub proxy_rejected_examples: Vec<String>,
+}
+
+pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<TcpReport> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut cfg = cfg;
+    cfg.proxy.trusted_proxies = vec!["127.0.0.1".into()];
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        let up = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let up_addr = up.local_addr()?;
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = up.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 1 << 20];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                });
+            }
+        });
+        let state = Arc::new(vft_proxy::ProxyState::new(
+            Shield::new(cfg.clone()),
+            format!("http://{up_addr}"),
+            vft_proxy::audit::AuditSink::off(),
+            true,
+        ));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_addr = l.local_addr()?;
+        tokio::spawn(vft_proxy::serve_listener(state, l));
+        let local = Pipeline::new(Arc::new(Shield::new(cfg)));
+        let loopback: IpAddr = "127.0.0.1".parse()?;
+
+        let mut r = TcpReport::default();
+        for (i, s) in samples.iter().take(limit).enumerate() {
+            if s.unreadable.is_some() {
+                r.not_replayable += 1;
+                continue;
+            }
+            let ip = Sources::Distinct.ip_for(i, &s.rel);
+            let Some(raw) = rewrite_for_replay(&s.raw, ip) else {
+                r.not_replayable += 1;
+                continue;
+            };
+            let Ok(p) = parse_raw(&raw) else {
+                r.not_replayable += 1;
+                continue;
+            };
+            let d = local.decide(&p.parts, &p.body, Some(loopback), vft_proxy::now_ms());
+            let mut sock = tokio::net::TcpStream::connect(proxy_addr).await?;
+            sock.write_all(&raw).await?;
+            let mut resp = Vec::new();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), sock.read_to_end(&mut resp)).await;
+            let status: u16 = std::str::from_utf8(&resp)
+                .ok()
+                .and_then(|t| t.split_whitespace().nth(1))
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
+            r.replayed += 1;
+            match (status, attack(d.judgment.verdict)) {
+                (403, true) | (200, false) => r.matched += 1,
+                (400 | 413 | 431 | 501, _) => {
+                    r.proxy_rejected += 1;
+                    if r.proxy_rejected_examples.len() < 20 {
+                        r.proxy_rejected_examples.push(format!("{} status={status}", s.rel));
+                    }
+                }
+                (code, blocked) => {
+                    r.mismatched += 1;
+                    if r.mismatch_examples.len() < 20 {
+                        r.mismatch_examples.push(format!("{} status={code} in_process_block={blocked}", s.rel));
+                    }
+                }
+            }
+        }
+        Ok(r)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_rewrite_sets_framing_and_xff() {
+        let raw = b"POST /a HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\nContent-Length: 999\r\nX-Forwarded-For: 1.2.3.4\r\n\r\nab";
+        let out = rewrite_for_replay(raw, "10.0.0.5".parse().unwrap()).unwrap();
+        let s = String::from_utf8_lossy(&out).to_ascii_lowercase();
+        assert!(s.contains("x-forwarded-for: 10.0.0.5\r\n"));
+        assert!(!s.contains("1.2.3.4"));
+        assert!(s.contains("connection: close\r\n"));
+        assert!(s.contains("content-length: 2\r\n"));
+        assert!(s.ends_with("\r\n\r\nab"));
+        let chunked = b"POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        assert!(rewrite_for_replay(chunked, "10.0.0.5".parse().unwrap()).is_none());
+    }
 
     #[test]
     fn parses_lf_only_and_raw_payload_targets() {

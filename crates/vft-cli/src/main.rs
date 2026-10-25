@@ -18,6 +18,7 @@ use vft_core::{Config, Request, Shield};
 enum EvalMode {
     Library,
     Serve,
+    Tcp,
 }
 
 #[derive(Parser)]
@@ -86,6 +87,9 @@ enum Command {
         /// Optional per-sample CSV.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Maximum samples to replay in `--mode tcp`.
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
     },
     /// Configuration tools.
     Config {
@@ -167,10 +171,18 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
-        Command::Eval { corpus, mode, sources, step_ms, out } => {
+        Command::Eval { corpus, mode, sources, step_ms, out, limit } => {
             let cfg = load_config(cli.config.as_ref())?;
             let sources: eval::Sources = sources.parse().map_err(anyhow::Error::msg)?;
             let samples = eval::load_corpus(&corpus)?;
+            if mode == EvalMode::Tcp {
+                let r = eval::run_tcp(cfg, &samples, limit)?;
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                if r.mismatched > 0 {
+                    std::process::exit(3);
+                }
+                return Ok(());
+            }
             let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, out.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report.invariant_violations > 0 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0) {

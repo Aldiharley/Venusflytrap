@@ -35,3 +35,21 @@ Acceptance is ratio >= 0.75 (decide at least 0.75x stateless throughput). It is 
 path runs at parity with the stateless one (ratio 0.99 to 1.02), i.e. the sharded chain store adds no measurable
 serialisation. (Before the warm-up was added the first measurement read 1.41 to 1.52, which was warm-up cost
 charged to the stateless pass, not a speed-up.)
+
+## TCP replay equivalence (Task 11)
+
+`venusflytrap eval --mode tcp --limit 1000` starts the real proxy (`serve_listener`, enforce on, audit off) on
+loopback in front of a stub upstream and replays the first 1,000 raw corpus samples (sorted by path; 16 of them
+are `.black`) over sockets: own `X-Forwarded-For` per sample (`proxy.trusted_proxies = [127.0.0.1]`),
+`Connection: close`, exact `Content-Length`. The in-process `Pipeline::decide` runs on an identically configured
+pipeline immediately before each send; 403 must equal Block/Challenge and 200 must equal Allow/Monitor.
+
+| Run | replayed | matched | proxy_rejected | not_replayable | mismatched |
+|---|---|---|---|---|---|
+| first 1,000 (distinct sources) | 992 | 991 | 1 | 8 | 0 |
+
+`not_replayable` (8): Transfer-Encoding or Upgrade samples, or requests the lenient parser cannot read after
+normalisation. `proxy_rejected` (1): `00/06/005a52981dd324c40488a1a588f9.white` answered 400 by hyper because its
+request target holds raw `<` and `>`; the lenient in-process parser percent-encodes them. This is a known
+front-end difference, not an engine mismatch. Caveat: the 1,000-sample prefix holds only 16 attack samples, so the
+403 path is exercised far less than the 200 path.
