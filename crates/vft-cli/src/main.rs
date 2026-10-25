@@ -4,6 +4,7 @@
 mod baselines;
 mod bench;
 mod corpus;
+mod eval;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -12,6 +13,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use vft_core::{Config, Request, Shield};
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum EvalMode {
+    Library,
+    Serve,
+}
 
 #[derive(Parser)]
 #[command(name = "venusflytrap", version, about = "Semantic taint-graph WAF + honeypot engine")]
@@ -63,6 +70,22 @@ enum Command {
         /// Only log, don't actually block (observation mode) when set.
         #[arg(long)]
         monitor_only: bool,
+    },
+    /// Evaluate on a raw labeled corpus (*.white benign, *.black malicious).
+    Eval {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, value_enum, default_value_t = EvalMode::Serve)]
+        mode: EvalMode,
+        /// distinct | pooled:<N>
+        #[arg(long, default_value = "distinct")]
+        sources: String,
+        /// Synthetic clock step between requests.
+        #[arg(long, default_value_t = 100)]
+        step_ms: u64,
+        /// Optional per-sample CSV.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Configuration tools.
     Config {
@@ -143,6 +166,16 @@ fn main() -> anyhow::Result<()> {
                 .enable_all()
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
+        }
+        Command::Eval { corpus, mode, sources, step_ms, out } => {
+            let cfg = load_config(cli.config.as_ref())?;
+            let sources: eval::Sources = sources.parse().map_err(anyhow::Error::msg)?;
+            let samples = eval::load_corpus(&corpus)?;
+            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, out.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.invariant_violations > 0 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0) {
+                std::process::exit(3);
+            }
         }
         Command::Config { action: ConfigCmd::Validate { file } } => match Config::load(&file) {
             Ok(_) => println!("{}: ok", file.display()),
