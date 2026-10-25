@@ -19,7 +19,7 @@ Mutation = 22 seeds → 660 mutants (eval/mutate.py, seed 1337).
 ## Throughput (Task 7, H3)
 
 `Pipeline::decide` (64-shard chain store, no lock held during inspection) versus stateless `Shield::inspect`,
-8 threads x 50 requests, 8 distinct source IPs per thread, release build
+8 threads x 50 requests, 50 distinct source IPs per thread (400 total), release build
 (`cargo test --release -p vft-proxy --lib decide_throughput -- --ignored --nocapture`). Request: a ~64 KB query
 (4 fields of `a%3Bb%20` x 2000) with Chrome headers; the brief's 6-field query was 96 KB and exceeds the
 65,534-byte URI limit of the `http` crate, so the fixture uses 4 fields. One discarded warm-up round of each mode
@@ -92,12 +92,14 @@ Throughput (`decide_throughput`, 3 runs, ratio stateless / stateful): 0.185 s / 
 
 Full-corpus run is NOT clean (949 mismatched). All 20 listed mismatches are `502` on benign samples with
 `in_process_block=false`: the proxy made the same Allow decision, then failed to reach the stub upstream (harness
-failure, not an engine/proxy disagreement). The other 929 are not individually listed. Likely cause, inferred:
+failure, not an engine/proxy disagreement). The other 929 were not individually examined; their cause is inferred, not
+established. Likely cause:
 ephemeral-port exhaustion on Windows (two `Connection: close` loopback sockets per request; 16,384-port dynamic
 range; 8,107 sockets in TIME_WAIT right after the run). A separate fast replay of 24,000 small benign samples
 reproduced it (6,437 mismatches, listed ones all 502/Allow, first ~17k clean, dense from `88/*`). The four earliest
 mismatches (`09/8a` 573 KB, `11/27` 858 KB, `1b/12` 66 KB, `30/56` 74 KB) are large bodies; the first two reproduce
 a 502 in isolation because the stub upstream reads once and closes without draining. `88/58` (1 KB) mismatched in the
 full run but passes in a small corpus (load-dependent). proxy_rejected 5:
-400 x4 and 413 x1. matched_block 550 shows the block path was exercised on the full corpus. No engine or
+400 x4 and 413 x1. matched_block 550 shows the block path was exercised on the full corpus. None of the 20 examined mismatches shows a
+differing decision; the other 929 were not examined, so full-corpus equivalence is not demonstrated. No engine or
 proxy code was changed for this.

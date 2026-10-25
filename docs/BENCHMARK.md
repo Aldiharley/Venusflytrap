@@ -113,8 +113,8 @@ thread, on the full corpus.
 The pooled row is lower only because requests from banned sources are rejected before inspection.
 
 **Throughput.** `Pipeline::decide` (64-shard chain store, no lock held during inspection) against
-stateless `Shield::inspect`: 8 threads x 50 requests, 8 distinct sources per thread, a request with a
-~64 KB query. Ratio stateless / stateful over three runs of the final tree: 0.99, 0.98 and 1.01
+stateless `Shield::inspect`: 8 threads x 50 requests, each request from its own source (50 distinct sources per thread, 400 in
+total), a request with a ~64 KB query, after one discarded warm-up round of each mode. Ratio stateless / stateful over three runs of the final tree: 0.99, 0.98 and 1.01
 (stateless 0.185, 0.175, 0.185 s; stateful 0.188, 0.179, 0.184 s). The stateful path runs at parity
 with the stateless one; the acceptance floor was 0.75.
 
@@ -132,10 +132,11 @@ from a trusted loopback peer), `Connection: close`, and an exact `Content-Length
 
 **The full-corpus run is not clean: 949 samples mismatched.** The 20 mismatches the tool lists are all
 `502` responses on benign samples that the in-process decision also allowed (`in_process_block=false`).
-That means the proxy reached the same Allow decision and then failed to reach the stub upstream, which is
-a failure of the test harness and not a disagreement between the proxy and the engine. Only the first 20
-mismatches are listed, so the other 929 are not individually confirmed; that they are the same kind is
-an inference from the listed ones and from the reproduction below. What was observed:
+For those 20, the proxy reached the same Allow decision and then failed to reach the stub upstream: a
+failure of the test harness, not a disagreement between the proxy and the engine. Only the first 20
+mismatches are listed by the tool. The other 929 were not individually examined, and their cause
+(ephemeral-port exhaustion and undrained stub bodies, below) is inferred from the 20 listed ones and from
+the reproduction below, not established. What was observed:
 
 - Apart from the large-body ones below, the failures start roughly 17,000 samples into the run and are
   dense from there (the next listed mismatch is `88/58`, then a run of `89/*` samples). A separate replay
@@ -155,9 +156,8 @@ an inference from the listed ones and from the reproduction below. What was obse
   corpus, so those failures depend on load, not on request content.
 
 `matched_block` 550 shows the block path was exercised on the whole corpus (the 1,000-sample prefix holds
-only 20 blocked requests). No mismatch has been observed where the proxy and the engine decided
-differently, but because 949 samples failed for harness reasons, this run does not prove full-corpus
-equivalence. Making the replay immune to port exhaustion and large-body resets is not part of this
+only 20 blocked requests). Among the 20 examined mismatches, none shows the proxy and the engine deciding
+differently. The other 929 were not examined, so this run does not demonstrate full-corpus equivalence. Making the replay immune to port exhaustion and large-body resets is not part of this
 document's scope.
 
 ## 7. What this does not show
