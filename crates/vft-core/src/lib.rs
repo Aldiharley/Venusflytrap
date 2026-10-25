@@ -33,7 +33,7 @@ pub mod shield;
 pub use chain::{ChainTracker, Event};
 pub use config::Config;
 pub use detect::{AiOracle, HeuristicOracle};
-pub use judgment::{EngineReport, Family, Judgment, Pattern, Stage, Verdict};
+pub use judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Stage, Verdict};
 pub use lattice::FourValued;
 pub use request::{Field, Location, Request};
 pub use shield::Shield;

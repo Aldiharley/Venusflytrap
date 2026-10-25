@@ -12,11 +12,11 @@ use crate::detect::{
 use crate::graph;
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
-use crate::judgment::{EngineReport, Family, Judgment, Pattern, Verdict};
-use crate::lattice::Evidence;
+use crate::judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Verdict};
+use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{normalize, Options};
 use crate::request::Request;
-use crate::score::arbitrate;
+use crate::score::{arbitrate, Scored};
 
 pub struct Shield {
     cfg: Config,
@@ -73,9 +73,7 @@ impl Shield {
             .map(|ip| self.intel.is_denied(&ip) && !self.intel.is_allowed(&ip))
             .unwrap_or(false);
 
-        let mut engines: Vec<EngineReport> = Vec::new();
-        let mut weighted: Vec<(f32, Evidence)> = Vec::new();
-        let mut matched: Vec<Pattern> = Vec::new();
+        let mut rec = Recorder::default();
         let mut max_layers = 0u8;
 
         // Per-field detection.
@@ -97,20 +95,14 @@ impl Shield {
                 norm: &n,
                 analysis: &analysis,
             };
+            let fref = FieldRef::of(&field);
             for (det, w) in &field_detectors {
                 let e = det.assess(&ctx);
-                record(&mut engines, &mut weighted, &mut matched, det.name(), *w, e);
+                rec.record(det.name(), *w, Some(fref.clone()), e);
             }
             // AI detector
             let e = ai.assess(&ctx);
-            record(
-                &mut engines,
-                &mut weighted,
-                &mut matched,
-                ai.name(),
-                self.cfg.scoring.weight_ai,
-                e,
-            );
+            rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref), e);
         }
 
         // Also inspect the path itself for traversal/recon structure.
@@ -120,17 +112,15 @@ impl Shield {
             let analysis = graph::analyze(&n.text);
             if !analysis.reachable.is_empty() {
                 let e = Evidence::new(
-                    crate::lattice::FourValued::Dangerous,
+                    FourValued::Dangerous,
                     0.9,
                     analysis.reachable.clone(),
                     "dangerous construct in path",
                 );
-                record(
-                    &mut engines,
-                    &mut weighted,
-                    &mut matched,
+                rec.record(
                     "graph-taint",
                     self.cfg.scoring.weight_graph,
+                    Some(FieldRef::path()),
                     e,
                 );
             }
@@ -138,23 +128,14 @@ impl Shield {
 
         // Request-level intent (recon of sensitive paths).
         let intent = intent_evidence(req, &self.cfg);
-        record(
-            &mut engines,
-            &mut weighted,
-            &mut matched,
-            "intent",
-            self.cfg.scoring.weight_intent,
-            intent,
-        );
+        rec.record("intent", self.cfg.scoring.weight_intent, Some(FieldRef::path()), intent);
 
         // Intel UA fingerprint.
         let ua_e = self.intel.ua_evidence(req.user_agent());
-        record(
-            &mut engines,
-            &mut weighted,
-            &mut matched,
+        rec.record(
             "intel",
             self.cfg.scoring.weight_intent,
+            Some(FieldRef::header("user-agent")),
             ua_e,
         );
 
@@ -163,14 +144,7 @@ impl Shield {
         let honeypot_hit = self.honeypot.check(req);
         if let Some(e) = honeypot_hit {
             hard_block = true;
-            record(
-                &mut engines,
-                &mut weighted,
-                &mut matched,
-                "honeypot",
-                1.0,
-                e,
-            );
+            rec.record("honeypot", 1.0, Some(FieldRef::path()), e);
         }
 
         // Chain inference (stateful only).
@@ -178,9 +152,9 @@ impl Shield {
         let mut banned_source = false;
         let mut extra = 0u8;
         if let (Some(chain), Some(ip)) = (chain, req.src_ip) {
-            let families: Vec<Family> = matched.iter().map(|p| p.family).collect();
+            let families: Vec<Family> = rec.matched.iter().map(|p| p.family).collect();
             let honeypot = families.contains(&Family::Honeypot);
-            let event = classify_event(&matched, honeypot);
+            let event = classify_event(&rec.matched, honeypot);
             let (stage, ban) = chain.observe(ip, event, Instant::now());
             chain_stage = stage;
             banned_source = ban || chain.is_banned(&ip);
@@ -196,18 +170,19 @@ impl Shield {
         }
 
         let (score, mut verdict, conflict) =
-            arbitrate(&weighted, &self.cfg.scoring, hard_block, extra);
+            arbitrate(&rec.scored, &self.cfg.scoring, hard_block, extra);
         if banned_source {
             verdict = Verdict::Block;
         }
 
-        let reason = build_reason(&matched, conflict, banned_source, hard_block);
+        let reason = build_reason(&rec.matched, conflict, banned_source, hard_block);
 
         Judgment {
             verdict,
             score,
-            engines,
-            matched,
+            engines: rec.engines,
+            matched: rec.matched,
+            contributions: rec.contributions,
             chain_stage,
             normalized_layers: max_layers,
             banned_source,
@@ -242,28 +217,55 @@ fn classify_event(matched: &[Pattern], honeypot: bool) -> Event {
     }
 }
 
-fn record(
-    engines: &mut Vec<EngineReport>,
-    weighted: &mut Vec<(f32, Evidence)>,
-    matched: &mut Vec<Pattern>,
-    name: &str,
-    weight: f32,
-    e: Evidence,
-) {
-    for p in &e.patterns {
-        if !matched.contains(p) {
-            matched.push(p.clone());
+#[derive(Default)]
+struct Recorder {
+    engines: Vec<EngineReport>,
+    scored: Vec<Scored>,
+    matched: Vec<Pattern>,
+    contributions: Vec<Contribution>,
+}
+
+impl Recorder {
+    fn record(&mut self, name: &str, engine_weight: f32, field: Option<FieldRef>, e: Evidence) {
+        for p in &e.patterns {
+            if !self.matched.contains(p) {
+                self.matched.push(p.clone());
+            }
         }
+        if e.value != FourValued::None {
+            if e.patterns.is_empty() {
+                self.contributions.push(Contribution {
+                    engine: name.to_string(),
+                    field: field.clone(),
+                    construct: None,
+                    family: None,
+                    value: e.value,
+                    weight: e.weight,
+                    points: 0.0,
+                });
+            }
+            for p in &e.patterns {
+                self.contributions.push(Contribution {
+                    engine: name.to_string(),
+                    field: field.clone(),
+                    construct: Some(p.name.clone()),
+                    family: Some(p.family),
+                    value: e.value,
+                    weight: e.weight,
+                    points: 0.0,
+                });
+            }
+        }
+        self.engines.push(EngineReport {
+            engine: name.to_string(),
+            value: e.value,
+            weight: e.weight,
+            score_contribution: 0.0, // filled lazily; kept for format compatibility
+            patterns: e.patterns.clone(),
+            note: e.note.clone(),
+        });
+        self.scored.push(Scored { engine: name.to_string(), engine_weight, field, evidence: e });
     }
-    engines.push(EngineReport {
-        engine: name.to_string(),
-        value: e.value,
-        weight: e.weight,
-        score_contribution: 0.0, // filled lazily; kept for format compatibility
-        patterns: e.patterns.clone(),
-        note: e.note.clone(),
-    });
-    weighted.push((weight, e));
 }
 
 fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -> String {
@@ -291,6 +293,9 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::judgment::FieldRef;
+    use crate::lattice::FourValued;
+    use crate::request::Location;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn shield() -> Shield {
@@ -303,6 +308,21 @@ mod tests {
         req.query.push(("id".into(), "1 union select password from users".into()));
         let j = shield().inspect(&req);
         assert_eq!(j.verdict, Verdict::Block, "score {} reason {}", j.score, j.reason);
+    }
+
+    #[test]
+    fn contributions_carry_field_and_construct() {
+        let mut req = Request::get("/items");
+        req.query.push(("id".into(), "1 union select password from users".into()));
+        let j = shield().inspect(&req);
+        let c = j
+            .contributions
+            .iter()
+            .find(|c| c.construct.as_deref() == Some("union-select"))
+            .expect("union-select contribution");
+        assert_eq!(c.field, Some(FieldRef { loc: Location::Query, name: "id".into() }));
+        assert_eq!(c.family, Some(Family::Sqli));
+        assert_eq!(c.value, FourValued::Dangerous);
     }
 
     #[test]

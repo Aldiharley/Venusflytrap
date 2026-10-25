@@ -4,7 +4,7 @@
 use std::net::IpAddr;
 
 /// Where a field came from in the request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Location {
     Path,
     Query,
