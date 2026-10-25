@@ -10,7 +10,7 @@ use crate::detect::{
 use crate::graph;
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
-use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
+use crate::judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Verdict};
 use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{normalize, Options};
 use crate::request::Request;
@@ -101,6 +101,20 @@ impl Shield {
             // AI detector
             let e = ai.assess(&ctx);
             rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref), e);
+        }
+
+        if let Some(first) = req.non_utf8_headers.first() {
+            rec.record(
+                "adapter",
+                self.cfg.scoring.weight_api,
+                Some(FieldRef::header(first)),
+                Evidence::new(
+                    FourValued::Suspicious,
+                    0.6,
+                    vec![Pattern::new(Family::Limit, "limit.header-non-utf8")],
+                    format!("non-UTF-8 bytes in header(s): {}", req.non_utf8_headers.join(", ")),
+                ),
+            );
         }
 
         // Also inspect the path itself for traversal/recon structure.

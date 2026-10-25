@@ -33,6 +33,9 @@ pub struct Request {
     pub cookies: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub src_ip: Option<IpAddr>,
+    /// Names of headers whose bytes were not valid UTF-8. Their values are
+    /// decoded lossily and still inspected; the fact itself is evidence (C4).
+    pub non_utf8_headers: Vec<String>,
 }
 
 impl Request {
@@ -79,7 +82,7 @@ impl Request {
             // in the usual sense; keep the interesting ones.
             if matches!(
                 k.to_ascii_lowercase().as_str(),
-                "host" | "connection" | "content-length" | "accept-encoding"
+                "connection" | "content-length" | "accept-encoding" | "cookie"
             ) {
                 continue;
             }

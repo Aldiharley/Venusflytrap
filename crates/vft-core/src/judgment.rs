@@ -13,6 +13,9 @@ pub enum Family {
     Ssrf,
     Honeypot,
     Intel,
+    /// The request hit an inspection limit or carried bytes that could not be
+    /// decoded as-is.
+    Limit,
 }
 
 /// A concrete structural pattern the engine recognized.

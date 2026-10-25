@@ -54,6 +54,7 @@ fn main() {
             cookies: r.cookies,
             body: r.body.into_bytes(),
             src_ip: None,
+            non_utf8_headers: Vec::new(),
         };
         let t = Instant::now();
         let j = shield.inspect(&req);

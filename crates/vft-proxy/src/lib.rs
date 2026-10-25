@@ -16,7 +16,9 @@ use tokio::net::TcpListener;
 
 use vft_core::{ChainTracker, Judgment, Request as VftRequest, Shield, Verdict};
 
+pub mod adapt;
 pub mod audit;
+pub use hyper::http;
 
 /// Shared proxy state.
 pub struct ProxyState {
@@ -41,99 +43,6 @@ impl ProxyState {
     }
 }
 
-/// Convert a hyper request (with its collected body) into a vft-core Request.
-fn to_vft(
-    parts: &hyper::http::request::Parts,
-    body: &[u8],
-    peer: Option<SocketAddr>,
-) -> VftRequest {
-    let mut req = VftRequest {
-        method: parts.method.as_str().to_string(),
-        path: parts.uri.path().to_string(),
-        body: body.to_vec(),
-        src_ip: peer.map(|p| p.ip()),
-        ..Default::default()
-    };
-    if let Some(q) = parts.uri.query() {
-        for (k, v) in form_urlencoded_parse(q) {
-            req.query.push((k, v));
-        }
-    }
-    for (k, v) in parts.headers.iter() {
-        if let Ok(s) = v.to_str() {
-            if k.as_str().eq_ignore_ascii_case("cookie") {
-                for (ck, cv) in parse_cookies(s) {
-                    req.cookies.push((ck, cv));
-                }
-            }
-            req.headers.push((k.as_str().to_string(), s.to_string()));
-        }
-    }
-    req
-}
-
-fn form_urlencoded_parse(q: &str) -> Vec<(String, String)> {
-    q.split('&')
-        .filter(|s| !s.is_empty())
-        .map(|pair| {
-            let mut it = pair.splitn(2, '=');
-            let k = it.next().unwrap_or("").to_string();
-            let v = it.next().unwrap_or("").to_string();
-            (
-                percent_decode(&k),
-                percent_decode(&v),
-            )
-        })
-        .collect()
-}
-
-fn percent_decode(s: &str) -> String {
-    // Decode to BYTES first, then interpret as UTF-8. Interpreting each decoded
-    // byte as a `char` (Latin-1) would turn a percent-encoded UTF-8 sequence like
-    // `%EF%BC%B3` (fullwidth S) into mojibake, defeating the engine's confusable
-    // folding and letting Unicode-encoded injections slip past (M2). The engine
-    // re-normalizes anyway, but it must receive the real code points.
-    let replaced = s.replace('+', " ");
-    let b = replaced.as_bytes();
-    let mut bytes = Vec::with_capacity(b.len());
-    let mut i = 0;
-    let hexval = |c: u8| -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            _ => None,
-        }
-    };
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hexval(b[i + 1]), hexval(b[i + 2])) {
-                bytes.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        bytes.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn parse_cookies(s: &str) -> Vec<(String, String)> {
-    s.split(';')
-        .filter_map(|kv| {
-            let mut it = kv.splitn(2, '=');
-            let k = it.next()?.trim().to_string();
-            let v = it.next().unwrap_or("").trim().to_string();
-            if k.is_empty() {
-                None
-            } else {
-                Some((k, v))
-            }
-        })
-        .collect()
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -154,7 +63,7 @@ async fn handle(
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let (parts, body) = req.into_parts();
     let collected = body.collect().await?.to_bytes();
-    let vreq = to_vft(&parts, &collected, peer);
+    let vreq = adapt::from_parts(&parts, &collected, peer.map(|p| p.ip()));
     let judgment = judge(&state, &vreq);
     state.audit.record(&vreq, &judgment);
 
@@ -284,23 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn cookie_and_query_parse() {
-        let v = parse_cookies("a=1; b=2; junk");
-        assert!(v.contains(&("a".to_string(), "1".to_string())));
-        let q = form_urlencoded_parse("x=1%20union&y=2");
-        assert_eq!(q[0].1, "1 union");
-    }
-
-    #[test]
-    fn percent_decode_preserves_utf8() {
-        // %EF%BC%B3 is fullwidth 'S' (U+FF33) in UTF-8; must round-trip as that
-        // code point, not Latin-1 mojibake (M2).
-        assert_eq!(percent_decode("%EF%BC%B3"), "\u{ff33}");
-        // and a lone % or bad hex is passed through, no panic
-        assert_eq!(percent_decode("100%done"), "100%done");
-    }
-
-    #[test]
     fn fullwidth_encoded_sqli_not_evaded() {
         // fullwidth "UNION SELECT 1" percent-encoded; after proper decode +
         // folding the engine should catch it.
@@ -310,7 +202,7 @@ mod tests {
             .bytes()
             .map(|b| format!("%{b:02X}"))
             .collect();
-        let q = form_urlencoded_parse(&format!("id={enc}"));
+        let q = adapt::form_urlencoded_parse(&format!("id={enc}"));
         let mut req = VftRequest::get("/x");
         req.query = q;
         let j = judge(&st, &req);
