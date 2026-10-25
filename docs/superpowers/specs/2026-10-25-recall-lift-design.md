@@ -188,7 +188,7 @@ pub fn constructs() -> &'static [ConstructInfo];
 
 | Construct | Option key | Fires when | Evidence |
 |---|---|---|---|
-| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a normalization cut loses text not re-inspected by the next chunk's overlap | Suspicious |
+| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a normalization cut loses text that is not re-inspected (interior cuts are verified by inspecting the chunk minus its overlap) | Suspicious |
 | `limit.graph-truncated` | `shield.max_graph_windows` (new, 32) | a field needs more 4,096-token windows than the cap | Suspicious |
 | `limit.body-unparsed` | `shield.body_parse` | a body falls back to one whole field | informational, weight 0 |
 

@@ -95,7 +95,6 @@ impl Shield {
         let mut budget = self.cfg.shield.max_inspect_bytes;
         let mut payload_truncated = false;
         'fields: for field in req.fields() {
-            let fref = FieldRef::of(&field);
             let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
             let last = ranges.len().saturating_sub(1);
             let mut prev_end = 0usize;
@@ -111,27 +110,29 @@ impl Shield {
                 prev_end = range.end;
                 let chunk = &field.raw[range];
                 let n = normalize(chunk, &self.norm_opts);
-                // Only a real loss counts: the field's last chunk, or a cut
-                // longer than the overlap that the next chunk re-inspects.
-                payload_truncated |= n.truncated && (i == last || n.cut_chars > crate::normalize::CHUNK_OVERLAP);
                 max_layers = max_layers.max(n.layers);
-                let analysis = graph::analyze_with(&n.text, &gopts);
-                if analysis.graph_truncated {
-                    self.record_graph_truncated(&mut rec, fref.clone());
+                self.inspect_text(&mut rec, &field, &n, &gopts, &field_detectors, &ai);
+                if n.truncated {
+                    if i == last {
+                        // Nothing after the last chunk re-reads what was cut.
+                        payload_truncated = true;
+                    } else {
+                        // Interior cut: the next chunk re-reads this chunk's last
+                        // `overlap` raw chars. Everything before them must be
+                        // inspected uncut, or the cut loses text.
+                        let max = self.cfg.shield.max_payload;
+                        let overlap = max - max.saturating_sub(crate::normalize::CHUNK_OVERLAP).max(1);
+                        let keep = chunk.chars().count().saturating_sub(overlap);
+                        let cut_at = chunk.char_indices().nth(keep).map_or(chunk.len(), |(b, _)| b);
+                        let head = normalize(&chunk[..cut_at], &self.norm_opts);
+                        if head.truncated {
+                            payload_truncated = true;
+                        }
+                        // The head's bytes are part of the already-charged chunk.
+                        max_layers = max_layers.max(head.layers);
+                        self.inspect_text(&mut rec, &field, &head, &gopts, &field_detectors, &ai);
+                    }
                 }
-                let ctx = FieldCtx {
-                    field: &field,
-                    norm: &n,
-                    analysis: &analysis,
-                    disabled: &self.disabled,
-                };
-                for (det, w) in &field_detectors {
-                    let e = det.assess(&ctx);
-                    rec.record(det.name(), *w, Some(fref.clone()), e);
-                }
-                // AI detector
-                let e = ai.assess(&ctx);
-                rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref.clone()), e);
             }
         }
         if let Some(first) = req.non_utf8_headers.first().filter(|_| !self.disabled.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
@@ -225,6 +226,36 @@ impl Shield {
             banned_source: false,
             reason,
         }
+    }
+
+    /// Run the graph analysis, the three field detectors and the AI detector over
+    /// one normalized piece of `field`, recording against that field.
+    fn inspect_text(
+        &self,
+        rec: &mut Recorder,
+        field: &crate::request::Field,
+        n: &crate::normalize::Normalized,
+        gopts: &graph::GraphOpts,
+        field_detectors: &[(&dyn FieldDetector, f32)],
+        ai: &AiDetector,
+    ) {
+        let fref = FieldRef::of(field);
+        let analysis = graph::analyze_with(&n.text, gopts);
+        if analysis.graph_truncated {
+            self.record_graph_truncated(rec, fref.clone());
+        }
+        let ctx = FieldCtx {
+            field,
+            norm: n,
+            analysis: &analysis,
+            disabled: &self.disabled,
+        };
+        for (det, w) in field_detectors {
+            let e = det.assess(&ctx);
+            rec.record(det.name(), *w, Some(fref.clone()), e);
+        }
+        let e = ai.assess(&ctx);
+        rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref), e);
     }
 
     /// A field needed more token windows than `shield.max_graph_windows`: it was
@@ -765,5 +796,41 @@ mod tests {
         req.method = "POST".into();
         req.body = vec![0xFF; 400 * 1024]; // each invalid byte becomes a 3-byte U+FFFD
         assert!(!has_limit(&Shield::new(Config::default()).inspect(&req)));
+    }
+
+    /// The review's bypass: folding shrinks and expands text unevenly, so a cut of
+    /// <= 256 folded chars can hide far more raw chars that no chunk re-reads.
+    fn crafted_bypass_field() -> String {
+        let tail = " 1 union select a,b from users-- ";
+        format!(
+            "{}{}{}{}{}{}",
+            FDFA.to_string().repeat(30),
+            "a".repeat(613 - tail.len() - 10),
+            tail,
+            "b".repeat(10),
+            "%61".repeat(127),
+            "b".repeat(2000)
+        )
+    }
+
+    #[test]
+    fn folded_overflow_cannot_hide_uninspected_raw_text() {
+        let field = crafted_bypass_field();
+        assert_eq!(field.chars().take(1024).count(), 1024);
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), field));
+        let j = Shield::new(small_payload_cfg()).inspect(&req);
+        // The chunk minus its overlap still folds past the cap, so the loss is
+        // reported (fail closed) instead of being silently exempted.
+        assert!(has_limit(&j), "verdict {:?} score {} reason {}", j.verdict, j.score, j.reason);
+    }
+
+    #[test]
+    fn overlap_is_charged_once() {
+        let mut cfg = small_payload_cfg();
+        cfg.shield.max_inspect_bytes = 3000;
+        let mut req = Request::get("/items");
+        req.query.push(("q".into(), "a".repeat(3000)));
+        assert!(!has_limit(&Shield::new(cfg).inspect(&req)));
     }
 }

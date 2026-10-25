@@ -41,13 +41,35 @@ proptest! {
     }
 }
 
+/// 2 MB in the query, a header and the body (6 MB of text in all).
+fn huge_request() -> Request {
+    let big = "A".repeat(2_000_000);
+    let mut req = Request::get("/p");
+    req.query.push(("q".into(), big.clone()));
+    req.headers.push(("User-Agent".into(), big.clone()));
+    req.body = big.into_bytes();
+    req
+}
+
 #[test]
 fn huge_payload_is_bounded() {
-    let big = "A".repeat(2_000_000);
-    let dur = inspect_value(&big);
-    // The default inspection budget is 4 MiB per request, so this inspects ~4 MiB
-    // of the 6 MB sent: ~2 s in a debug build, ~0.13 s in release. Bounded either way.
-    assert!(dur < Duration::from_secs(5), "took {dur:?}");
+    // Time is bounded because the inspection budget is: with a 1 MiB budget this
+    // takes ~0.6 s in a debug build; without a budget it takes ~3 s.
+    let mut cfg = Config::default();
+    cfg.shield.max_inspect_bytes = 1 << 20;
+    let shield = Shield::new(cfg);
+    let req = huge_request();
+    let t = Instant::now();
+    let _ = shield.inspect(&req);
+    let dur = t.elapsed();
+    assert!(dur < Duration::from_secs(1), "took {dur:?}");
+}
+
+#[test]
+fn huge_payload_exhausts_the_default_budget() {
+    // Deterministic (no timing): 6 MB sent, 4 MiB default budget.
+    let j = Shield::new(Config::default()).inspect(&huge_request());
+    assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.payload-truncated")));
 }
 
 #[test]

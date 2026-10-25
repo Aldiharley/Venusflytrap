@@ -31,10 +31,6 @@ pub struct Normalized {
     pub flags: Flags,
     /// Normalization cut text: the input exceeded `max_payload`, or NFKC expansion did.
     pub truncated: bool,
-    /// Chars cut when `truncated` is set: the input overflow plus the post-fold
-    /// overflow. A cut of at most [`CHUNK_OVERLAP`] chars from an interior chunk
-    /// is re-inspected by the next chunk's overlap.
-    pub cut_chars: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +58,6 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
     // Bound the work first.
     let input_chars = input.chars().count();
     let mut truncated = input_chars > opts.max_payload;
-    let mut cut_chars = input_chars.saturating_sub(opts.max_payload);
     let bounded: String = input.chars().take(opts.max_payload).collect();
 
     let mut flags = Flags::default();
@@ -82,7 +77,7 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
     if folded_chars > opts.max_payload {
         folded = folded.chars().take(opts.max_payload).collect();
         truncated = true;
-        cut_chars += folded_chars - opts.max_payload;
+
     }
     let canon = canonicalize_ws_comments(&folded, &mut flags);
 
@@ -92,7 +87,6 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
         layers,
         flags,
         truncated,
-        cut_chars,
     }
 }
 
