@@ -3,3 +3,6 @@
 Cargo.lock.orig
 corpus/*.jsonl
 !corpus/.gitkeep
+/research_notes/
+/reports/
+/.superpowers/

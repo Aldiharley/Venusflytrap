@@ -200,18 +200,25 @@ fn detect_xss(tokens: &[Token], text: &str, reach: &mut Vec<Pattern>, latent: &m
 }
 
 fn detect_shell(tokens: &[Token], text: &str, reach: &mut Vec<Pattern>, latent: &mut Vec<Pattern>) {
-    // Command substitution $( ) or backticks.
+    let bins = [
+        "cat", "ls", "id", "whoami", "wget", "curl", "nc", "bash", "sh", "ping", "nslookup",
+        "uname", "pwd", "chmod", "rm", "python", "perl",
+    ];
+    // Command substitution $( ) or backticks. A bare `$(` is usually jQuery
+    // (`$(document)`, `$('#id')`) and a lone backtick is often just a 0x60 byte
+    // in a binary body, so substitution only forms a construct when a known
+    // binary sits in command position right after the opener; otherwise latent.
     if text.contains("$(") || text.contains('`') {
-        reach.push(Pattern::new(Family::CommandInjection, "cmd-substitution"));
+        if substitution_runs_binary(text, &bins) {
+            reach.push(Pattern::new(Family::CommandInjection, "cmd-substitution"));
+        } else {
+            latent.push(Pattern::new(Family::CommandInjection, "cmd-substitution"));
+        }
     }
     // Chaining: a shell metacharacter followed (in command position) by a known
     // binary — `; cat`, `| whoami`, `&& wget`. Requiring the binary to come
     // *after* the separator avoids flagging benign values that merely contain a
     // short word and a separator elsewhere ("cat;dog" is not command injection).
-    let bins = [
-        "cat", "ls", "id", "whoami", "wget", "curl", "nc", "bash", "sh", "ping", "nslookup",
-        "uname", "pwd", "chmod", "rm", "python", "perl",
-    ];
     let has_meta = tokens
         .iter()
         .any(|t| t.kind == TokenKind::ShellMeta && matches!(t.text.as_str(), ";" | "|" | "&" | "&&" | "||"));
@@ -220,6 +227,39 @@ fn detect_shell(tokens: &[Token], text: &str, reach: &mut Vec<Pattern>, latent: 
     } else if has_meta {
         latent.push(Pattern::new(Family::CommandInjection, "shell-meta"));
     }
+}
+
+/// True if a `$(` or backtick opener is followed, in command position, by a
+/// known binary — optionally behind a path (`$(/bin/cat`, `` `/usr/bin/id ``).
+///
+/// Works on the text rather than tokens because command position depends on
+/// whitespace, which the lexer drops (`$(cat /etc/passwd)` would otherwise read
+/// as the path `cat/etc/passwd`).
+fn substitution_runs_binary(text: &str, bins: &[&str]) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    for i in 0..n {
+        let mut j = if chars[i] == '`' {
+            i + 1
+        } else if chars[i] == '$' && i + 1 < n && chars[i + 1] == '(' {
+            i + 2
+        } else {
+            continue;
+        };
+        while j < n && chars[j].is_whitespace() {
+            j += 1;
+        }
+        let start = j;
+        while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '_' | '/' | '.' | '-')) {
+            j += 1;
+        }
+        let word: String = chars[start..j].iter().collect();
+        let cmd = word.rsplit('/').next().unwrap_or("");
+        if bins.contains(&cmd) {
+            return true;
+        }
+    }
+    false
 }
 
 /// True if the first identifier following a shell metacharacter is a known
@@ -343,6 +383,26 @@ mod tests {
                 a.reachable.is_empty(),
                 "false positive on {s:?}: {:?}",
                 a.reachable
+            );
+        }
+    }
+
+    #[test]
+    fn jquery_dollar_paren_is_not_cmdi() {
+        for s in ["$(document).ready(function(){})", "$('#id').hide()"] {
+            let a = analyze(s);
+            assert!(
+                a.reachable.iter().all(|p| p.family != Family::CommandInjection),
+                "false positive on {s:?}: {:?}",
+                a.reachable
+            );
+        }
+        for s in ["$(cat /etc/passwd)", "`whoami`", "$(/bin/cat /etc/passwd)", "x=`id`"] {
+            let a = analyze(s);
+            assert!(
+                a.reachable.iter().any(|p| p.name == "cmd-substitution"),
+                "missed substitution on {s:?}: {:?}",
+                a
             );
         }
     }
