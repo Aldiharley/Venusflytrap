@@ -9,6 +9,7 @@
 //! engine's mutation-robustness, done honestly and bounded.
 
 mod tokenize;
+pub mod sinks;
 
 pub use tokenize::{tokenize, Token, TokenKind};
 

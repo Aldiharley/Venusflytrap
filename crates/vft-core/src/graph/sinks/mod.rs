@@ -1,0 +1,202 @@
+//! Construct registry and sink collection.
+//!
+//! Every pattern the engine can emit, every decoder and every inspection limit
+//! has one stable dotted id here (`sqli.union-select`). Sinks emit through
+//! [`Hits`], which takes the registry entry itself, so an unregistered id cannot
+//! be emitted and a disabled construct is dropped at the source. Ids are never
+//! reused; a rename keeps the old id as an alias entry.
+
+use std::collections::HashSet;
+
+use super::tokenize::{Token, TokenKind};
+use crate::judgment::{Family, Pattern};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructKind {
+    /// A formed construct in the token graph (blocks on its own).
+    Sink,
+    /// A lone dangerous token with no construct (weak signal).
+    Latent,
+    /// A rule-based detection outside the token graph: signatures, API safety,
+    /// recon, honeypot, intel.
+    Signature,
+    /// A normalizer decoding stage.
+    Decoder,
+    /// An inspection limit that fails closed.
+    Limit,
+}
+
+#[derive(Debug)]
+pub struct ConstructInfo {
+    pub id: &'static str,
+    /// `None` only for decoders, which belong to no attack family.
+    pub family: Option<Family>,
+    pub kind: ConstructKind,
+    pub summary: &'static str,
+}
+
+impl ConstructInfo {
+    /// The pattern this construct emits. Decoders never emit patterns; the
+    /// registry test guarantees every other kind has a family.
+    pub fn pattern(&self) -> Pattern {
+        Pattern::new(self.family.unwrap_or(Family::Limit), self.id)
+    }
+}
+
+// --- Constructs emitted outside the token graph -------------------------------
+
+pub static SIG_UNION_ALL_SELECT: ConstructInfo = ConstructInfo { id: "sig.union-all-select", family: Some(Family::Sqli), kind: ConstructKind::Signature, summary: "literal `union all select`" };
+pub static SIG_CLASSIC_OR: ConstructInfo = ConstructInfo { id: "sig.classic-or", family: Some(Family::Sqli), kind: ConstructKind::Signature, summary: "literal `' or '1'='1`" };
+pub static SIG_SCHEMA_ENUM: ConstructInfo = ConstructInfo { id: "sig.schema-enum", family: Some(Family::Sqli), kind: ConstructKind::Signature, summary: "literal `information_schema`" };
+pub static SIG_ALERT_SCRIPT: ConstructInfo = ConstructInfo { id: "sig.alert-script", family: Some(Family::Xss), kind: ConstructKind::Signature, summary: "literal `<script>alert`" };
+pub static SIG_ONERROR: ConstructInfo = ConstructInfo { id: "sig.onerror", family: Some(Family::Xss), kind: ConstructKind::Signature, summary: "literal `onerror=`" };
+pub static SIG_ETC_PASSWD: ConstructInfo = ConstructInfo { id: "sig.etc-passwd", family: Some(Family::PathTraversal), kind: ConstructKind::Signature, summary: "literal `/etc/passwd`" };
+pub static SIG_CAT_SUBST: ConstructInfo = ConstructInfo { id: "sig.cat-subst", family: Some(Family::CommandInjection), kind: ConstructKind::Signature, summary: "literal `$(cat `" };
+pub static API_TYPE_VIOLATION: ConstructInfo = ConstructInfo { id: "api.type-violation", family: Some(Family::Sqli), kind: ConstructKind::Signature, summary: "numeric-looking field (id, *_id, page, count) carries a formed construct" };
+pub static RECON_SENSITIVE_PATH: ConstructInfo = ConstructInfo { id: "recon.sensitive-path-probe", family: Some(Family::Recon), kind: ConstructKind::Signature, summary: "canonical path starts with a configured sensitive path" };
+pub static HONEYPOT_DECOY_HIT: ConstructInfo = ConstructInfo { id: "honeypot.decoy-hit", family: Some(Family::Honeypot), kind: ConstructKind::Signature, summary: "canonical path hits a configured decoy" };
+pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-ua", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "User-Agent matches a scanner fingerprint" };
+pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.header-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a header carried bytes that are not UTF-8" };
+
+static REGISTRY: &[&ConstructInfo] = &[
+    &SIG_UNION_ALL_SELECT,
+    &SIG_CLASSIC_OR,
+    &SIG_SCHEMA_ENUM,
+    &SIG_ALERT_SCRIPT,
+    &SIG_ONERROR,
+    &SIG_ETC_PASSWD,
+    &SIG_CAT_SUBST,
+    &API_TYPE_VIOLATION,
+    &RECON_SENSITIVE_PATH,
+    &HONEYPOT_DECOY_HIT,
+    &INTEL_SCANNER_UA,
+    &LIMIT_HEADER_NON_UTF8,
+];
+
+/// Every registered construct, decoder and limit.
+pub fn constructs() -> &'static [&'static ConstructInfo] {
+    REGISTRY
+}
+
+pub fn lookup(id: &str) -> Option<&'static ConstructInfo> {
+    REGISTRY.iter().copied().find(|c| c.id == id)
+}
+
+/// The ids in `ids` that name no registered construct (for config validation).
+pub fn unknown_ids(ids: &[String]) -> Vec<String> {
+    ids.iter().filter(|i| lookup(i).is_none()).cloned().collect()
+}
+
+/// The constructs switched off by `shield.disabled`.
+#[derive(Debug, Clone, Default)]
+pub struct Disabled(HashSet<&'static str>);
+
+impl Disabled {
+    /// Resolve configured ids. Unknown ids are skipped here; `Config::validate`
+    /// reports them, so a validated config never reaches this with one.
+    pub fn resolve(ids: &[String]) -> Disabled {
+        Disabled(ids.iter().filter_map(|i| lookup(i)).map(|c| c.id).collect())
+    }
+
+    pub fn is(&self, c: &ConstructInfo) -> bool {
+        self.0.contains(c.id)
+    }
+}
+
+/// Sink output for one field: reachable and latent patterns, de-duplicated,
+/// with disabled constructs dropped.
+pub struct Hits<'d> {
+    disabled: &'d Disabled,
+    pub reachable: Vec<Pattern>,
+    pub latent: Vec<Pattern>,
+}
+
+impl<'d> Hits<'d> {
+    pub fn new(disabled: &'d Disabled) -> Self {
+        Hits { disabled, reachable: Vec::new(), latent: Vec::new() }
+    }
+
+    pub fn reach(&mut self, c: &'static ConstructInfo) {
+        push_unique(&mut self.reachable, c, self.disabled);
+    }
+
+    pub fn latent(&mut self, c: &'static ConstructInfo) {
+        push_unique(&mut self.latent, c, self.disabled);
+    }
+
+    /// True if a reachable pattern of `family` has been recorded.
+    pub fn reached(&self, family: Family) -> bool {
+        self.reachable.iter().any(|p| p.family == family)
+    }
+}
+
+fn push_unique(v: &mut Vec<Pattern>, c: &'static ConstructInfo, disabled: &Disabled) {
+    if disabled.is(c) || v.iter().any(|p| p.name == c.id) {
+        return;
+    }
+    v.push(c.pattern());
+}
+
+/// What a sink sees: one window of tokens and the whole normalized field text.
+pub struct SinkCtx<'a> {
+    pub tokens: &'a [Token],
+    pub text: &'a str,
+}
+
+#[allow(dead_code)]
+pub(crate) fn has_kw(tokens: &[Token], kw: &str) -> bool {
+    tokens.iter().any(|t| t.kind == TokenKind::SqlKeyword && t.text == kw)
+}
+
+#[allow(dead_code)]
+pub(crate) fn has_quote(tokens: &[Token]) -> bool {
+    tokens.iter().any(|t| t.kind == TokenKind::Quote)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_unique_and_dotted() {
+        let mut seen = std::collections::HashSet::new();
+        for c in constructs() {
+            assert!(seen.insert(c.id), "duplicate id {}", c.id);
+            assert!(c.id.contains('.') && !c.id.starts_with('.') && !c.id.ends_with('.'), "not dotted: {}", c.id);
+            assert!(
+                c.id.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '-'),
+                "bad characters in {}",
+                c.id
+            );
+            assert!(!c.summary.is_empty(), "{} has no summary", c.id);
+        }
+    }
+
+    #[test]
+    fn only_decoders_lack_a_family() {
+        for c in constructs() {
+            assert_eq!(c.family.is_none(), c.kind == ConstructKind::Decoder, "{}", c.id);
+        }
+    }
+
+    #[test]
+    fn lookup_and_unknown_ids() {
+        assert_eq!(lookup("honeypot.decoy-hit").map(|c| c.id), Some("honeypot.decoy-hit"));
+        assert!(lookup("nope.nope").is_none());
+        assert_eq!(unknown_ids(&["honeypot.decoy-hit".into(), "nope.nope".into()]), vec!["nope.nope".to_string()]);
+    }
+
+    #[test]
+    fn hits_drop_disabled_and_dedupe() {
+        let d = Disabled::resolve(&["sig.onerror".into()]);
+        let mut h = Hits::new(&d);
+        h.reach(&SIG_ONERROR);
+        h.reach(&SIG_CLASSIC_OR);
+        h.reach(&SIG_CLASSIC_OR);
+        h.latent(&SIG_ETC_PASSWD);
+        assert_eq!(h.reachable.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["sig.classic-or"]);
+        assert_eq!(h.latent.len(), 1);
+        assert!(h.reached(Family::Sqli));
+        assert!(!h.reached(Family::Xss));
+    }
+}
