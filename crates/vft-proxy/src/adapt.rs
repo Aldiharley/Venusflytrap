@@ -1,6 +1,12 @@
-//! Hyper request parts → `vft_core::Request`. Every header that is forwarded
-//! is also inspected: bytes that are not valid UTF-8 are decoded lossily and
-//! recorded in `non_utf8_headers`, which the engine turns into evidence (C4).
+//! Hyper request parts → `vft_core::Request`. Query keys and values, cookie
+//! names and values, the body (up to `shield.max_payload` characters, see the
+//! benchmark's known fail-opens) and every forwarded header are inspected,
+//! except `Content-Length`, which the HTTP front end has already validated as
+//! a length. `Connection` is not inspected either; it is hop-by-hop and never
+//! forwarded. A raw `Cookie` header is inspected through its parsed names and
+//! values when every segment is `token=value`, and as a header too otherwise.
+//! Header bytes that are not valid UTF-8 are decoded lossily and recorded in
+//! `non_utf8_headers`, which the engine turns into evidence (C4).
 
 use std::net::IpAddr;
 

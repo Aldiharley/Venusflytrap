@@ -222,6 +222,51 @@ mod tests {
         assert_eq!(p.decide(&parts("/", CHROME), b"", Some(other), 1_000).judgment.verdict, Verdict::Allow);
     }
 
+    /// Every probe goes through `decide`; failures are collected so one run shows them all.
+    fn assert_all_blocked(probes: &[(&str, &[(&str, &str)])]) {
+        let p = pipeline();
+        let mut missed = Vec::new();
+        for (n, (uri, headers)) in probes.iter().enumerate() {
+            let peer = IpAddr::from([198, 51, 100, 100 + n as u8]);
+            let d = p.decide(&parts(uri, headers), b"", Some(peer), 0);
+            if !matches!(d.judgment.verdict, Verdict::Block | Verdict::Challenge) {
+                missed.push(format!("{uri} {headers:?}: {:?} {} {}", d.judgment.verdict, d.judgment.score, d.judgment.reason));
+            }
+        }
+        assert!(missed.is_empty(), "not blocked:\n{}", missed.join("\n"));
+    }
+
+    #[test]
+    fn cookie_names_and_unparsed_cookie_segments_are_inspected() {
+        // Final review C1: a segment without `=` and a cookie name are attacker bytes.
+        assert_all_blocked(&[
+            ("/x", &[("cookie", "1 union select password from users")]),
+            ("/x", &[("cookie", "<script>alert(1)</script>=1")]),
+            ("/x", &[("cookie", "a=1; 1 union select password from users")]),
+        ]);
+    }
+
+    #[test]
+    fn query_keys_and_accept_encoding_are_inspected() {
+        // Final review C2: query keys and Accept-Encoding are forwarded, so inspected.
+        assert_all_blocked(&[
+            ("/x?1%20union%20select%20password%20from%20users", &[]),
+            ("/x?1%20union%20select%20password%20from%20users=1", &[]),
+            ("/x?%3Cscript%3Ealert(1)%3C/script%3E", &[]),
+            ("/x", &[("accept-encoding", "1 union select password from users")]),
+        ]);
+    }
+
+    #[test]
+    fn real_browser_cookies_and_query_keys_stay_allowed() {
+        let p = pipeline();
+        let peer: IpAddr = "198.51.100.77".parse().unwrap();
+        for uri in ["/search?q=shoes&sort=price_asc&utm_source=news", "/p?flag", "/a?x[]=1&x[]=2"] {
+            let d = p.decide(&parts(uri, CHROME), b"", Some(peer), 0);
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "{uri}: {}", d.judgment.reason);
+        }
+    }
+
     #[test]
     fn client_ip_trusts_xff_only_from_trusted_proxies() {
         let mut cfg = Config::default();
