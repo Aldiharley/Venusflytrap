@@ -129,7 +129,8 @@ fn percent_decode_lossy(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The path as a backend would resolve it: percent-decoded (up to 3 layers),
+/// The path as a backend would resolve it: percent-decoded (up to 3 layers;
+/// decoding stops after 3, so deeper nesting is left encoded),
 /// backslashes as slashes, matrix parameters (`;x`) dropped per segment, empty
 /// and `.` segments removed, `..` resolved (RFC 3986 §5.2.4), trailing slash
 /// kept. Used by honeypot and recon checks (H5). The path graph keeps the raw
@@ -145,13 +146,19 @@ pub fn canonical_path(raw: &str) -> String {
     }
     let s = s.replace('\\', "/");
     let mut segs: Vec<&str> = Vec::new();
+    // RFC 3986 §5.2.4: a final segment of "", "." or ".." leaves a trailing slash.
+    let mut trailing = false;
     for seg in s.split('/') {
         match seg.split(';').next().unwrap_or("") {
-            "" | "." => {}
+            "" | "." => trailing = true,
             ".." => {
                 segs.pop();
+                trailing = true;
             }
-            other => segs.push(other),
+            other => {
+                segs.push(other);
+                trailing = false;
+            }
         }
     }
     let mut out = String::with_capacity(s.len() + 1);
@@ -159,7 +166,7 @@ pub fn canonical_path(raw: &str) -> String {
         out.push('/');
         out.push_str(seg);
     }
-    if out.is_empty() || (s.ends_with('/') && !segs.is_empty()) {
+    if out.is_empty() || trailing {
         out.push('/');
     }
     out
@@ -184,6 +191,10 @@ mod tests {
             ("/", "/"),
             ("", "/"),
             ("/../../..", "/"),
+            ("/phpmyadmin/.", "/phpmyadmin/"),
+            ("/.git/x/..", "/.git/"),
+            ("/a/..", "/"),
+            ("/a/b/.", "/a/b/"),
         ] {
             assert_eq!(canonical_path(raw), want, "raw {raw:?}");
         }

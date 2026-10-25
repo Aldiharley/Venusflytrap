@@ -60,6 +60,7 @@ mod tests {
             "//.git/config",
             "/a/../.git/config",
             "/x/..;/.git/config",
+            "/phpmyadmin/.",
         ] {
             assert!(hp.check(&Request::get(p)).is_some(), "missed {p}");
         }
