@@ -56,6 +56,12 @@ impl Request {
         self.body.iter().all(|b| b.is_ascii_whitespace())
     }
 
+    /// The path as a backend would resolve it (see [`canonical_path`]). Used by
+    /// honeypot and recon checks; the path graph keeps reading `self.path`.
+    pub fn canonical_path(&self) -> String {
+        canonical_path(&self.path)
+    }
+
     /// All inspectable fields: query params, headers, cookies, and the body as a
     /// single field. The path is inspected separately (it has path-specific
     /// semantics such as traversal and recon).
@@ -98,5 +104,88 @@ impl Request {
             });
         }
         out
+    }
+}
+
+/// Percent-decode to bytes, then UTF-8 lossily (never skips a layer on bad
+/// UTF-8). Private stand-in until the recall-lift decoder
+/// (`normalize::percent_decode_lossy`) lands — replace this then.
+fn percent_decode_lossy(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The path as a backend would resolve it: percent-decoded (up to 3 layers),
+/// backslashes as slashes, matrix parameters (`;x`) dropped per segment, empty
+/// and `.` segments removed, `..` resolved (RFC 3986 §5.2.4), trailing slash
+/// kept. Used by honeypot and recon checks (H5). The path graph keeps the raw
+/// path, because dot segments are the traversal evidence.
+pub fn canonical_path(raw: &str) -> String {
+    let mut s = raw.to_string();
+    for _ in 0..3 {
+        let d = percent_decode_lossy(&s);
+        if d == s {
+            break;
+        }
+        s = d;
+    }
+    let s = s.replace('\\', "/");
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg.split(';').next().unwrap_or("") {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            other => segs.push(other),
+        }
+    }
+    let mut out = String::with_capacity(s.len() + 1);
+    for seg in &segs {
+        out.push('/');
+        out.push_str(seg);
+    }
+    if out.is_empty() || (s.ends_with('/') && !segs.is_empty()) {
+        out.push('/');
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_path_cases() {
+        for (raw, want) in [
+            ("/.git/config", "/.git/config"),
+            ("/%2egit/config", "/.git/config"),
+            ("//.git//config", "/.git/config"),
+            ("/.%65nv", "/.env"),
+            ("/a/b/../../.git/config", "/.git/config"),
+            ("/x/..;/.git/config", "/.git/config"),
+            ("/a\\..\\.env", "/.env"),
+            ("/%252egit/config", "/.git/config"),
+            ("/phpmyadmin/", "/phpmyadmin/"),
+            ("/", "/"),
+            ("", "/"),
+            ("/../../..", "/"),
+        ] {
+            assert_eq!(canonical_path(raw), want, "raw {raw:?}");
+        }
     }
 }

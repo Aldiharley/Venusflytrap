@@ -18,7 +18,7 @@ impl Honeypot {
 
     /// A decoy hit is a near-certain attacker: real users never request these.
     pub fn check(&self, req: &Request) -> Option<Evidence> {
-        let path = req.path.to_lowercase();
+        let path = req.canonical_path().to_lowercase();
         if self.decoys.iter().any(|d| path == *d || path.starts_with(d)) {
             Some(Evidence::new(
                 FourValued::Dangerous,
@@ -49,5 +49,19 @@ mod tests {
     fn ordinary_path_no_hit() {
         let hp = Honeypot::new(&HoneypotConfig::default());
         assert!(hp.check(&Request::get("/index.html")).is_none());
+    }
+
+    #[test]
+    fn encoded_and_dotted_decoys_still_hit() {
+        // H5
+        let hp = Honeypot::new(&HoneypotConfig::default());
+        for p in [
+            "/%2egit/config",
+            "//.git/config",
+            "/a/../.git/config",
+            "/x/..;/.git/config",
+        ] {
+            assert!(hp.check(&Request::get(p)).is_some(), "missed {p}");
+        }
     }
 }

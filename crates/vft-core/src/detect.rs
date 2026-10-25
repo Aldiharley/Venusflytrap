@@ -175,7 +175,7 @@ impl FieldDetector for AiDetector<'_> {
 /// Request-level intent detector (path recon / empty-payload probing). Not a
 /// field detector — it looks at the whole request.
 pub fn intent_evidence(req: &Request, cfg: &Config) -> Evidence {
-    let path = req.path.to_lowercase();
+    let path = req.canonical_path().to_lowercase();
     // Prefix match only — NOT substring. A substring match flags benign nested
     // paths like `/api/config.json` just because they contain `/config.json`
     // (M5). Recon targets are hit at a path prefix (`/.env`, `/actuator/...`).
@@ -253,5 +253,14 @@ mod tests {
         let req = Request::get("/.env");
         let e = intent_evidence(&req, &cfg);
         assert_eq!(e.value, FourValued::Dangerous);
+    }
+
+    #[test]
+    fn intent_flags_encoded_env_probe() {
+        let cfg = Config::default();
+        for p in ["/.%65nv", "/%2eenv", "//.env"] {
+            let e = intent_evidence(&Request::get(p), &cfg);
+            assert_eq!(e.value, FourValued::Dangerous, "missed {p}");
+        }
     }
 }
