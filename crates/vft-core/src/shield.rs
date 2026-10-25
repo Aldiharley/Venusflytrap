@@ -61,9 +61,14 @@ impl Shield {
     pub fn inspect(&self, req: &Request) -> Judgment {
         // Intel allow-list short-circuit (still inspect, but never hard-block on
         // intel; allow-list only suppresses the intel deny pin).
+        // Lists are keyed by the canonical address (IPv4-mapped IPv6 -> IPv4),
+        // the same canonicalization the chain's source keys use.
         let denied = req
             .src_ip
-            .map(|ip| self.intel.is_denied(&ip) && !self.intel.is_allowed(&ip))
+            .map(|ip| {
+                let ip = canonical(ip);
+                self.intel.is_denied(&ip) && !self.intel.is_allowed(&ip)
+            })
             .unwrap_or(false);
 
         let mut rec = Recorder::default();
@@ -211,14 +216,22 @@ impl Shield {
             return self.inspect(req);
         };
         let key = SourceKey::new(ip, self.cfg.chain.ipv6_prefix);
-        if let Some(b) = chain.active_ban(key, now_ms) {
-            return self.banned_judgment(&b);
+        // An allow-listed source is inspected normally and is never banned,
+        // so a ban recorded against its address (or shared /64) cannot block it.
+        let may_ban = !self.intel.is_allowed(&canonical(ip));
+        if may_ban {
+            if let Some(b) = chain.active_ban(key, now_ms) {
+                return self.banned_judgment(&b);
+            }
         }
         let j = self.inspect(req);
-        let may_ban = !self.intel.is_allowed(&ip);
         let o = chain.observe(key, event_for(&j), now_ms, may_ban);
         self.finalize(j, &o)
     }
+}
+
+fn canonical(ip: std::net::IpAddr) -> std::net::IpAddr {
+    SourceKey::new(ip, 128).ip()
 }
 
 #[derive(Default)]
@@ -297,7 +310,7 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::ChainTracker;
+    use crate::chain::{BanCause, ChainTracker};
     use crate::judgment::{Family, FieldRef, Stage};
     use crate::lattice::FourValued;
     use crate::request::Location;
@@ -393,6 +406,41 @@ mod tests {
         let j4 = s.inspect_stateful(&benign, &mut chain, 3_000);
         assert_eq!(j4.verdict, Verdict::Block);
         assert!(j4.banned_source);
+    }
+
+    #[test]
+    fn allow_listed_source_is_never_banned_even_via_mapped_ipv6() {
+        let mut s = shield();
+        let v4: IpAddr = "192.0.2.7".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        s.intel_mut().add_allow_ip(v4);
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let mut hp = Request::get("/.git/config");
+        hp.src_ip = Some(mapped);
+        let j1 = s.inspect_stateful(&hp, &mut chain, 0);
+        assert!(!j1.banned_source, "allow-listed honeypot hit must not ban");
+        assert_eq!(chain.ban_count(), 0);
+        let j2 = s.inspect_stateful(&browser("/index.html", mapped), &mut chain, 1_000);
+        assert!(!j2.banned_source);
+        assert_eq!(j2.verdict, Verdict::Allow, "{}", j2.reason);
+        // Even a ban forced onto the allow-listed address does not fast-track it.
+        chain.ban(SourceKey::new(v4, 64), BanCause::Manual, 2_000);
+        let j3 = s.inspect_stateful(&browser("/index.html", v4), &mut chain, 3_000);
+        assert!(!j3.banned_source);
+        assert_eq!(j3.verdict, Verdict::Allow, "{}", j3.reason);
+        // A non-allow-listed neighbour is unaffected by the allow-list and bans normally.
+        let other: IpAddr = "192.0.2.8".parse().unwrap();
+        hp.src_ip = Some(other);
+        assert!(s.inspect_stateful(&hp, &mut chain, 4_000).banned_source);
+    }
+
+    #[test]
+    fn deny_list_matches_mapped_ipv6() {
+        let mut s = shield();
+        s.intel_mut().add_deny_ip("192.0.2.9".parse().unwrap());
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("::ffff:192.0.2.9".parse().unwrap());
+        assert_eq!(s.inspect(&r).verdict, Verdict::Block);
     }
 
     #[test]

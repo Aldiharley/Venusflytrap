@@ -99,6 +99,8 @@ pub struct BanPolicy {
     pub on_honeypot: bool,
     pub on_exfiltration_block: bool,
     /// Ban after this many exploitation blocks within `within_secs`.
+    /// A "block" here is a Challenge or Block verdict: both are answered
+    /// with 403 in enforce mode.
     pub exploitation_blocks: u32,
     pub within_secs: u64,
     /// First ban length; doubles on each re-offence up to `ttl_max_secs`.

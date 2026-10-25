@@ -76,7 +76,7 @@ pub fn event_for(j: &Judgment) -> Event {
         .contributions
         .iter()
         .any(|c| c.family == Some(Family::Intel) && c.value.is_threat());
-    if scanner && j.verdict.rank() >= Verdict::Monitor.rank() {
+    if scanner && j.verdict.rank() >= Verdict::Challenge.rank() {
         return Event::Enumeration;
     }
     Event::Benign
@@ -263,12 +263,47 @@ impl ChainTracker {
 mod tests {
     use super::*;
     use crate::config::ChainConfig;
+    use crate::judgment::Contribution;
     use std::net::Ipv4Addr;
 
     fn key(n: u8) -> SourceKey {
         SourceKey::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, n)), 64)
     }
     const MIN: u64 = 60_000;
+
+    fn judgment(verdict: Verdict, contributions: Vec<Contribution>) -> Judgment {
+        Judgment {
+            verdict,
+            score: 0,
+            engines: Vec::new(),
+            matched: Vec::new(),
+            contributions,
+            chain_stage: None,
+            normalized_layers: 0,
+            banned_source: false,
+            reason: String::new(),
+        }
+    }
+
+    fn scanner_ua() -> Contribution {
+        Contribution {
+            engine: "intel".into(),
+            field: None,
+            construct: Some("scanner-ua".into()),
+            family: Some(Family::Intel),
+            value: FourValued::Suspicious,
+            weight: 0.8,
+            points: 0.0,
+        }
+    }
+
+    #[test]
+    fn scanner_fingerprint_stages_enumeration_only_at_challenge_or_above() {
+        let monitor = judgment(Verdict::Monitor, vec![scanner_ua()]);
+        assert_eq!(event_for(&monitor), Event::Benign, "a forwarded request never stages a source");
+        let challenge = judgment(Verdict::Challenge, vec![scanner_ua()]);
+        assert_eq!(event_for(&challenge), Event::Enumeration);
+    }
 
     #[test]
     fn honeypot_bans_immediately() {

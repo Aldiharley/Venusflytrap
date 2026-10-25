@@ -137,7 +137,7 @@ Off-path: after the response completes, `bus.send(BusEvent::Judgment(..))` on a 
 - `Honeypot` if `decided_by.kind == Honeypot`;
 - `Exfiltration` if verdict ≥ Challenge and a Dangerous contribution has an exfil construct (`sqli.union-select`, `sqli.schema-enum`, `sqli.load-file`);
 - `Exploitation` if verdict ≥ Challenge and the top contribution is Dangerous in SQLi, XSS, command injection or path traversal;
-- `Recon` if intent is Dangerous; `Enumeration` if a scanner fingerprint matched and verdict ≥ Monitor;
+- `Recon` if intent is Dangerous; `Enumeration` if a scanner fingerprint matched and verdict ≥ Challenge (a forwarded request never stages a source);
 - otherwise `Benign`.
 
 Suspicious or latent evidence never stages a source. Invariant test: for every Allow in the corpus, `event_for == Benign`.

@@ -134,7 +134,6 @@ fn parse_cookies(s: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Judge a request without forwarding — used by the handler and by tests.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -142,6 +141,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Judge a request without forwarding — used by the handler and by tests.
 pub fn judge(state: &ProxyState, req: &VftRequest) -> Judgment {
     let mut chain = state.chain.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     state.shield.inspect_stateful(req, &mut chain, now_ms())
