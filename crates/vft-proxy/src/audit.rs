@@ -52,15 +52,12 @@ impl AuditSink {
         let write_errors = Arc::new(AtomicU64::new(0));
         let errs = write_errors.clone();
         let worker = std::thread::spawn(move || {
-            let mut out: Box<dyn Write> = match &path {
-                Some(p) => match open(p) {
-                    Some(f) => Box::new(BufWriter::new(f)),
-                    None => {
-                        errs.fetch_add(1, Ordering::Relaxed);
-                        Box::new(std::io::sink())
-                    }
-                },
-                None => Box::new(BufWriter::new(std::io::stdout())),
+            // `failed` is true while the file could not be opened: `out` is a
+            // writer that errors on every write (so each lost line is counted
+            // as a write error) and the idle tick retries the open.
+            let (mut out, mut failed): (Box<dyn Write>, bool) = match &path {
+                Some(p) => open_out(p, &errs),
+                None => (Box::new(BufWriter::new(std::io::stdout())), false),
             };
             let mut size = path
                 .as_ref()
@@ -73,24 +70,27 @@ impl AuditSink {
                             errs.fetch_add(1, Ordering::Relaxed);
                         }
                         size += line.len() as u64 + 1;
-                        if let Some(p) = path.as_ref().filter(|_| size >= max_bytes) {
+                        if let Some(p) = path.as_ref().filter(|_| !failed && size >= max_bytes) {
                             let _ = out.flush();
                             drop(out);
                             if std::fs::rename(p, p.with_extension("1")).is_err() {
                                 errs.fetch_add(1, Ordering::Relaxed);
                             }
-                            out = match open(p) {
-                                Some(f) => Box::new(BufWriter::new(f)),
-                                None => {
-                                    errs.fetch_add(1, Ordering::Relaxed);
-                                    Box::new(std::io::sink())
-                                }
-                            };
+                            (out, failed) = open_out(p, &errs);
                             size = 0;
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
-                        if out.flush().is_err() {
+                        if failed {
+                            if let Some(f) = path.as_ref().and_then(|p| open(p)) {
+                                out = Box::new(BufWriter::new(f));
+                                failed = false;
+                                size = path
+                                    .as_ref()
+                                    .and_then(|p| std::fs::metadata(p).ok())
+                                    .map_or(0, |m| m.len());
+                            }
+                        } else if out.flush().is_err() {
                             errs.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -175,6 +175,30 @@ fn open(p: &std::path::Path) -> Option<File> {
     OpenOptions::new().create(true).append(true).open(p).ok()
 }
 
+/// Open the audit file; on failure count one write error and return a writer
+/// that fails every write so each lost line is counted too.
+fn open_out(p: &std::path::Path, errs: &AtomicU64) -> (Box<dyn Write>, bool) {
+    match open(p) {
+        Some(f) => (Box::new(BufWriter::new(f)), false),
+        None => {
+            errs.fetch_add(1, Ordering::Relaxed);
+            (Box::new(FailedWriter), true)
+        }
+    }
+}
+
+/// Stand-in for an unopened file: every write and flush errors.
+struct FailedWriter;
+
+impl Write for FailedWriter {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("audit file unavailable"))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("audit file unavailable"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,15 +257,42 @@ mod tests {
     }
 
     #[test]
-    fn unopenable_path_counts_write_error_and_never_blocks() {
-        let p = std::env::temp_dir().join(format!("vft-audit-{}-nodir", std::process::id())).join("a").join("b.jsonl");
+    fn unopenable_path_counts_every_lost_line() {
+        let p = std::env::temp_dir()
+            .join(format!("vft-audit-{}-nodir", std::process::id()))
+            .join("a")
+            .join("b.jsonl");
         let sink = AuditSink::new(Some(p), 1024);
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1);
+        for i in 0..10 {
+            sink.record(&req, &j, i, i);
+        }
         assert_eq!(sink.dropped(), 0);
         let errs = sink.write_errors.clone();
         sink.close();
-        assert!(errs.load(Ordering::Relaxed) >= 1);
+        assert!(errs.load(Ordering::Relaxed) >= 10, "got {}", errs.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn reopens_after_transient_open_failure() {
+        let dir = std::env::temp_dir().join(format!("vft-audit-{}-late", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("late.jsonl");
+        let sink = AuditSink::new(Some(p.clone()), 1024 * 1024);
+        let req = Request::get("/x");
+        let j = Shield::new(Config::default()).inspect(&req);
+        sink.record(&req, &j, 1, 1); // lost: directory missing
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::thread::sleep(Duration::from_millis(600)); // let the idle tick retry
+        sink.record(&req, &j, 2, 2);
+        let errs = sink.write_errors.clone();
+        sink.close();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text.lines().count(), 1, "only the post-recovery line is written");
+        assert!(text.contains("\"request_id\":2"));
+        assert!(errs.load(Ordering::Relaxed) >= 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
