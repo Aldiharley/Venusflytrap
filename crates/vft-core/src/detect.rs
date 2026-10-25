@@ -159,20 +159,14 @@ impl FieldDetector for AiDetector<'_> {
     }
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
         let s = self.oracle.score(ctx.norm, ctx.analysis);
-        // When the oracle is confident the field is clean (score 0), emit Safe at
-        // a weight above the conflict threshold so the lattice's conflict
-        // arbitration can actually engage when another engine shouts Dangerous
-        // (M4). This only damps a single-engine detection slightly; it never
-        // suppresses a block outright, so it cannot weaken a true positive into
-        // an allow.
+        // Absence of evidence is Belnap's None, not Safe: a clean field says
+        // nothing about another field's attack (H4).
         let (value, weight) = if s >= 0.6 {
             (FourValued::Dangerous, s)
         } else if s >= 0.35 {
             (FourValued::Suspicious, s)
-        } else if s > 0.0 {
-            (FourValued::None, 0.3)
         } else {
-            (FourValued::Safe, 0.7)
+            (FourValued::None, 0.0)
         };
         Evidence::new(value, weight, vec![], format!("ai score {s:.2}"))
     }

@@ -18,6 +18,7 @@ scoring:
   monitor_at: 40          # >= this => Monitor, else Allow
   conflict_threshold: 0.6 # weight above which Safe-vs-Dangerous is a real conflict
   chain_stage_bonus: 15   # added to score when the source advances a kill-chain stage
+  corroboration_cap: 15   # max points corroborating weak signals may add in total
 
 chain:
   window_secs: 3600       # per-source event memory window

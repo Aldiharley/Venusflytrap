@@ -2,7 +2,7 @@
 
 use crate::config::ScoringConfig;
 use crate::judgment::{FieldRef, Verdict};
-use crate::lattice::{conflict, Evidence, FourValued};
+use crate::lattice::{Evidence, FourValued};
 
 /// Base points each value contributes before engine weighting.
 fn value_points(v: FourValued) -> f32 {
@@ -37,29 +37,55 @@ pub fn arbitrate(
     // Weighted max-style aggregation: the strongest well-weighted threat drives
     // the score, with smaller corroborating signals nudging it up. This avoids
     // diluting a single strong detection by averaging in silent detectors.
-    let evid_only: Vec<Evidence> = items.iter().map(|s| s.evidence.clone()).collect();
-    let is_conflict = conflict(&evid_only, cfg.conflict_threshold);
+    let is_conflict = field_conflict(items, cfg.conflict_threshold);
 
-    let points: Vec<f32> = items
-        .iter()
-        .filter(|s| s.evidence.value.is_threat())
-        .map(|s| value_points(s.evidence.value) * s.evidence.weight * s.engine_weight)
-        .collect();
+    // One contribution per (field, construct): repeating the same weak signal
+    // on one field does not corroborate itself (M1).
+    let mut seen: std::collections::HashSet<(Option<FieldRef>, String)> = Default::default();
+    let mut points: Vec<f32> = Vec::new();
+    for s in items.iter().filter(|s| s.evidence.value.is_threat()) {
+        let construct = s
+            .evidence
+            .patterns
+            .first()
+            .map_or_else(|| s.engine.clone(), |p| p.name.clone());
+        if !seen.insert((s.field.clone(), construct)) {
+            continue;
+        }
+        points.push(value_points(s.evidence.value) * s.evidence.weight * s.engine_weight);
+    }
     let top = points.iter().copied().fold(0.0f32, f32::max);
-    let corroboration = (points.iter().sum::<f32>() - top) * 0.1;
+    let corroboration = ((points.iter().sum::<f32>() - top) * 0.1).min(cfg.corroboration_cap);
 
     let mut score = (top + corroboration).min(100.0);
-
-    // Conflict handling: if a strong Safe opposes a strong Dangerous, we trust
-    // the taint-graph family (Dangerous) but note the arbitration; we do not
-    // zero it out. Slightly damp so a lone noisy "dangerous" with a credible
-    // "safe" counter isn't auto-blocked.
     if is_conflict {
-        score *= 0.9;
+        // Damp, but never below the band the strongest danger reaches alone.
+        score = (score * 0.9).max(band_floor(top, cfg));
     }
-
-    let s = score.round() as u8;
+    let s = score.round().clamp(0.0, 100.0) as u8;
     (s, band(s, cfg), is_conflict)
+}
+
+/// A strong Safe and a strong Dangerous about the *same* field.
+fn field_conflict(items: &[Scored], threshold: f32) -> bool {
+    items
+        .iter()
+        .filter(|d| d.evidence.value == FourValued::Dangerous && d.evidence.weight >= threshold)
+        .any(|d| {
+            items.iter().any(|o| {
+                o.field == d.field
+                    && o.evidence.value == FourValued::Safe
+                    && o.evidence.weight >= threshold
+            })
+        })
+}
+
+fn band_floor(points: f32, cfg: &ScoringConfig) -> f32 {
+    [cfg.block_at, cfg.challenge_at, cfg.monitor_at]
+        .into_iter()
+        .map(f32::from)
+        .find(|t| points >= *t)
+        .unwrap_or(0.0)
 }
 
 /// Map a 0..=100 score onto the configured verdict bands.
@@ -78,10 +104,64 @@ pub fn band(score: u8, cfg: &ScoringConfig) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::judgment::FieldRef;
     use crate::lattice::Evidence;
 
     fn sc(w: f32, e: Evidence) -> Scored {
         Scored { engine: "t".into(), engine_weight: w, field: None, evidence: e }
+    }
+
+    fn scf(w: f32, field: &str, e: Evidence) -> Scored {
+        Scored {
+            engine: "t".into(),
+            engine_weight: w,
+            field: Some(FieldRef { loc: crate::request::Location::Query, name: field.into() }),
+            evidence: e,
+        }
+    }
+
+    #[test]
+    fn corroboration_is_capped() {
+        let cfg = ScoringConfig::default();
+        let mut ev = vec![scf(1.0, "a", Evidence::new(FourValued::Dangerous, 0.5, vec![], "x"))];
+        for i in 0..50 {
+            ev.push(scf(1.0, &format!("f{i}"), Evidence::new(FourValued::Suspicious, 0.5, vec![], "w")));
+        }
+        let (s, _, _) = arbitrate(&ev, &cfg, false);
+        assert!(s as f32 <= 50.0 + cfg.corroboration_cap + 0.5, "score {s}");
+    }
+
+    #[test]
+    fn duplicate_construct_on_same_field_counts_once() {
+        let cfg = ScoringConfig::default();
+        let p = vec![crate::judgment::Pattern::new(crate::judgment::Family::CommandInjection, "shell-meta")];
+        let one = vec![scf(1.0, "a", Evidence::new(FourValued::Suspicious, 0.5, p.clone(), "w"))];
+        let two = vec![
+            scf(1.0, "a", Evidence::new(FourValued::Suspicious, 0.5, p.clone(), "w")),
+            scf(1.0, "a", Evidence::new(FourValued::Suspicious, 0.5, p, "w")),
+        ];
+        assert_eq!(arbitrate(&one, &cfg, false).0, arbitrate(&two, &cfg, false).0);
+    }
+
+    #[test]
+    fn conflict_is_scoped_per_field_and_floored() {
+        let cfg = ScoringConfig::default();
+        // Safe on another field: no conflict.
+        let ev = vec![
+            scf(1.0, "id", Evidence::new(FourValued::Dangerous, 0.95, vec![], "taint")),
+            scf(1.0, "lang", Evidence::new(FourValued::Safe, 0.9, vec![], "ai")),
+        ];
+        let (_, v, c) = arbitrate(&ev, &cfg, false);
+        assert!(!c);
+        assert_eq!(v, Verdict::Block);
+        // Safe on the same field: conflict, but never below the band the danger reaches alone.
+        let ev2 = vec![
+            scf(1.0, "id", Evidence::new(FourValued::Dangerous, 0.95, vec![], "taint")),
+            scf(1.0, "id", Evidence::new(FourValued::Safe, 0.9, vec![], "ai")),
+        ];
+        let (_, v2, c2) = arbitrate(&ev2, &cfg, false);
+        assert!(c2);
+        assert_eq!(v2, Verdict::Block);
     }
 
     #[test]

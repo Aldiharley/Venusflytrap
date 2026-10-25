@@ -48,6 +48,8 @@ pub struct ScoringConfig {
     pub conflict_threshold: f32,
     /// How much a chain stage advance adds to the score.
     pub chain_stage_bonus: u8,
+    /// Upper bound on the total points corroborating signals may add.
+    pub corroboration_cap: f32,
 }
 
 impl Default for ScoringConfig {
@@ -63,6 +65,7 @@ impl Default for ScoringConfig {
             monitor_at: 40,
             conflict_threshold: 0.6,
             chain_stage_bonus: 15,
+            corroboration_cap: 15.0,
         }
     }
 }

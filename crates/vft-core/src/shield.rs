@@ -321,6 +321,36 @@ mod tests {
     }
 
     #[test]
+    fn clean_header_does_not_damp_attack() {
+        // H4: an unrelated clean field must not pull a Block down to Challenge.
+        let mut req = Request::get("/items");
+        req.query.push(("id".into(), "1 union select password from users".into()));
+        req.headers.push(("Accept-Language".into(), "en".into()));
+        let j = shield().inspect(&req);
+        assert_eq!(j.verdict, Verdict::Block, "score {} {}", j.score, j.reason);
+    }
+
+    #[test]
+    fn env_probe_not_damped_below_challenge() {
+        let mut req = Request::get("/.env");
+        req.headers.push(("Accept-Language".into(), "en".into()));
+        let j = shield().inspect(&req);
+        assert!(j.verdict.rank() >= Verdict::Challenge.rank(), "{:?} {}", j.verdict, j.score);
+    }
+
+    #[test]
+    fn many_weak_signals_cannot_reach_block() {
+        // M1: 25 values of `red;blue` must not add up to a Block.
+        let mut req = Request::get("/form");
+        for i in 0..25 {
+            req.query.push((format!("c{i}"), "red;blue".into()));
+        }
+        let j = shield().inspect(&req);
+        assert!(j.score < shield().config().scoring.block_at, "score {}", j.score);
+        assert_ne!(j.verdict, Verdict::Block);
+    }
+
+    #[test]
     fn blocks_sqli_in_query() {
         let mut req = Request::get("/items");
         req.query.push(("id".into(), "1 union select password from users".into()));
