@@ -162,3 +162,106 @@ Worst cases (release build, default config, best of 3 after a warm-up, `cargo te
 The same harness on the previous commit (44d91ec, no work cap) gave 1,151 ms (Allow), 231 ms (Allow), 1,079 ms (Allow), 5,240 ms (Allow), 5,177 ms (Block, byte budget) and 102 ms (Allow). The worst case is now 372 ms, about 3.8 x the 4 MiB plain-text request.
 
 Gate under the amended rule: PASS (regression tests pass; dev FP 0.88% <= 1.0%). Dev latency p50/p95/p99 in us: 102/287/987 before, 78/219/786 after; earlier runs of near-identical builds gave 67/196/735 to 124/344/1183, so the spread is run-to-run noise and no change is claimed.
+
+## M2a — milestone summary (commit 485ce08)
+
+Plan A close: H1, L5, C2 and C3 on top of the M1 registry. Same commands, corpus and split as M0 (`venusflytrap eval`, release build, distinct sources); run outputs sit in `m2a/` next to `m0/`. Held-out is scored here once for this milestone; only its totals and aggregate decision-diff counts were looked at, no held-out request or construct.
+
+| Run | Samples | TP | FP | TN | FN | Recall | Precision | F1 | FP rate | p50/p95/p99 µs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| library, full | 33877 | 287 | 276 | 32943 | 369 | 0.4375 | 0.5098 | 0.4709 | 0.0083 | 75/216/736 |
+| serve, full | 33877 | 287 | 276 | 32943 | 369 | 0.4375 | 0.5098 | 0.4709 | 0.0083 | 76/223/755 |
+| library, dev | 16939 | 148 | 146 | 16464 | 181 | 0.4498 | 0.5034 | 0.4751 | 0.0088 | 83/237/809 |
+| library, held-out | 16938 | 139 | 130 | 16479 | 188 | 0.4251 | 0.5167 | 0.4664 | 0.0078 | 74/222/746 |
+
+Change vs M0:
+
+| Run | ΔTP | ΔFP | ΔFN | Recall | Precision | F1 | FP rate |
+|---|---|---|---|---|---|---|---|
+| library, full | +4 | +7 | -4 | 0.4314 → 0.4375 (+0.0061) | 0.5127 → 0.5098 (-0.0029) | 0.4685 → 0.4709 (+0.0024) | 0.0081 → 0.0083 (+0.0002) |
+| library, dev | +1 | +4 | -1 | 0.4468 → 0.4498 (+0.0030) | 0.5087 → 0.5034 (-0.0053) | 0.4757 → 0.4751 (-0.0006) | 0.0085 → 0.0088 (+0.0003) |
+| library, held-out | +3 | +3 | -3 | 0.4159 → 0.4251 (+0.0092) | 0.5171 → 0.5167 (-0.0004) | 0.4610 → 0.4664 (+0.0054) | 0.0076 → 0.0078 (+0.0002) |
+
+Denominators: scored malicious (TP+FN) full 656, dev 329, held-out 327; benign (TN+FP) full 33,219, dev 16,610, held-out 16,609. `venusflytrap eval` still cannot read 2 held-out `.black` files on this host (access denied; `read_failures` is 2 in the full, serve and held-out JSON and 0 in dev), so held-out recall is over 327 attacks, not 329. Dev FP rate 146 / 16,610 = 0.88%; held-out 130 / 16,609 = 0.78%. Parse failures and invariant violations are 0 in all four runs. Dev plus held-out equals full (148 + 139 = 287 TP, 146 + 130 = 276 FP).
+
+Serve mode, full corpus (distinct sources): benign_sources 33219, benign_sources_banned 72, collateral_fp 0, bans_from_allowed 0, the same as M0. The serve and library confusion matrices are identical, as at M0.
+
+Decision diffs vs M0 (library mode, counts only):
+
+| Half | Malicious Allow→Block | Benign Allow→Block | Benign Monitor→Block | Benign Allow→Monitor | Benign Monitor→Allow | Score-only | Total |
+|---|---|---|---|---|---|---|---|
+| dev | 1 | 4 | 0 | 7 | 1 | 11 | 24 |
+| held-out | 3 | 2 | 1 | 5 | 1 | 16 | 28 |
+| full | 4 | 6 | 1 | 12 | 2 | 27 | 52 |
+
+The dev diffs match the per-change A/B sections above: L5's 1 new TP, C2's 4 new FPs, C3's 7 Allow→Monitor and H1's 1 Monitor→Allow. Held-out gained 3 TPs where dev gained 1. Which change produced them is unknown, because held-out rows are not opened. No verdict moved away from Block in either half.
+
+Robustness (bench_http on M0's `seeds.jsonl` / `mutants.jsonl`, mutate.py seed 1337): seeds recall 0.8636 (19/22), mutants recall 0.8303 (548/660), retained 96.1% (0.8303 / 0.8636 = 0.9614). These are identical to M0, with 0 decision diffs and 0 score diffs over the 22 + 660 requests. p50/p95/p99 µs: seeds 9/15/111, mutants 8/13/16.
+
+### Gates (spec §4.4 as amended by the owner rulings of 2026-10-25)
+
+| Gate | Evidence | Result |
+|---|---|---|
+| `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings` | 178 passed, 0 failed, 2 ignored; clippy exit 0 | PASS |
+| Dev FP rate ≤ 1.0% | 146 / 16,610 = 0.88% | PASS |
+| H1 `decode.percent-lossy` (bypass fix): 0 added dev FPs, probe tests block | A/B +0 TP / +0 FP; `one_bad_byte_does_not_disable_url_decoding` and `sqli_survives_an_invalid_utf8_escape_in_the_same_field` pass. The strict ΔTP > ΔFP rule fails (+0 is not greater than +0); the owner ruling judges H1 as a bypass fix | PASS (amended rule); strict rule FAIL, recorded |
+| L5 `decode.b64-whole` (fixed decoder): ΔTP > ΔFP | A/B +1 TP / +0 FP | PASS |
+| C2 windowing (fail-closed fix): probe tests block, dev FP within 1.0% | A/B +0 TP / +4 FP; `comma_padding_does_not_hide_sqli`, `exhausted_windows_emit_a_limit`, `attack_after_padding_is_found_in_a_later_window`, `running_out_of_windows_is_reported` and `graph_windows_bounds` pass; dev FP 0.88%. The original ΔFP = 0 rule fails (+4) | PASS (amended rule); original rule FAIL, recorded |
+| C3 chunking (fail-closed fix): probe tests block, dev FP within 1.0% | A/B +0 TP / +0 FP; the chunk, split and budget tests pass (`seam_attacks_after_a_cut_chunk_are_found`, `exceeding_the_inspection_budget_blocks_with_a_limit`, `a_piece_that_cannot_be_split_further_is_a_real_loss` and others); dev FP 0.88% | PASS |
+| Mutation robustness: retained ≥ 96% and mutant recall ≥ 83.0% | retained 96.14%, mutant recall 83.03% (the same as M0) | PASS (margins 0.14 and 0.03 points) |
+| Full-corpus latency p95 < 1,000 µs | library p95 216 µs (M0 209); serve 223 µs | PASS |
+| Held-out scored once, never tuned on | recall 0.4251, FP rate 0.0078 (M0 0.4159 / 0.0076) | Reported |
+
+Latency: dev p95 went from 212 to 237 µs and full p95 from 209 to 216 µs. The C3 section records a p95 spread of 196-344 µs across dev runs of near-identical builds, so no latency change is claimed.
+
+### Dev ablation (leave-one-out, library mode, baseline TP 148, FP 146)
+
+`venusflytrap ablate --manifest … --side dev` makes one run per registered id, in `constructs()` order, with only that id in `shield.disabled`. `d_tp`/`d_fp` = what the id contributes (the baseline minus the run without it); `net` = `d_tp` - `d_fp`. The drop rule applies only to new or changed constructs. In Plan A those are the decoders and limits marked below, and their gates are the change-alone A/B and fail-closed rows in the gate table above, not this leave-one-out. Every other row predates recall-lift and is report-only.
+
+| id | kind | tp | fp | d_tp | d_fp | net | Plan A status |
+|---|---|---|---|---|---|---|---|
+| sqli.union-select | Sink | 145 | 106 | 3 | 40 | -37 | existing, report-only |
+| sqli.boolean-tautology | Sink | 135 | 118 | 13 | 28 | -15 | existing, report-only |
+| sqli.quote-breakout | Sink | 137 | 139 | 11 | 7 | 4 | existing, report-only |
+| sqli.stacked-query | Sink | 145 | 137 | 3 | 9 | -6 | existing, report-only |
+| sqli.sql-keyword | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sqli.fn-sleep | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sqli.fn-benchmark | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sqli.fn-updatexml | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sqli.fn-extractvalue | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sqli.fn-load-file | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sqli.fn-pg-sleep | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| xss.script-tag | Sink | 137 | 138 | 11 | 8 | 3 | existing, report-only |
+| xss.event-handler | Sink | 142 | 142 | 6 | 4 | 2 | existing, report-only |
+| xss.dangerous-proto | Sink | 118 | 138 | 30 | 8 | 22 | existing, report-only |
+| xss.tag-with-handler | Sink | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| xss.html-tag | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| cmd.cmd-substitution | Sink | 145 | 146 | 3 | 0 | 3 | existing, report-only |
+| cmd.chained-command | Sink | 142 | 109 | 6 | 37 | -31 | existing, report-only |
+| cmd.shell-meta | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| path.directory-traversal | Sink | 144 | 145 | 4 | 1 | 3 | existing, report-only |
+| path.dotdot-segment | Latent | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sig.union-all-select | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sig.classic-or | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sig.schema-enum | Signature | 147 | 146 | 1 | 0 | 1 | existing, report-only |
+| sig.alert-script | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sig.onerror | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| sig.etc-passwd | Signature | 145 | 146 | 3 | 0 | 3 | existing, report-only |
+| sig.cat-subst | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| api.type-violation | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| recon.sensitive-path-probe | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| honeypot.decoy-hit | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| intel.scanner-ua | Signature | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| limit.header-non-utf8 | Limit | 148 | 146 | 0 | 0 | 0 | existing, report-only |
+| limit.graph-truncated | Limit | 148 | 146 | 0 | 0 | 0 | new (C2); fail-closed gate PASS |
+| limit.payload-truncated | Limit | 148 | 146 | 0 | 0 | 0 | new (C3); fail-closed gate PASS |
+| decode.percent-lossy | Decoder | 99 | 93 | 49 | 53 | -4 | fixed (H1); bypass-fix gate PASS |
+| decode.entity | Decoder | 133 | 146 | 15 | 0 | 15 | existing, id registered in L5; report-only |
+| decode.esc-hex | Decoder | 145 | 146 | 3 | 0 | 3 | existing, id registered in L5; report-only |
+| decode.b64-whole | Decoder | 141 | 146 | 7 | 0 | 7 | fixed (L5); ΔTP > ΔFP gate PASS |
+
+Notes on the ablation:
+
+- Disabling `decode.percent-lossy` turns off the whole URL percent-decoding step, not only the H1 change. With it off, dev loses 49 TPs and 53 FPs (net -4), so on dev, URL decoding as a whole enables slightly more false positives than true positives. H1's own change was +0 / +0. Leave-one-out of a pre-existing decoder is report-only, so nothing is dropped; turning URL decoding off would also reopen every percent-encoding evasion. This is recorded for the owner.
+- `limit.graph-truncated` and `limit.payload-truncated` fire on no dev request (0 / 0). C2's 4 FPs come from text that windowing newly inspects and the existing SQL constructs then match: against the M1 leave-one-out, `sqli.boolean-tautology` d_fp went from 25 to 28 and `sqli.stacked-query` from 8 to 9.
+- The other change against the M1 leave-one-out is `xss.script-tag` d_tp 10 → 11, which is L5's new dev TP (it fires `xss.script-tag` after the whole-field base64 decode). The baseline moved from 147/142 to 148/146.
