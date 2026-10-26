@@ -190,10 +190,13 @@ compared directly.
 - **767 `upstream_5xx`**, all 502 with in-process Allow in the 20 listed examples. As argued above, a
   502 means the proxy had already decided to forward. Two of the listed ones are the large bodies
   (`09/8a/...` 573 KB, `11/27/...` 858 KB) that reproduced a 502 in isolation in the earlier
-  investigation (the stub upstream reads once and closes without draining the body). The rest are
-  listed from `81/*` onwards, as in the earlier run, where loopback port exhaustion is the likely cause:
-  33,244 sockets were in `TIME_WAIT` right after the run, against a 16,384-port Windows dynamic range.
-  That cause is inferred, not confirmed by capturing the upstream connect error.
+  investigation (the stub upstream reads once and closes without draining the body). Nine more listed
+  ones come before the port-exhaustion window and are **unexplained**: `29/1a` (69 KB), `2c/5b`
+  (599 B), `3a/e9` (219 KB), `3d/85` (708 B), `6c/cf` (896 B), `73/08` (733 B), `78/1f` (539 B),
+  `79/a1` (1.5 KB) and `7e/14` (1.1 KB); most are small, so neither cause above covers them. The last
+  nine listed are from `81/*` onwards, where loopback port exhaustion is the likely cause: 33,244 sockets
+  were in `TIME_WAIT` right after the run, against a 16,384-port Windows dynamic range. That cause is
+  inferred, not confirmed by capturing the upstream connect error, and the unlisted 747 were not examined.
 - **9 `io`**, all `connect timeout` from the replay client to the proxy, in-process Allow, listed from
   `82/*` to `87/*`: the same port-exhaustion window on the client side. No proxy decision was observed
   for these 9.
