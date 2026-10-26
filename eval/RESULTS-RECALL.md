@@ -178,9 +178,11 @@ Change vs M0:
 
 | Run | ΔTP | ΔFP | ΔFN | Recall | Precision | F1 | FP rate |
 |---|---|---|---|---|---|---|---|
-| library, full | +4 | +7 | -4 | 0.4314 → 0.4375 (+0.0061) | 0.5127 → 0.5098 (-0.0029) | 0.4685 → 0.4709 (+0.0024) | 0.0081 → 0.0083 (+0.0002) |
-| library, dev | +1 | +4 | -1 | 0.4468 → 0.4498 (+0.0030) | 0.5087 → 0.5034 (-0.0053) | 0.4757 → 0.4751 (-0.0006) | 0.0085 → 0.0088 (+0.0003) |
+| library, full | +4 | +7 | -4 | 0.4314 → 0.4375 (+0.0061) | 0.5127 → 0.5098 (-0.0029) | 0.4685 → 0.4709 (+0.0023) | 0.0081 → 0.0083 (+0.0002) |
+| library, dev | +1 | +4 | -1 | 0.4468 → 0.4498 (+0.0030) | 0.5087 → 0.5034 (-0.0052) | 0.4757 → 0.4751 (-0.0006) | 0.0085 → 0.0088 (+0.0002) |
 | library, held-out | +3 | +3 | -3 | 0.4159 → 0.4251 (+0.0092) | 0.5171 → 0.5167 (-0.0004) | 0.4610 → 0.4664 (+0.0054) | 0.0076 → 0.0078 (+0.0002) |
+
+Deltas are computed from the unrounded values in the run JSON and then rounded, so a delta can differ by 0.0001 from the difference of the two rounded values shown.
 
 Denominators: scored malicious (TP+FN) full 656, dev 329, held-out 327; benign (TN+FP) full 33,219, dev 16,610, held-out 16,609. `venusflytrap eval` still cannot read 2 held-out `.black` files on this host (access denied; `read_failures` is 2 in the full, serve and held-out JSON and 0 in dev), so held-out recall is over 327 attacks, not 329. Dev FP rate 146 / 16,610 = 0.88%; held-out 130 / 16,609 = 0.78%. Parse failures and invariant violations are 0 in all four runs. Dev plus held-out equals full (148 + 139 = 287 TP, 146 + 130 = 276 FP).
 
@@ -194,7 +196,7 @@ Decision diffs vs M0 (library mode, counts only):
 | held-out | 3 | 2 | 1 | 5 | 1 | 16 | 28 |
 | full | 4 | 6 | 1 | 12 | 2 | 27 | 52 |
 
-The dev diffs match the per-change A/B sections above: L5's 1 new TP, C2's 4 new FPs, C3's 7 Allow→Monitor and H1's 1 Monitor→Allow. Held-out gained 3 TPs where dev gained 1. Which change produced them is unknown, because held-out rows are not opened. No verdict moved away from Block in either half.
+The dev diffs match the per-change A/B sections above: L5's 1 new TP, C2's 4 new FPs, C3's 7 Allow→Monitor and H1's 1 Monitor→Allow. Two of C2's 13 score-shift rows (`09/8a/171355d4b76706b9e4be0a80519a.white`, `11/27/9e27efe2a7cf63decdd16ed80f7c.white`) are also among C3's 7 Allow→Monitor rows, so the per-change diffs (1 + 17 + 7 + 1 = 26) net to 24 distinct rows. Held-out gained 3 TPs where dev gained 1. Which change produced them is unknown, because held-out rows are not opened. No verdict moved away from Block in either half.
 
 Robustness (bench_http on M0's `seeds.jsonl` / `mutants.jsonl`, mutate.py seed 1337): seeds recall 0.8636 (19/22), mutants recall 0.8303 (548/660), retained 96.1% (0.8303 / 0.8636 = 0.9614). These are identical to M0, with 0 decision diffs and 0 score diffs over the 22 + 660 requests. p50/p95/p99 µs: seeds 9/15/111, mutants 8/13/16.
 
@@ -305,5 +307,7 @@ Worst-case timings after the fix (release, default config, best of 3 after a war
 | 4 MiB token-dense body with U+FDFA every 200 chars | 441-458 ms | 445-481 ms | Block (work cap) |
 
 The fix does not change the cost beyond run-to-run spread (about ±10%); the mixed case is a little faster because a chunk is decoded once instead of at every split node. The worst case stays at about 0.55-0.65 s of CPU per request at the 4 MiB budget, reached by benign NFKC-expanding text. As stated in C3, the proxy runs inspection synchronously on tokio workers, so SP1's `spawn_blocking` with a time budget must land before an enforcing proxy ships with this engine.
+
+Documentation and minor fixes from the same review: "lossless" is qualified as covering text, not constructs (C3 above, spec §7.3, `CHUNK_OVERLAP` and the shield comments); the M2a change-vs-M0 deltas are recomputed from unrounded values; the M2a reconciliation sentence accounts for the 2 rows shared by C2 and C3; the sink registry no longer claims an alias mechanism; the `decode_once` stage order is corrected; `chain.ban` is documented as a deliberate non-registry construct; the unused `percent-encoding` dependency is removed; `chunk_ranges(s, 0)` no longer panics; and `max_inspect_bytes` / `max_normalize_work` document that they must scale with the proxy's `limits.max_body`. After both commits: `cargo test --workspace` 182 passed, 0 failed, 2 ignored; `cargo clippy --all-targets -- -D warnings` clean.
 
 Recorded for later, not fixed here: whole-field base64 longer than 64 KiB can still be lost at a chunk seam when a multi-byte char straddles the chunk edge (I-1, Plan B); seam stitching in normalized-token space (I-2, Plan B); `canonicalize_ws_comments` applies SQL comment rules to every field, so `x--><script>alert(1)</script>` is allowed (I-4, P0, first item of Plan B); `spawn_blocking` and an inspection time budget in the proxy (I-3, SP1).

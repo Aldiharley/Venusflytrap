@@ -4,7 +4,7 @@
 //! has one stable dotted id here (`sqli.union-select`). Sinks emit through
 //! [`Hits`], which takes the registry entry itself, so an unregistered id cannot
 //! be emitted and a disabled construct is dropped at the source. Ids are never
-//! reused; a rename keeps the old id as an alias entry.
+//! reused; renaming one would need an alias mechanism, which does not exist yet.
 
 pub mod path;
 pub mod shell;

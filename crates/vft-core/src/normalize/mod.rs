@@ -172,7 +172,9 @@ pub fn chunks(s: &str, max: usize) -> Vec<&str> {
 
 /// The byte ranges of [`chunks`]: ascending, on char boundaries, and each one
 /// ends after the previous one, so `end - previous_end` is the bytes it adds.
+/// A `max` of 0 is treated as 1.
 pub fn chunk_ranges(s: &str, max: usize) -> Vec<std::ops::Range<usize>> {
+    let max = max.max(1);
     let idx: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
     let n = idx.len();
     if n <= max {
@@ -235,7 +237,8 @@ pub fn percent_decode_lossy(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// One decode pass: URL -> HTML entity -> \xNN/\uNNNN -> whole-string base64.
+/// One decode pass: whole-string base64 first (if it decodes, the pass ends
+/// there), else URL -> HTML entity -> \xNN/\uNNNN -> whole-string base64 again.
 /// Each stage only applies if it changes the string.
 fn decode_once(s: &str, disabled: &Disabled) -> String {
     // Whole-field base64 first: '+' is a base64 character, and the URL step
@@ -546,6 +549,15 @@ mod tests {
             assert!(w[1].starts_with(&tail), "chunks must overlap by CHUNK_OVERLAP chars");
         }
         assert_eq!(chunks("short", 1024), vec!["short"]);
+    }
+
+    #[test]
+    fn a_zero_chunk_size_does_not_panic() {
+        // Reachable only through an unvalidated `max_payload = 0` (`Shield::new`).
+        let cs = chunks("ab\u{20ac}", 0);
+        assert_eq!(cs.concat(), "ab\u{20ac}");
+        assert!(cs.iter().all(|c| c.chars().count() == 1));
+        assert_eq!(chunks("", 0), vec![""]);
     }
 
     #[test]

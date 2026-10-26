@@ -11,7 +11,6 @@ description = "Venusflytrap core engine: normalize -> token-graph taint -> four-
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-percent-encoding.workspace = true
 unicode-normalization.workspace = true
 base64.workspace = true
 regex.workspace = true

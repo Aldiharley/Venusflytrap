@@ -306,6 +306,11 @@ impl Shield {
     }
 
     /// The judgment for a request from an actively banned source (no inspection).
+    ///
+    /// Its one contribution names the construct `chain.ban`, which is deliberately
+    /// NOT in the construct registry (`sinks::constructs()`): it records a chain
+    /// decision, not a detection, so no sink emits it and it cannot be disabled.
+    /// Consumers of `constructs()` should expect this extra id in judgments.
     pub fn banned_judgment(&self, ban: &BanRecord) -> Judgment {
         Judgment {
             verdict: Verdict::Block,

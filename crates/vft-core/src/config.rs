@@ -81,11 +81,21 @@ pub struct ShieldConfig {
     /// inflation, plus headers.
     /// Past it the rest is skipped and the request is reported as
     /// `limit.payload-truncated`. Must be >= `max_payload`.
+    ///
+    /// Scale it together with `max_normalize_work` and the proxy's
+    /// `limits.max_body`: lossy UTF-8 can triple a binary body (each invalid byte
+    /// becomes a 3-byte U+FFFD), so raising `max_body` alone makes large binary
+    /// uploads hard-block on this budget.
     pub max_inspect_bytes: usize,
     /// Folded chars all normalizations of one request may produce (field chunks,
     /// split pieces and the path). Default 8 Mi chars, 2 x `max_inspect_bytes`.
     /// A normalization that could pass it is not run: inspection stops and the
     /// request is reported as `limit.payload-truncated`. Must be >= `max_payload`.
+    ///
+    /// Scale it together with `max_inspect_bytes` and the proxy's
+    /// `limits.max_body`: benign multi-MB text that NFKC expands (ligatures,
+    /// squared CJK units, U+FDFA) can reach this cap and hard-block. Inspection
+    /// time grows roughly linearly with it.
     pub max_normalize_work: usize,
     /// Construct or decoder ids switched off (see `venusflytrap ablate`).
     /// Every id must be registered; unknown ids fail validation.
