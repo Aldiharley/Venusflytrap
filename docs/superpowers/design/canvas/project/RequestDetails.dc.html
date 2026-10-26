@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Request details</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#76A6FF}a:hover{color:#93B9FF}
+</style>
+</helmet>
+<div style="width: 100%; min-height: 900px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.base}}; color: {{t.text}}; font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums">
+
+  <header style="height: 56px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; gap: 16px; padding: 0 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border-bottom: 0.5px solid {{t.hairline}}">
+    <div style="display: flex; align-items: center; gap: 10px; min-width: 196px">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{{t.accent}}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 4.4 3.4 8 8 9 4.6-1 8-4.6 8-9V6l-8-3z"></path><path d="M8.5 11.5 12 8l3.5 3.5"></path><path d="M8.5 15 12 11.5 15.5 15"></path></svg>
+      <div style="display: flex; flex-direction: column; line-height: 16px">
+        <span style="font-weight: 700; font-size: 15px">Venusflytrap</span>
+        <span style="font-size: 11px; color: {{t.text2}}">Request details</span>
+      </div>
+    </div>
+    <nav aria-label="Breadcrumb" style="font-size: 13px; color: {{t.text2}}"><a href="Monitor.dc.html">Monitor</a> › <span>01J3K9QF2V7M</span></nav>
+  </header>
+
+  <main style="flex: 1; box-sizing: border-box; padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 1440px">
+    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+      <h1 style="margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; font-family: 'JetBrains Mono', Consolas, monospace">GET /api/items?id=1 union select password from users</h1>
+      <span style="display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 4px; background: {{t.blockBg}}; color: {{t.blockFg}}; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 2h8l6 6v8l-6 6H8l-6-6V8zM9 9l6 6M15 9l-6 6"></path></svg>Block
+      </span>
+    </div>
+    <dl style="margin: 0; display: flex; gap: 24px; flex-wrap: wrap; font-size: 13px">
+      <sc-for list="{{meta}}" as="m" hint-placeholder-count="6">
+        <div><dt style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">{{m.k}}</dt><dd style="margin: 0; font-weight: 500">{{m.v}}</dd></div>
+      </sc-for>
+    </dl>
+
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px">
+      <section style="grid-column: span 1; border-radius: 12px; padding: 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border: 0.5px solid {{t.hairline}}; display: flex; flex-direction: column; gap: 12px">
+        <h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Score against rev 43 bands</h2>
+        <svg width="100%" height="150" viewBox="0 0 160 96" role="img" aria-label="Score 100 of 100. Bands: monitor from 40, challenge from 70, block from 90. The score is in the block band.">
+          <path d="M14 84 A66 66 0 0 1 146 84" fill="none" stroke="{{t.sunken}}" stroke-width="10" stroke-linecap="round"></path>
+          <path d="M35.6 33.7 A66 66 0 0 1 80 18" fill="none" stroke="{{t.monitorLine}}" stroke-width="4"></path>
+          <path d="M80 18 A66 66 0 0 1 133.4 45.2" fill="none" stroke="{{t.challengeLine}}" stroke-width="4"></path>
+          <path d="M133.4 45.2 A66 66 0 0 1 146 84" fill="none" stroke="{{t.blockLine}}" stroke-width="4"></path>
+          <path d="M14 84 A66 66 0 0 1 146 84" fill="none" stroke="{{t.blockLine}}" stroke-width="6" stroke-linecap="round" opacity=".9"></path>
+          <line x1="80" y1="84" x2="140" y2="84" stroke="{{t.text}}" stroke-width="2"></line>
+          <circle cx="80" cy="84" r="5" fill="{{t.text}}"></circle>
+          <text x="32" y="30" font-size="7" fill="{{t.text2}}">40</text>
+          <text x="76" y="12" font-size="7" fill="{{t.text2}}">70</text>
+          <text x="137" y="40" font-size="7" fill="{{t.text2}}">90</text>
+        </svg>
+        <div style="text-align: center; margin-top: -48px; font-size: 40px; line-height: 44px; font-weight: 600">100</div>
+        <p style="margin: 0; font-size: 14px; line-height: 20px">Blocked because <b style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px">sqli.union-select</b> in <b style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px">query:id</b> scored 100, at or above the block threshold.</p>
+        <div style="display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 8px; background: {{t.attentionSoft}}; color: {{t.text}}">
+          <span style="font-size: 13px">Decided by <b style="font-family: 'JetBrains Mono', Consolas, monospace">scoring.block_at = 90</b> <span style="color: {{t.text2}}">(override, rev 43)</span></span>
+          <a href="#" style="margin-left: auto; font-size: 13px; font-weight: 600; color: {{t.attention}}">Jump to setting</a>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap">
+          <button type="button" style="height: 36px; padding: 0 14px; border-radius: 18px; border: 0; background: {{t.danger}}; color: {{t.onDanger}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Ban source…</button>
+          <button type="button" style="height: 36px; padding: 0 14px; border-radius: 18px; border: 1px solid {{t.borderStrong}}; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Disable construct…</button>
+          <a href="AttackChains.dc.html" style="height: 36px; display: inline-flex; align-items: center; padding: 0 14px; border-radius: 18px; color: {{t.accent}}; text-decoration: none; font-weight: 500">Open source</a>
+        </div>
+        <span style="font-size: 12px; color: {{t.text2}}">Disable construct requires Admin.</span>
+      </section>
+
+      <section style="grid-column: span 2; border-radius: 12px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border: 0.5px solid {{t.hairline}}; overflow-x: auto">
+        <h2 style="margin: 0; padding: 16px 16px 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Contributions</h2>
+        <table style="width: 100%; min-width: 640px; border-collapse: collapse; font-size: 13px">
+          <thead>
+            <tr style="height: 36px; text-align: left; border-bottom: 1px solid {{t.borderSubtle}}">
+              <th scope="col" style="padding: 0 16px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Engine</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Field</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Construct</th>
+              <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Evidence</th>
+              <th scope="col" style="padding: 0 12px; text-align: right; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Weight</th>
+              <th scope="col" style="padding: 0 16px; text-align: right; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Points</th>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{contribs}}" as="c" hint-placeholder-count="5">
+              <tr style="height: 44px; border-bottom: 1px solid {{t.borderSubtle}}; background: {{c.rowBg}}">
+                <td style="padding: 0 16px; font-weight: 500">{{c.engine}}</td>
+                <td style="padding: 0 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px">{{c.field}}</td>
+                <td style="padding: 0 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px">{{c.construct}}</td>
+                <td style="padding: 0 12px">
+                  <span style="display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 4px; background: {{c.ebg}}; color: {{c.efg}}; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3 4 6v6c0 4.4 3.4 8 8 9 4.6-1 8-4.6 8-9V6l-8-3z"></path><path d="{{c.emark}}"></path></svg>{{c.evidence}}
+                  </span>
+                </td>
+                <td style="padding: 0 12px; text-align: right">{{c.weight}}</td>
+                <td style="padding: 0 16px; text-align: right; font-weight: 600">{{c.points}}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+        <p style="margin: 0; padding: 10px 16px 16px; font-size: 12px; color: {{t.text2}}">Top contribution 95.0 + corroboration 10.0 (cap 15) = 105.0 → score capped at 100. Suspicious signals can corroborate a score but never stage a source.</p>
+      </section>
+
+      <section style="grid-column: span 2; border-radius: 12px; padding: 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border: 0.5px solid {{t.hairline}}">
+        <h2 style="margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Source 203.0.113.9 · kill chain (last 1 h)</h2>
+        <svg width="100%" height="120" viewBox="0 0 800 120" role="img" aria-label="Timeline: recon at 10:31:02, four events; exploitation from 10:35:12, eleven blocked requests; banned at 10:35:44 for one hour.">
+          <line x1="20" y1="90" x2="780" y2="90" stroke="{{t.borderStrong}}" stroke-width="1"></line>
+          <text x="20" y="112" font-size="11" fill="{{t.text2}}">10:30</text><text x="270" y="112" font-size="11" fill="{{t.text2}}">10:32</text><text x="520" y="112" font-size="11" fill="{{t.text2}}">10:34</text><text x="740" y="112" font-size="11" fill="{{t.text2}}">10:36</text>
+          <circle cx="150" cy="70" r="7" fill="{{t.reconFg}}"></circle><circle cx="175" cy="70" r="7" fill="{{t.reconFg}}"></circle><circle cx="205" cy="70" r="7" fill="{{t.reconFg}}"></circle><circle cx="230" cy="70" r="7" fill="{{t.reconFg}}"></circle>
+          <text x="140" y="48" font-size="12" fill="{{t.reconFg}}" font-weight="600">1 Recon ×4</text>
+          <rect x="655" y="24" width="12" height="12" transform="rotate(45 661 30)" fill="{{t.exploitFg}}"></rect><rect x="680" y="24" width="12" height="12" transform="rotate(45 686 30)" fill="{{t.exploitFg}}"></rect><rect x="705" y="24" width="12" height="12" transform="rotate(45 711 30)" fill="{{t.exploitFg}}"></rect>
+          <text x="590" y="14" font-size="12" fill="{{t.exploitFg}}" font-weight="600">3 Exploitation ×11</text>
+          <line x1="740" y1="10" x2="740" y2="90" stroke="{{t.blockLine}}" stroke-width="2" stroke-dasharray="4 3"></line>
+          <text x="748" y="62" font-size="12" fill="{{t.blockFg}}" font-weight="600">Ban</text>
+        </svg>
+      </section>
+
+      <section style="grid-column: span 1; border-radius: 12px; padding: 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border: 0.5px solid {{t.hairline}}; display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Normalization · query:id</h2>
+        <div style="font-size: 12px; color: {{t.text2}}">Raw (as received)</div>
+        <code style="display: block; padding: 8px; border-radius: 8px; background: {{t.input}}; box-shadow: {{t.insetShadow}}; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; overflow-wrap: anywhere">1%20union%20select%20password%20from%20users</code>
+        <div style="font-size: 12px; color: {{t.text2}}">Decoded · 1 layer (URL)</div>
+        <code style="display: block; padding: 8px; border-radius: 8px; background: {{t.input}}; box-shadow: {{t.insetShadow}}; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; overflow-wrap: anywhere">1 <mark style="background: {{t.exploitBg}}; color: {{t.exploitFg}}">union select</mark> password from users</code>
+      </section>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"dark"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  tokens(dark) {
+    if (dark) return {
+      base: '#17191D', sunken: '#101215', raised: '#252B36', raisedGlass: 'rgb(37 43 54 / .88)', input: '#101215', text: '#ECEEF2', text2: '#B9BFCA',
+      hairline: 'rgb(255 255 255 / .08)', borderSubtle: 'rgb(255 255 255 / .14)', borderStrong: '#77808F', accent: '#76A6FF', attention: '#E6BD68', attentionSoft: '#3A2F14',
+      danger: '#FF8A80', onDanger: '#2A0705', rowTop: '#342D1D',
+      shadow1: '0 1px 2px rgb(0 0 0/.40), 0 2px 8px rgb(0 0 0/.28), inset 0 1px 0 rgb(255 255 255/.06), inset 0 -1px 0 rgb(0 0 0/.30)',
+      shadow2: '0 2px 4px rgb(0 0 0/.40), 0 10px 24px rgb(0 0 0/.40), inset 0 1px 0 rgb(255 255 255/.08), inset 0 -1px 0 rgb(0 0 0/.35)',
+      insetShadow: 'inset 0 2px 5px rgb(0 0 0/.55), inset 0 -1px 0 rgb(255 255 255/.05)',
+      blockFg: '#FF928A', blockBg: '#4A1F1C', blockLine: '#FF6F65', challengeLine: '#E0AE4C', monitorLine: '#9B93FF',
+      reconFg: '#6CCFD8', exploitFg: '#FFAA6B', exploitBg: '#44280E', noneFg: '#B9BFCA', noneBg: '#2B303A', suspFg: '#F2C46B', suspBg: '#3B2E10'
+    };
+    return {
+      base: '#D6D1CB', sunken: '#CAC4BD', raised: '#EEEBE7', raisedGlass: 'rgb(238 235 231 / .80)', input: '#F7F5F2', text: '#1E1B18', text2: '#48423C',
+      hairline: 'rgb(30 27 24 / .12)', borderSubtle: 'rgb(30 27 24 / .20)', borderStrong: '#7A7269', accent: '#2353B3', attention: '#7A4F00', attentionSoft: '#F4E2C0',
+      danger: '#B3261E', onDanger: '#FFFFFF', rowTop: '#F3E6CC',
+      shadow1: '0 1px 2px rgb(60 48 36/.10), 0 2px 6px rgb(60 48 36/.08), inset 0 1px 0 rgb(255 255 255/.70), inset 0 -1px 0 rgb(60 48 36/.06)',
+      shadow2: '0 2px 4px rgb(60 48 36/.10), 0 8px 20px rgb(60 48 36/.14), inset 0 1px 0 rgb(255 255 255/.75), inset 0 -1px 0 rgb(60 48 36/.08)',
+      insetShadow: 'inset 0 2px 4px rgb(60 48 36/.16), inset 0 -1px 0 rgb(255 255 255/.60)',
+      blockFg: '#A3221A', blockBg: '#F6D5D1', blockLine: '#C0322A', challengeLine: '#9A5C00', monitorLine: '#5A4FC0',
+      reconFg: '#0F5F6B', exploitFg: '#9A440A', exploitBg: '#F7DBC5', noneFg: '#55504A', noneBg: '#E1DDD8', suspFg: '#8A4F00', suspBg: '#F5E2BF'
+    };
+  }
+  renderVals() {
+    const dark = (this.props.theme ?? 'dark') === 'dark';
+    const t = this.tokens(dark);
+    const meta = [
+      { k: 'Time', v: '10:35:12.877' }, { k: 'Source', v: '203.0.113.9 (stage 3, banned)' }, { k: 'Host', v: 'shop.example' },
+      { k: 'Config', v: 'rev 43' }, { k: 'Inspection', v: '211 µs' }, { k: 'Upstream', v: 'not forwarded (403)' }
+    ];
+    const ev = (kind) => kind === 'Dangerous'
+      ? { evidence: 'Dangerous', efg: t.blockFg, ebg: t.blockBg, emark: 'M9.5 9.5l5 5M14.5 9.5l-5 5' }
+      : kind === 'Suspicious'
+        ? { evidence: 'Suspicious', efg: t.suspFg, ebg: t.suspBg, emark: 'M10 9.5a2 2 0 1 1 2.5 2c-.5.2-.5.7-.5 1.2M12 15.5h.01' }
+        : { evidence: 'None', efg: t.noneFg, ebg: t.noneBg, emark: '' };
+    const contribs = [
+      { engine: 'graph-taint', field: 'query:id', construct: 'sqli.union-select', weight: '0.95', points: '95.0', rowBg: t.rowTop, ...ev('Dangerous') },
+      { engine: 'api-safety', field: 'query:id', construct: 'sqli.type-violation', weight: '0.70', points: '4.2', rowBg: 'transparent', ...ev('Dangerous') },
+      { engine: 'ai (heuristic)', field: 'query:id', construct: '—', weight: '0.60', points: '3.0', rowBg: 'transparent', ...ev('Dangerous') },
+      { engine: 'graph-taint', field: 'header:user-agent', construct: 'cmd.shell-meta', weight: '0.50', points: '2.8', rowBg: 'transparent', ...ev('Suspicious') },
+      { engine: 'intel', field: 'header:user-agent', construct: '—', weight: '—', points: '0.0', rowBg: 'transparent', ...ev('None') }
+    ];
+    return { t, meta, contribs };
+  }
+}
+</script>
+</body>
+</html>
