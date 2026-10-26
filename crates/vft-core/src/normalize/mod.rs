@@ -56,15 +56,60 @@ impl Default for Options {
     }
 }
 
-/// Normalize a single field value.
+/// Normalize a single field value: [`decode`] it, then [`fold`] the whole
+/// decoded text.
 pub fn normalize(input: &str, opts: &Options) -> Normalized {
-    finish(fold_stage(input, opts))
+    let d = decode(input, opts);
+    fold(&d, &d.text, opts)
 }
 
-/// [`normalize`] for a piece that is split when cut: a cut stops after folding and
+/// A piece after the decode stage, before Unicode folding: bounded to
+/// `max_payload` chars and decoded to a fixpoint. Decoding never adds chars, so
+/// `text` has at most `max_payload` chars. When the fold of `text` is cut, the
+/// shield splits `text` (not the raw piece, whose encoding a split can break) and
+/// folds each part with [`fold`] / [`fold_unless_cut`].
+#[derive(Debug, Clone)]
+pub struct Decoded {
+    /// The decoded text.
+    pub text: String,
+    /// Flags of the whole piece (mixed script, deep nesting).
+    flags: Flags,
+    /// Number of decode layers peeled.
+    pub layers: u8,
+    /// The raw piece was longer than `max_payload` chars.
+    pub truncated: bool,
+}
+
+/// The decode stage of [`normalize`]: bound, flag mixed script, decode to a fixpoint.
+pub fn decode(input: &str, opts: &Options) -> Decoded {
+    // Bound the work first.
+    let input_chars = input.chars().count();
+    let truncated = input_chars > opts.max_payload;
+    let bounded: String = input.chars().take(opts.max_payload).collect();
+
+    let mut flags = Flags::default();
+    if count_scripts(&bounded) >= 2 {
+        flags.mixed_script = true;
+    }
+
+    let (text, layers) = decode_fixpoint_with(&bounded, opts.decode_cap, &opts.disabled);
+    if layers >= opts.deep_threshold {
+        flags.deep_nesting = true;
+    }
+    Decoded { text, flags, layers, truncated }
+}
+
+/// Fold and canonicalize `text`, which is `d.text` or a part of it, carrying
+/// `d`'s flags and layers. The result is cut (`truncated`) when the fold passes
+/// `max_payload` chars or the raw piece was bounded.
+pub fn fold(d: &Decoded, text: &str, opts: &Options) -> Normalized {
+    finish(fold_stage(d, text, opts))
+}
+
+/// [`fold`] for a part that is split when cut: a cut stops after folding and
 /// returns `Err(work)`, skipping canonicalization of text nobody reads.
-pub fn normalize_unless_cut(input: &str, opts: &Options) -> Result<Normalized, usize> {
-    let f = fold_stage(input, opts);
+pub fn fold_unless_cut(d: &Decoded, text: &str, opts: &Options) -> Result<Normalized, usize> {
+    let f = fold_stage(d, text, opts);
     if f.truncated {
         Err(f.work)
     } else {
@@ -81,29 +126,13 @@ struct Folded {
     work: usize,
 }
 
-fn fold_stage(input: &str, opts: &Options) -> Folded {
-    // Bound the work first.
-    let input_chars = input.chars().count();
-    let mut truncated = input_chars > opts.max_payload;
-    let bounded: String = input.chars().take(opts.max_payload).collect();
-
-    let mut flags = Flags::default();
-    if count_scripts(&bounded) >= 2 {
-        flags.mixed_script = true;
-    }
-
-    let (decoded, layers) = decode_fixpoint_with(&bounded, opts.decode_cap, &opts.disabled);
-    if layers >= opts.deep_threshold {
-        flags.deep_nesting = true;
-    }
-
+fn fold_stage(d: &Decoded, text: &str, opts: &Options) -> Folded {
     // Cap post-fold length: NFKC can expand some code points many-fold, so bound
     // the string again before tokenization (L3). Folding stops at the cap, so a
     // cut costs O(max_payload), not O(18 x input).
-    let (folded, cut) = fold_unicode_capped(&decoded, opts.max_payload);
-    truncated |= cut;
+    let (folded, cut) = fold_unicode_capped(text, opts.max_payload);
     let work = folded.chars().count();
-    Folded { folded, flags, layers, truncated, work }
+    Folded { folded, flags: d.flags.clone(), layers: d.layers, truncated: d.truncated || cut, work }
 }
 
 fn finish(f: Folded) -> Normalized {
@@ -127,7 +156,12 @@ pub fn work_bound(input_chars: usize, max_payload: usize) -> usize {
     input_chars.min(max_payload).saturating_mul(MAX_FOLD_EXPANSION).min(max_payload)
 }
 
-/// Characters shared by neighbouring chunks, so a payload cannot hide on a seam.
+/// Characters shared by neighbouring chunks (and by the halves of a split piece),
+/// so any span of up to this many chars lies whole in one chunk. This makes
+/// chunking lossless for text, not for constructs: a construct whose span is
+/// longer (e.g. `union` + 400 spaces + `select`, `%20` x 150 or `/*x400*/` filler,
+/// `<svg` + 400 spaces + `onload=`) can still straddle a seam and be missed.
+/// Stitching seams in normalized-token space is a Plan B item.
 pub const CHUNK_OVERLAP: usize = 256;
 
 /// Split `s` into chunks of at most `max` chars that overlap by
@@ -648,9 +682,23 @@ mod tests {
         assert_eq!(cut.work, 1024);
         assert_eq!(normalize("abc", &opts).work, 3);
         let uncut = format!("{fdfa}{}", "a".repeat(16));
-        let n = normalize_unless_cut(&uncut, &opts).map(|n| n.text);
+        let d = decode(&uncut, &opts);
+        let n = fold_unless_cut(&d, &d.text, &opts).map(|n| n.text);
         assert_eq!(n, Ok(normalize(&uncut, &opts).text));
-        assert_eq!(normalize_unless_cut(&format!("{fdfa}{}", "a".repeat(17)), &opts).map(|n| n.work), Err(1024));
+        let d = decode(&format!("{fdfa}{}", "a".repeat(17)), &opts);
+        assert_eq!(fold_unless_cut(&d, &d.text, &opts).map(|n| n.work), Err(1024));
+    }
+
+    #[test]
+    fn a_decoded_part_folds_with_the_pieces_flags() {
+        // Halves of a decoded piece keep its layers and flags; only the fold differs.
+        let d = decode("%3Csvg%20onload%3Dalert(1)%3E\u{0430}", &Options::default());
+        assert_eq!(d.layers, 1);
+        let part = fold(&d, &d.text[..4], &Options::default());
+        assert_eq!(part.text, "<svg");
+        assert_eq!(part.layers, 1);
+        assert!(part.flags.mixed_script);
+        assert!(!part.truncated);
     }
 
     #[test]

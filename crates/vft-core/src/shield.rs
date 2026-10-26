@@ -12,7 +12,7 @@ use crate::honeypot::Honeypot;
 use crate::intel::Intel;
 use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
 use crate::lattice::{Evidence, FourValued};
-use crate::normalize::{normalize, normalize_unless_cut, Normalized, Options};
+use crate::normalize::{decode, fold, fold_unless_cut, Decoded, Normalized, Options};
 use crate::request::Request;
 use crate::score::{arbitrate, Scored};
 
@@ -95,10 +95,12 @@ impl Shield {
         let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: self.cfg.shield.max_graph_windows };
 
         // Long fields are inspected in overlapping chunks under a per-request
-        // byte budget. A chunk whose normalization is cut is re-inspected as
-        // overlapping halves (see `inspect_pieces`), so nothing is lost unless the
-        // budget runs out, splitting bottoms out, or the request's normalization
-        // work cap is reached; each hard-blocks via `limit.payload-truncated`.
+        // byte budget. A chunk is decoded whole; if its fold is cut, the decoded
+        // text is re-inspected as overlapping halves (see `inspect_pieces`), so no
+        // text is lost unless the budget runs out, splitting bottoms out, or the
+        // request's normalization work cap is reached; each hard-blocks via
+        // `limit.payload-truncated`. (Lossless covers text, not constructs: one
+        // whose span exceeds the 256-char overlap can still straddle a seam.)
         let mut budget = self.cfg.shield.max_inspect_bytes;
         let mut work = NormalizeWork { used: 0, cap: self.cfg.shield.max_normalize_work, exhausted: false };
         let mut payload_truncated = false;
@@ -116,7 +118,7 @@ impl Shield {
                 budget -= added;
                 prev_end = range.end;
                 let chunk = &field.raw[range];
-                let (lost, layers) = inspect_pieces(chunk, 0, &self.norm_opts, &mut work, &mut |n| {
+                let (lost, layers) = inspect_pieces(chunk, &self.norm_opts, &mut work, &mut |n| {
                     self.inspect_text(&mut rec, &field, n, &gopts, &field_detectors, &ai)
                 });
                 payload_truncated |= lost;
@@ -140,9 +142,11 @@ impl Shield {
             );
         }
 
-        // Also inspect the path itself for traversal/recon structure.
-        {
-            let (lost, layers) = inspect_pieces(&req.path, 0, &self.norm_opts, &mut work, &mut |n| {
+        // Also inspect the path itself for traversal/recon structure, through the
+        // same routine (a path longer than max_payload is chunked like a field, but
+        // not charged to the byte budget).
+        for range in crate::normalize::chunk_ranges(&req.path, self.cfg.shield.max_payload) {
+            let (lost, layers) = inspect_pieces(&req.path[range], &self.norm_opts, &mut work, &mut |n| {
                 let analysis = graph::analyze_with(&n.text, &gopts);
                 if analysis.graph_truncated {
                     self.record_graph_truncated(&mut rec, FieldRef::path());
@@ -164,6 +168,9 @@ impl Shield {
             });
             payload_truncated |= lost;
             max_layers = max_layers.max(layers);
+            if work.exhausted {
+                break;
+            }
         }
 
         // Real loss (budget exhausted, or splitting bottomed out on a cut piece)
@@ -427,12 +434,12 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, honeypot_or_d
 }
 
 /// Splitting stops after this many halvings. NFKC expands a char at most 18x, so a
-/// piece of `max_payload / 18` raw chars cannot be cut; from a 64 KiB chunk that
+/// part of `max_payload / 18` decoded chars cannot be cut; from a 64 KiB chunk that
 /// is reached in 5 halvings (with the 256-char overlap).
 const MAX_SPLIT_DEPTH: u8 = 6;
 
-/// The request's normalization work: folded chars produced by every `normalize`
-/// call (field chunks, split pieces, path), against `shield.max_normalize_work`.
+/// The request's normalization work: folded chars produced by every fold (field
+/// chunks, split parts, path), against `shield.max_normalize_work`.
 struct NormalizeWork {
     used: usize,
     cap: usize,
@@ -440,50 +447,95 @@ struct NormalizeWork {
     exhausted: bool,
 }
 
-/// Normalize `text` and hand it to `f`. If normalization cut it, re-inspect the
-/// same raw text as two halves overlapping by [`CHUNK_OVERLAP`] chars, recursively,
-/// until each piece normalizes uncut. A piece still cut at [`MAX_SPLIT_DEPTH`], or
-/// too short to split, is inspected as cut and reported as lost. A normalization
-/// whose worst-case work would pass the cap is not run: `work` is marked exhausted
-/// and the piece is reported as lost. Returns `(lost, max decode layers)`.
+impl NormalizeWork {
+    /// Whether a normalization of `chars` input chars may run: its worst-case
+    /// work must fit under the cap. A refusal exhausts the request.
+    fn admit(&mut self, chars: usize, max_payload: usize) -> bool {
+        let bound = crate::normalize::work_bound(chars, max_payload);
+        if self.exhausted || self.used.saturating_add(bound) > self.cap {
+            self.exhausted = true;
+        }
+        !self.exhausted
+    }
+
+    fn charge(&mut self, folded: usize) {
+        self.used = self.used.saturating_add(folded);
+    }
+}
+
+/// Normalize the raw piece `raw` (a field chunk or path chunk of at most
+/// `max_payload` chars) and hand it to `f`. The piece is decoded once, whole, so
+/// whole-field encodings such as base64 decode exactly as in [`normalize`]; then
+/// its decoded text is folded and canonicalized. If the fold is cut, the DECODED
+/// text is re-inspected as two halves overlapping by [`CHUNK_OVERLAP`] chars,
+/// recursively, applying only fold and canonicalization to each half (see
+/// [`inspect_decoded`]). An uncut piece reaches `f` exactly as [`normalize`]
+/// returns it. Returns `(lost, decode layers)`.
+///
+/// Work: the decode pass is admitted against the piece's worst-case fold, and its
+/// charge is the folded chars of the first fold (decoding never adds chars, so that
+/// bound covers it); every further fold of a half is admitted and charged the same
+/// way. A refused normalization exhausts `work` and reports the piece as lost.
+///
+/// Splitting is lossless for TEXT: every decoded char reaches some uncut leaf, and
+/// any span of up to [`CHUNK_OVERLAP`] chars lies whole in one leaf. A construct
+/// whose decoded span is longer than that (e.g. `union` and `select` separated by
+/// 400 spaces) can still be split across two leaves and missed; stitching seams in
+/// normalized-token space is a Plan B item.
 ///
 /// [`CHUNK_OVERLAP`]: crate::normalize::CHUNK_OVERLAP
-fn inspect_pieces(
+/// [`normalize`]: crate::normalize::normalize
+fn inspect_pieces(raw: &str, opts: &Options, work: &mut NormalizeWork, f: &mut dyn FnMut(&Normalized)) -> (bool, u8) {
+    if !work.admit(raw.chars().count(), opts.max_payload) {
+        return (true, 0);
+    }
+    let d = decode(raw, opts);
+    let lost = inspect_decoded(&d, &d.text, 0, opts, work, f);
+    (lost, d.layers)
+}
+
+/// Fold `text` (all or part of `d.text`) and hand it to `f`; if the fold is cut,
+/// recurse over two halves of `text` overlapping by [`CHUNK_OVERLAP`] chars. A
+/// part still cut at [`MAX_SPLIT_DEPTH`], or too short to split (at most
+/// `2 x CHUNK_OVERLAP` chars), is inspected as cut and reported as lost, as is a
+/// part refused by the work cap. Returns whether anything was lost.
+///
+/// [`CHUNK_OVERLAP`]: crate::normalize::CHUNK_OVERLAP
+fn inspect_decoded(
+    d: &Decoded,
     text: &str,
     depth: u8,
     opts: &Options,
     work: &mut NormalizeWork,
     f: &mut dyn FnMut(&Normalized),
-) -> (bool, u8) {
+) -> bool {
     let chars = text.chars().count();
-    let bound = crate::normalize::work_bound(chars, opts.max_payload);
-    if work.exhausted || work.used.saturating_add(bound) > work.cap {
-        work.exhausted = true;
-        return (true, 0);
+    if !work.admit(chars, opts.max_payload) {
+        return true;
     }
     let overlap = crate::normalize::CHUNK_OVERLAP;
-    if depth >= MAX_SPLIT_DEPTH || chars <= 2 * overlap {
+    if depth >= MAX_SPLIT_DEPTH || chars <= 2 * overlap || d.truncated {
         // Cannot be split: inspect it, cut or not; a cut here is a real loss.
-        let n = normalize(text, opts);
-        work.used = work.used.saturating_add(n.work);
+        let n = fold(d, text, opts);
+        work.charge(n.work);
         f(&n);
-        return (n.truncated, n.layers);
+        return n.truncated;
     }
-    match normalize_unless_cut(text, opts) {
+    match fold_unless_cut(d, text, opts) {
         Ok(n) => {
-            work.used = work.used.saturating_add(n.work);
+            work.charge(n.work);
             f(&n);
-            return (false, n.layers);
+            return false;
         }
-        Err(cut_work) => work.used = work.used.saturating_add(cut_work),
+        Err(cut_work) => work.charge(cut_work),
     }
     let at = |k: usize| text.char_indices().nth(k).map_or(text.len(), |(b, _)| b);
     let mid = chars / 2;
     let left = &text[..at(mid + overlap / 2)];
     let right = &text[at(mid - overlap / 2)..];
-    let (l_lost, l_layers) = inspect_pieces(left, depth + 1, opts, work, f);
-    let (r_lost, r_layers) = inspect_pieces(right, depth + 1, opts, work, f);
-    (l_lost || r_lost, l_layers.max(r_layers))
+    let l_lost = inspect_decoded(d, left, depth + 1, opts, work, f);
+    let r_lost = inspect_decoded(d, right, depth + 1, opts, work, f);
+    l_lost || r_lost
 }
 
 #[cfg(test)]
@@ -1054,6 +1106,77 @@ mod tests {
         assert!(!has_construct(&j, "sqli.union-select")); // field b was not inspected
         assert_eq!(j.verdict, Verdict::Block);
         assert_eq!(j.reason, LIMIT_REASON);
+    }
+
+    /// Whole-field base64 of an attack followed by `n` U+FDFA: the decoded text
+    /// folds past `max_payload`, so its fold is cut and split. Two spaces keep the
+    /// encoding free of '+' (length = 4 mod 8), as in the final-review probe.
+    fn b64_attack_with_fdfa(n: usize) -> String {
+        use base64::Engine as _;
+        let plain = format!(
+            "<script>alert(1)</script> 1 union select password from users  {}",
+            FDFA.to_string().repeat(n)
+        );
+        base64::engine::general_purpose::STANDARD.encode(plain.as_bytes())
+    }
+
+    fn has_xss_or_sqli(j: &Judgment) -> bool {
+        j.contributions
+            .iter()
+            .filter_map(|c| c.construct.as_deref())
+            .any(|id| id.starts_with("xss.") || id.starts_with("sqli."))
+    }
+
+    #[test]
+    fn whole_field_base64_survives_a_cut_fold() {
+        // C-1 (final review): splitting the raw base64 broke its decoding, so the
+        // halves normalized as plain text and the attack vanished (Allow, score 0).
+        let mut missed = Vec::new();
+        for n in [3_700usize, 4_000, 10_000] {
+            let v = b64_attack_with_fdfa(n);
+            assert!(!v.contains('+'));
+            let mut header = Request::get("/items");
+            header.headers.push(("x-data".into(), v.clone()));
+            let mut body = Request::get("/items");
+            body.method = "POST".into();
+            body.body = v.clone().into_bytes();
+            for (loc, req) in [("query", query_req(v)), ("header", header), ("body", body)] {
+                let j = shield().inspect(&req);
+                if !has_xss_or_sqli(&j) || j.verdict != Verdict::Block {
+                    missed.push(format!("n {n} {loc}: {:?} {} {}", j.verdict, j.score, j.reason));
+                }
+            }
+        }
+        assert!(missed.is_empty(), "{missed:#?}");
+    }
+
+    #[test]
+    fn an_uncut_piece_reaches_the_detectors_exactly_as_normalize_returns_it() {
+        let opts = Options::default();
+        let near_cap = b64_attack_with_fdfa(3_000); // decodes to text folding just under the cap
+        for raw in [
+            "",
+            "best coffee in brisbane",
+            "%2555NION%2520%2553ELECT%25201",
+            "PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+Pg==",
+            "&lt;script&gt;\\x3c/**/UNION/*!SELECT*/ \u{0430}r 1=1 #x",
+            near_cap.as_str(),
+        ] {
+            let want = crate::normalize::normalize(raw, &opts);
+            let mut seen = Vec::new();
+            let mut work = NormalizeWork { used: 0, cap: usize::MAX, exhausted: false };
+            let (lost, layers) = inspect_pieces(raw, &opts, &mut work, &mut |n| {
+                seen.push((n.text.clone(), n.cased.clone(), n.layers, n.flags.clone(), n.truncated, n.work))
+            });
+            assert!(!lost);
+            assert_eq!(layers, want.layers);
+            assert_eq!(work.used, want.work);
+            assert_eq!(
+                seen,
+                vec![(want.text, want.cased, want.layers, want.flags, want.truncated, want.work)],
+                "{raw:.40}"
+            );
+        }
     }
 
     const LIMIT_REASON: &str = "hard-block: limit.payload-truncated (request not fully inspected)";

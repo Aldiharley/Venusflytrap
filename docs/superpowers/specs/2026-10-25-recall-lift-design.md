@@ -128,7 +128,7 @@ New module `vft-core/src/body.rs`: `body_fields(content_type, body) -> Vec<Field
 - JSON leaves come out of `serde_json` already unescaped.
 - A form value or JSON leaf that is itself JSON is expanded once more; total depth ≤ 2. JSON nesting stops at 32 levels.
 - At most 256 fields per body; any further content is joined into one remainder field, never dropped.
-- Inspection budget: oversized fields are inspected in 64 KiB chunks up to `shield.max_inspect_bytes` (4 MiB) per request. Past the budget, `limit.payload-truncated` hard-blocks the request (fixes C3).
+- Inspection budget: oversized fields are inspected in 64 KiB chunks up to `shield.max_inspect_bytes` (4 MiB) per request. Past the budget, `limit.payload-truncated` hard-blocks the request (fixes C3). Each chunk is decoded whole; when its Unicode fold is cut, the decoded text (not the raw chunk, whose encoding a split can break) is split into halves overlapping by 256 chars, recursively (owner ruling R1, mechanism amended 2026-10-26 after the final review's C-1).
 - Field names now carry real parameter names, so `ApiSafetyDetector` (which keys off `id`, `*_id`) will fire more often. Its effect is measured by ablation.
 
 ## 6. Normalizer
@@ -188,9 +188,11 @@ pub fn constructs() -> &'static [ConstructInfo];
 
 | Construct | Option key | Fires when | Evidence |
 |---|---|---|---|
-| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a piece is still cut after lossless recursive splitting reaches its depth bound, or the per-request normalization work cap `shield.max_normalize_work` (default 2 × max_inspect_bytes) is reached | hard Block (owner ruling 2026-10-26) |
+| `limit.payload-truncated` | `shield.max_inspect_bytes` (new, 4 MiB) | a request exceeds the inspection budget (each field charged once), or a piece is still cut after recursive splitting of its decoded text reaches its depth bound, or the per-request normalization work cap `shield.max_normalize_work` (default 2 × max_inspect_bytes) is reached | hard Block (owner ruling 2026-10-26) |
 | `limit.graph-truncated` | `shield.max_graph_windows` (new, 32) | a field needs more 4,096-token windows than the cap | Suspicious |
 | `limit.body-unparsed` | `shield.body_parse` | a body falls back to one whole field | informational, weight 0 |
+
+Splitting happens on the decoded text: a chunk is decoded once, whole, and only fold and canonicalization are re-run on each half. It is lossless for text, not for constructs: every decoded char reaches an uncut piece, but a construct whose span exceeds the 256-char overlap (e.g. `union` + 400 spaces + `select`) can still straddle a seam and be missed. Seam stitching in normalized-token space is a Plan B item.
 
 Long token streams are analyzed in 4,096-token windows overlapping by 64 tokens, with patterns de-duplicated across windows (fixes C2). Text-level checks always see the whole field. 32 windows cover a full 64 KiB field, so `limit.graph-truncated` should not fire on default caps; it is defined and tested in case the caps change.
 

@@ -121,6 +121,9 @@ fn normalization_work_timings() {
     for i in 0..64 {
         many.query.push((format!("q{i}"), fdfa(65_536)));
     }
+    // The final review's mixed case: runs of five-layer percent-encoding and FDFA.
+    let mixed_unit = format!("{}{}", "%252525252541".repeat(400), fdfa(400));
+    let mixed = mixed_unit.repeat((4 << 20) / mixed_unit.len());
     let cases: Vec<(&str, Request)> = vec![
         ("1 MiB FDFA body", body(fdfa((1 << 20) / 3).into_bytes())),
         ("single 64 KiB FDFA field", query(fdfa(65_536))),
@@ -128,6 +131,7 @@ fn normalization_work_timings() {
         ("4 MiB single FDFA field", query(fdfa((4 << 20) / 3))),
         ("64 fields x 64 KiB FDFA", many),
         ("ASCII 4 MiB body", body("a".repeat((4 << 20) - 1024).into_bytes())),
+        ("4 MiB mixed decode + FDFA query", query(mixed)),
     ];
     let shield = Shield::new(Config::default());
     for (name, req) in &cases {
