@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attack chains, live</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#76A6FF}a:hover{color:#93B9FF}
+</style>
+</helmet>
+<div style="width: 100%; min-height: 900px; box-sizing: border-box; display: flex; flex-direction: column; background: {{t.base}}; color: {{t.text}}; font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums">
+
+  <header style="height: 56px; flex-shrink: 0; box-sizing: border-box; display: flex; align-items: center; gap: 16px; padding: 0 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border-bottom: 0.5px solid {{t.hairline}}; flex-wrap: wrap">
+    <div style="display: flex; align-items: center; gap: 10px; min-width: 196px">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="{{t.accent}}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 4.4 3.4 8 8 9 4.6-1 8-4.6 8-9V6l-8-3z"></path><path d="M8.5 11.5 12 8l3.5 3.5"></path><path d="M8.5 15 12 11.5 15.5 15"></path></svg>
+      <div style="display: flex; flex-direction: column; line-height: 16px">
+        <span style="font-weight: 700; font-size: 15px">Venusflytrap</span>
+        <span style="font-size: 11px; color: {{t.text2}}">Attack chains · live</span>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 16px; margin-left: auto; flex-wrap: wrap">
+      <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: {{t.allowBg}}; color: {{t.allowFg}}; font-size: 12px; font-weight: 600; box-shadow: {{t.shadow1}}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m8 12 3 3 5-6"></path></svg>Live · 0 dropped
+      </span>
+      <span style="font-size: 12px; color: {{t.text2}}">Reconciled with chain store 12 s ago</span>
+    </div>
+  </header>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+    <nav aria-label="Console" style="width: 72px; flex-shrink: 0; box-sizing: border-box; padding: 12px 8px; display: flex; flex-direction: column; gap: 4px; background: {{t.sunken}}">
+      <sc-for list="{{nav}}" as="n" hint-placeholder-count="7">
+        <a href="{{n.href}}" aria-current="{{n.current}}" style="height: 56px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; text-decoration: none; font-size: 11px; font-weight: 500; color: {{n.fg}}; background: {{n.bg}}; box-shadow: {{n.shadow}}">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{n.icon}}"></path></svg>
+          {{n.label}}
+        </a>
+      </sc-for>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 24px; display: flex; flex-direction: column; gap: 16px">
+      <div style="display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap">
+        <div>
+          <h1 style="margin: 0; font-size: 24px; line-height: 32px; font-weight: 600">Attack chains</h1>
+          <p style="margin: 0; color: {{t.text2}}">6 active sources · ordered by stage, then most recent event</p>
+        </div>
+        <div role="group" aria-label="Filters" style="display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap">
+          <button type="button" aria-pressed="true" style="height: 32px; padding: 0 12px; border-radius: 16px; border: 1.5px solid {{t.accent}}; background: {{t.accentSoft}}; color: {{t.text}}; font: inherit; font-size: 13px; font-weight: 500; box-shadow: {{t.insetShadow}}; cursor: pointer">Stage ≥ Recon</button>
+          <button type="button" aria-pressed="false" style="height: 32px; padding: 0 12px; border-radius: 16px; border: 1px solid {{t.borderStrong}}; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-size: 13px; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Banned only</button>
+          <button type="button" style="height: 32px; padding: 0 12px; border-radius: 16px; border: 1px solid {{t.attention}}; background: {{t.attentionSoft}}; color: {{t.attention}}; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer">2 new events · Apply (R)</button>
+        </div>
+      </div>
+
+      <div style="overflow-x: auto; border-radius: 12px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}; border: 0.5px solid {{t.hairline}}">
+        <table role="grid" aria-label="Sources by kill-chain stage" style="width: 100%; min-width: 1080px; border-collapse: collapse; font-size: 13px; line-height: 18px">
+          <thead>
+            <tr style="height: 40px; text-align: left; border-bottom: 1px solid {{t.borderSubtle}}">
+              <sc-for list="{{cols}}" as="c" hint-placeholder-count="9">
+                <th scope="col" style="padding: 0 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}; text-align: {{c.align}}; white-space: nowrap">
+                  <span style="display: inline-flex; align-items: center; gap: 6px">
+                    <sc-if value="{{c.badge}}" hint-placeholder-val="{{false}}"><span style="display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 10px; font-weight: 700; color: {{c.bg}}; background: {{c.fg}}; border-radius: {{c.radius}}; transform: {{c.tf}}"><span style="transform: {{c.untf}}">{{c.badge}}</span></span></sc-if>
+                    {{c.label}}
+                  </span>
+                </th>
+              </sc-for>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{rows}}" as="r" hint-placeholder-count="6">
+              <tr style="height: 52px; border-bottom: 1px solid {{t.borderSubtle}}; background: {{r.rowBg}}; box-shadow: {{r.rowShadow}}">
+                <th scope="row" style="padding: 0 12px; text-align: left; font-weight: 500; white-space: nowrap">
+                  <a href="RequestDetails.dc.html" style="color: {{t.text}}; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px">{{r.src}}</a>
+                </th>
+                <sc-for list="{{r.cells}}" as="cell" hint-placeholder-count="4">
+                  <td style="padding: 0 12px; white-space: nowrap">
+                    <sc-if value="{{cell.on}}" hint-placeholder-val="{{true}}">
+                      <span style="display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; border-radius: 4px; background: {{cell.bg}}; color: {{cell.fg}}; font-weight: 600">
+                        {{cell.time}}<span style="font-weight: 400; opacity: .9">×{{cell.n}}</span>
+                      </span>
+                    </sc-if>
+                    <sc-if value="{{cell.off}}" hint-placeholder-val="{{false}}"><span aria-label="not reached" style="color: {{t.muted}}">—</span></sc-if>
+                  </td>
+                </sc-for>
+                <td style="padding: 0 12px; text-align: right">{{r.req}}</td>
+                <td style="padding: 0 12px; text-align: right">{{r.blocked}}</td>
+                <td style="padding: 0 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px">{{r.construct}}</td>
+                <td style="padding: 0 12px; white-space: nowrap">
+                  <sc-if value="{{r.banned}}" hint-placeholder-val="{{true}}">
+                    <span style="display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 4px; background: {{t.blockBg}}; color: {{t.blockFg}}; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 2h8l6 6v8l-6 6H8l-6-6V8zM9 9l6 6M15 9l-6 6"></path></svg>Banned · {{r.ttl}}
+                    </span>
+                    <span style="display: block; font-size: 12px; color: {{t.text2}}">{{r.cause}}</span>
+                  </sc-if>
+                  <sc-if value="{{r.notBanned}}" hint-placeholder-val="{{false}}"><span style="font-size: 12px; color: {{t.text2}}">{{r.cause}}</span></sc-if>
+                </td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: {{t.text2}}">
+        <span>Each cell: first time the stage was reached · number of events in the 1 h window.</span>
+        <span>Keyboard: ↑ ↓ move rows · Enter opens the source · R applies the new order (rows never move while focus is inside the grid).</span>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"dark"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  tokens(dark) {
+    if (dark) return {
+      base: '#17191D', sunken: '#101215', raised: '#252B36', raisedGlass: 'rgb(37 43 54 / .88)', text: '#ECEEF2', text2: '#B9BFCA', muted: '#9AA2B0',
+      hairline: 'rgb(255 255 255 / .08)', borderSubtle: 'rgb(255 255 255 / .14)', borderStrong: '#77808F', accent: '#76A6FF', accentSoft: '#1E2C47',
+      attention: '#E6BD68', attentionSoft: '#3A2F14', rowSelected: '#342D1D', rowBlocked: '#33201F', blockLine: '#FF6F65',
+      shadow1: '0 1px 2px rgb(0 0 0/.40), 0 2px 8px rgb(0 0 0/.28), inset 0 1px 0 rgb(255 255 255/.06), inset 0 -1px 0 rgb(0 0 0/.30)',
+      shadow2: '0 2px 4px rgb(0 0 0/.40), 0 10px 24px rgb(0 0 0/.40), inset 0 1px 0 rgb(255 255 255/.08), inset 0 -1px 0 rgb(0 0 0/.35)',
+      insetShadow: 'inset 0 2px 5px rgb(0 0 0/.55), inset 0 -1px 0 rgb(255 255 255/.05)',
+      allowFg: '#7FD99D', allowBg: '#173528', blockFg: '#FF928A', blockBg: '#4A1F1C',
+      recon: ['#6CCFD8', '#14343A'], enumeration: ['#E9D06A', '#373214'], exploitation: ['#FFAA6B', '#44280E'], exfiltration: ['#FF92B4', '#47182B']
+    };
+    return {
+      base: '#D6D1CB', sunken: '#CAC4BD', raised: '#EEEBE7', raisedGlass: 'rgb(238 235 231 / .80)', text: '#1E1B18', text2: '#48423C', muted: '#565049',
+      hairline: 'rgb(30 27 24 / .12)', borderSubtle: 'rgb(30 27 24 / .20)', borderStrong: '#7A7269', accent: '#2353B3', accentSoft: '#D9E3F6',
+      attention: '#7A4F00', attentionSoft: '#F4E2C0', rowSelected: '#F3E6CC', rowBlocked: '#F2DEDA', blockLine: '#C0322A',
+      shadow1: '0 1px 2px rgb(60 48 36/.10), 0 2px 6px rgb(60 48 36/.08), inset 0 1px 0 rgb(255 255 255/.70), inset 0 -1px 0 rgb(60 48 36/.06)',
+      shadow2: '0 2px 4px rgb(60 48 36/.10), 0 8px 20px rgb(60 48 36/.14), inset 0 1px 0 rgb(255 255 255/.75), inset 0 -1px 0 rgb(60 48 36/.08)',
+      insetShadow: 'inset 0 2px 4px rgb(60 48 36/.16), inset 0 -1px 0 rgb(255 255 255/.60)',
+      allowFg: '#1D6B3A', allowBg: '#D3EAD9', blockFg: '#A3221A', blockBg: '#F6D5D1',
+      recon: ['#0F5F6B', '#CFE7EA'], enumeration: ['#6E5600', '#F0E5B5'], exploitation: ['#9A440A', '#F7DBC5'], exfiltration: ['#9C1A3C', '#F5D2DC']
+    };
+  }
+  renderVals() {
+    const dark = (this.props.theme ?? 'dark') === 'dark';
+    const t = this.tokens(dark);
+    const navItems = [
+      ['Dash', '#', 'M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z'],
+      ['Map', 'Main.dc.html', 'M12 2 3 7l9 5 9-5-9-5zM3 12l9 5 9-5M3 17l9 5 9-5'],
+      ['Chains', '#', 'M4 6h16M4 12h16M4 18h16M9 3v18'],
+      ['Monitor', 'Monitor.dc.html', 'M3 12h4l3-8 4 16 3-8h4'],
+      ['Traps', '#', 'M12 3c-3 4-7 5-7 10a7 7 0 0 0 14 0c0-5-4-6-7-10z'],
+      ['Settings', '#', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+      ['Keys', '#', 'M15 7a4 4 0 1 1-3.9 5H3v3h3v3h3v-3h2.1A4 4 0 0 1 15 7z']
+    ];
+    const nav = navItems.map(([label, href, icon], i) => ({
+      label, href, icon, current: i === 2 ? 'page' : 'false',
+      fg: i === 2 ? t.text : t.text2, bg: i === 2 ? t.accentSoft : 'transparent', shadow: i === 2 ? 'inset 2px 0 0 ' + t.accent : 'none'
+    }));
+    const stages = [['recon', 'Recon', '1', 'circle'], ['enumeration', 'Enumeration', '2', 'square'], ['exploitation', 'Exploitation', '3', 'diamond'], ['exfiltration', 'Exfiltration', '4', 'hex']];
+    const col = (label, align, s) => ({ label, align: align || 'left', badge: s ? s[2] : '', fg: s ? t[s[0]][0] : '', bg: s ? t[s[0]][1] : '', radius: s && s[3] === 'circle' ? '999px' : '2px', tf: s && s[3] === 'diamond' ? 'rotate(45deg) scale(.82)' : 'none', untf: s && s[3] === 'diamond' ? 'rotate(-45deg)' : 'none' });
+    const cols = [col('Source')].concat(stages.map((s) => col(s[1], 'left', s))).concat([col('Requests', 'right'), col('Blocked', 'right'), col('Top construct'), col('Ban')]);
+    const cell = (k, time, n) => time ? { on: true, off: false, time, n, fg: t[k][0], bg: t[k][1] } : { on: false, off: true, time: '', n: '', fg: '', bg: '' };
+    const row = (src, c, req, blocked, construct, ban, sel) => ({
+      src, req, blocked, construct,
+      cells: [cell('recon', c[0], c[1]), cell('enumeration', c[2], c[3]), cell('exploitation', c[4], c[5]), cell('exfiltration', c[6], c[7])],
+      banned: !!ban.ttl, notBanned: !ban.ttl, ttl: ban.ttl || '', cause: ban.cause,
+      rowBg: sel ? t.rowSelected : (ban.ttl ? t.rowBlocked : 'transparent'),
+      rowShadow: sel ? 'inset 0 0 0 1.5px ' + t.attention : (ban.ttl ? 'inset 3px 0 0 ' + t.blockLine : 'none')
+    });
+    const rows = [
+      row('203.0.113.10', ['10:30:11', 2, '', '', '10:36:58', 1, '10:37:01', 1], 9, 4, 'sqli.union-select', { ttl: '59 min', cause: 'exfiltration block' }),
+      row('203.0.113.9', ['10:31:02', 4, '', '', '10:35:12', 11, '', ''], 14, 11, 'sqli.union-select', { ttl: '52 min', cause: '3 exploitation blocks in 10 min' }, true),
+      row('198.51.100.23', ['10:28:40', 1, '', '', '10:29:05', 1, '', ''], 2, 2, 'honeypot /.git/config', { ttl: '54 min', cause: 'honeypot hit' }),
+      row('203.0.113.44', ['', '', '', '', '10:36:20', 2, '', ''], 3, 2, 'xss.script-tag', { cause: '2 of 3 exploitation blocks' }),
+      row('192.0.2.77', ['10:20:13', 9, '10:22:40', 2, '', '', '', ''], 31, 2, 'recon /.env', { cause: 'scanner fingerprint, Challenge' }),
+      row('2001:db8:4::/64', ['10:33:47', 3, '', '', '', '', '', ''], 3, 0, 'recon /actuator', { cause: 'not banned' })
+    ];
+    return { t, nav, cols, rows };
+  }
+}
+</script>
+</body>
+</html>

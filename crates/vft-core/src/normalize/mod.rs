@@ -9,6 +9,8 @@ mod confusables;
 
 use base64::Engine as _;
 
+use crate::graph::sinks::{self, Disabled};
+
 /// Flags raised during normalization — themselves weak signals.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Flags {
@@ -27,6 +29,11 @@ pub struct Normalized {
     /// Number of decode layers peeled.
     pub layers: u8,
     pub flags: Flags,
+    /// Normalization cut text: the input exceeded `max_payload`, or NFKC expansion did.
+    pub truncated: bool,
+    /// Folded chars this normalization produced (at most `max_payload`): what it
+    /// costs against the per-request `shield.max_normalize_work`.
+    pub work: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +41,8 @@ pub struct Options {
     pub max_payload: usize,
     pub decode_cap: u8,
     pub deep_threshold: u8,
+    /// Decoders switched off (`shield.disabled`).
+    pub disabled: Disabled,
 }
 
 impl Default for Options {
@@ -42,13 +51,40 @@ impl Default for Options {
             max_payload: 64 * 1024,
             decode_cap: 14,
             deep_threshold: 3,
+            disabled: Disabled::default(),
         }
     }
 }
 
-/// Normalize a single field value.
+/// Normalize a single field value: [`decode`] it, then [`fold`] the whole
+/// decoded text.
 pub fn normalize(input: &str, opts: &Options) -> Normalized {
+    let d = decode(input, opts);
+    fold(&d, &d.text, opts)
+}
+
+/// A piece after the decode stage, before Unicode folding: bounded to
+/// `max_payload` chars and decoded to a fixpoint. Decoding never adds chars, so
+/// `text` has at most `max_payload` chars. When the fold of `text` is cut, the
+/// shield splits `text` (not the raw piece, whose encoding a split can break) and
+/// folds each part with [`fold`] / [`fold_unless_cut`].
+#[derive(Debug, Clone)]
+pub struct Decoded {
+    /// The decoded text.
+    pub text: String,
+    /// Flags of the whole piece (mixed script, deep nesting).
+    flags: Flags,
+    /// Number of decode layers peeled.
+    pub layers: u8,
+    /// The raw piece was longer than `max_payload` chars.
+    pub truncated: bool,
+}
+
+/// The decode stage of [`normalize`]: bound, flag mixed script, decode to a fixpoint.
+pub fn decode(input: &str, opts: &Options) -> Decoded {
     // Bound the work first.
+    let input_chars = input.chars().count();
+    let truncated = input_chars > opts.max_payload;
     let bounded: String = input.chars().take(opts.max_payload).collect();
 
     let mut flags = Flags::default();
@@ -56,33 +92,121 @@ pub fn normalize(input: &str, opts: &Options) -> Normalized {
         flags.mixed_script = true;
     }
 
-    let (decoded, layers) = decode_fixpoint(&bounded, opts.decode_cap);
+    let (text, layers) = decode_fixpoint_with(&bounded, opts.decode_cap, &opts.disabled);
     if layers >= opts.deep_threshold {
         flags.deep_nesting = true;
     }
+    Decoded { text, flags, layers, truncated }
+}
 
-    let mut folded = fold_unicode(&decoded);
-    // Cap post-fold length: NFKC can expand some code points many-fold, so bound
-    // the string again before tokenization (L3).
-    if folded.chars().count() > opts.max_payload {
-        folded = folded.chars().take(opts.max_payload).collect();
+/// Fold and canonicalize `text`, which is `d.text` or a part of it, carrying
+/// `d`'s flags and layers. The result is cut (`truncated`) when the fold passes
+/// `max_payload` chars or the raw piece was bounded.
+pub fn fold(d: &Decoded, text: &str, opts: &Options) -> Normalized {
+    finish(fold_stage(d, text, opts))
+}
+
+/// [`fold`] for a part that is split when cut: a cut stops after folding and
+/// returns `Err(work)`, skipping canonicalization of text nobody reads.
+pub fn fold_unless_cut(d: &Decoded, text: &str, opts: &Options) -> Result<Normalized, usize> {
+    let f = fold_stage(d, text, opts);
+    if f.truncated {
+        Err(f.work)
+    } else {
+        Ok(finish(f))
     }
-    let canon = canonicalize_ws_comments(&folded, &mut flags);
+}
 
+/// Bounded, decoded and folded text, before whitespace/comment canonicalization.
+struct Folded {
+    folded: String,
+    flags: Flags,
+    layers: u8,
+    truncated: bool,
+    work: usize,
+}
+
+fn fold_stage(d: &Decoded, text: &str, opts: &Options) -> Folded {
+    // Cap post-fold length: NFKC can expand some code points many-fold, so bound
+    // the string again before tokenization (L3). Folding stops at the cap, so a
+    // cut costs O(max_payload), not O(18 x input).
+    let (folded, cut) = fold_unicode_capped(text, opts.max_payload);
+    let work = folded.chars().count();
+    Folded { folded, flags: d.flags.clone(), layers: d.layers, truncated: d.truncated || cut, work }
+}
+
+fn finish(f: Folded) -> Normalized {
+    let mut flags = f.flags;
+    let canon = canonicalize_ws_comments(&f.folded, &mut flags);
     Normalized {
         text: canon.to_lowercase(),
         cased: canon,
-        layers,
+        layers: f.layers,
         flags,
+        truncated: f.truncated,
+        work: f.work,
     }
+}
+
+/// NFKC expands one code point into at most 18 (U+FDFA); decoding never adds chars.
+pub const MAX_FOLD_EXPANSION: usize = 18;
+
+/// An upper bound on [`Normalized::work`] for an input of `input_chars` chars.
+pub fn work_bound(input_chars: usize, max_payload: usize) -> usize {
+    input_chars.min(max_payload).saturating_mul(MAX_FOLD_EXPANSION).min(max_payload)
+}
+
+/// Characters shared by neighbouring chunks (and by the halves of a split piece),
+/// so any span of up to this many chars lies whole in one chunk. This makes
+/// chunking lossless for text, not for constructs: a construct whose span is
+/// longer (e.g. `union` + 400 spaces + `select`, `%20` x 150 or `/*x400*/` filler,
+/// `<svg` + 400 spaces + `onload=`) can still straddle a seam and be missed.
+/// Stitching seams in normalized-token space is a Plan B item.
+pub const CHUNK_OVERLAP: usize = 256;
+
+/// Split `s` into chunks of at most `max` chars that overlap by
+/// [`CHUNK_OVERLAP`] chars. A string of at most `max` chars is one chunk.
+pub fn chunks(s: &str, max: usize) -> Vec<&str> {
+    chunk_ranges(s, max).into_iter().map(|r| &s[r]).collect()
+}
+
+/// The byte ranges of [`chunks`]: ascending, on char boundaries, and each one
+/// ends after the previous one, so `end - previous_end` is the bytes it adds.
+/// A `max` of 0 is treated as 1.
+pub fn chunk_ranges(s: &str, max: usize) -> Vec<std::ops::Range<usize>> {
+    let max = max.max(1);
+    let idx: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let n = idx.len();
+    if n <= max {
+        return std::iter::once(0..s.len()).collect();
+    }
+    let step = max.saturating_sub(CHUNK_OVERLAP).max(1);
+    let mut out = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = (start + max).min(n);
+        let lo = idx[start];
+        let hi = if end == n { s.len() } else { idx[end] };
+        out.push(lo..hi);
+        if end == n {
+            break;
+        }
+        start += step;
+    }
+    out
 }
 
 /// Apply decoders repeatedly until a pass makes no change or the cap is hit.
 pub fn decode_fixpoint(input: &str, cap: u8) -> (String, u8) {
+    decode_fixpoint_with(input, cap, &Disabled::default())
+}
+
+/// [`decode_fixpoint`] with some decoders switched off.
+pub fn decode_fixpoint_with(input: &str, cap: u8, disabled: &Disabled) -> (String, u8) {
     let mut cur = input.to_string();
     let mut layers = 0u8;
     for _ in 0..cap {
-        let next = decode_once(&cur);
+        let next = decode_once(&cur, disabled);
         if next == cur {
             break;
         }
@@ -92,24 +216,51 @@ pub fn decode_fixpoint(input: &str, cap: u8) -> (String, u8) {
     (cur, layers)
 }
 
-/// One decode pass: URL -> HTML entity -> \xNN/\uNNNN -> whole-string base64.
+/// Percent-decode to bytes, then UTF-8 lossily. One invalid byte (`%ff`) yields
+/// U+FFFD instead of disabling URL decoding for the whole field (H1).
+pub fn percent_decode_lossy(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One decode pass: whole-string base64 first (if it decodes, the pass ends
+/// there), else URL -> HTML entity -> \xNN/\uNNNN -> whole-string base64 again.
 /// Each stage only applies if it changes the string.
-fn decode_once(s: &str) -> String {
+fn decode_once(s: &str, disabled: &Disabled) -> String {
+    // Whole-field base64 first: '+' is a base64 character, and the URL step
+    // below turns it into a space (L5).
+    if !disabled.is(&sinks::DECODE_B64_WHOLE) {
+        if let Some(d) = try_whole_base64(s) {
+            return d;
+        }
+    }
+
     let mut out = s.to_string();
 
     // URL / percent decoding.
-    if out.contains('%') || out.contains('+') {
-        let replaced = out.replace('+', " ");
-        if let Ok(dec) = percent_encoding::percent_decode_str(&replaced).decode_utf8() {
-            let d = dec.into_owned();
-            if d != out {
-                out = d;
-            }
+    if (out.contains('%') || out.contains('+')) && !disabled.is(&sinks::DECODE_PERCENT_LOSSY) {
+        let d = percent_decode_lossy(&out.replace('+', " "));
+        if d != out {
+            out = d;
         }
     }
 
     // HTML entities (named + numeric).
-    if out.contains('&') {
+    if out.contains('&') && !disabled.is(&sinks::DECODE_ENTITY) {
         let d = decode_html_entities(&out);
         if d != out {
             out = d;
@@ -117,7 +268,7 @@ fn decode_once(s: &str) -> String {
     }
 
     // \xNN and \uNNNN escapes.
-    if out.contains("\\x") || out.contains("\\u") {
+    if (out.contains("\\x") || out.contains("\\u")) && !disabled.is(&sinks::DECODE_ESC_HEX) {
         let d = decode_backslash_escapes(&out);
         if d != out {
             out = d;
@@ -125,9 +276,11 @@ fn decode_once(s: &str) -> String {
     }
 
     // Base64, only when the whole token looks like base64 and decodes to text.
-    if let Some(d) = try_whole_base64(&out) {
-        if d != out {
-            out = d;
+    if !disabled.is(&sinks::DECODE_B64_WHOLE) {
+        if let Some(d) = try_whole_base64(&out) {
+            if d != out {
+                out = d;
+            }
         }
     }
 
@@ -266,6 +419,21 @@ pub fn fold_unicode(s: &str) -> String {
     nfkc.chars().map(confusables::skeleton_char).collect()
 }
 
+/// The first `cap` chars of [`fold_unicode`], and whether the full fold is longer.
+/// Folding stops at char `cap + 1`, so the cost is bounded by `cap`, not by the
+/// input's expansion.
+pub fn fold_unicode_capped(s: &str, cap: usize) -> (String, bool) {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out = String::new();
+    for (i, c) in s.nfkc().enumerate() {
+        if i == cap {
+            return (out, true);
+        }
+        out.push(confusables::skeleton_char(c));
+    }
+    (out, false)
+}
+
 fn count_scripts(s: &str) -> usize {
     let mut latin = false;
     let mut cyrillic = false;
@@ -371,6 +539,62 @@ mod tests {
     }
 
     #[test]
+    fn chunks_cover_everything_with_overlap() {
+        let s: String = "ab€".repeat(1000); // 3,000 chars, multi-byte included
+        let cs = chunks(&s, 1024);
+        assert!(cs.iter().all(|c| c.chars().count() <= 1024));
+        assert!(s.starts_with(cs[0]) && s.ends_with(cs[cs.len() - 1]));
+        for w in cs.windows(2) {
+            let tail: String = w[0].chars().rev().take(CHUNK_OVERLAP).collect::<Vec<_>>().into_iter().rev().collect();
+            assert!(w[1].starts_with(&tail), "chunks must overlap by CHUNK_OVERLAP chars");
+        }
+        assert_eq!(chunks("short", 1024), vec!["short"]);
+    }
+
+    #[test]
+    fn a_zero_chunk_size_does_not_panic() {
+        // Reachable only through an unvalidated `max_payload = 0` (`Shield::new`).
+        let cs = chunks("ab\u{20ac}", 0);
+        assert_eq!(cs.concat(), "ab\u{20ac}");
+        assert!(cs.iter().all(|c| c.chars().count() == 1));
+        assert_eq!(chunks("", 0), vec![""]);
+    }
+
+    #[test]
+    fn base64_with_plus_decodes() {
+        // base64 of `<svg onload=alert(1)>>` contains '+'
+        let n = norm("PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+Pg==");
+        assert!(n.text.contains("<svg onload=alert(1)>"), "got: {}", n.text);
+    }
+
+    #[test]
+    fn decoders_can_be_disabled() {
+        let opts = Options { disabled: Disabled::resolve(&["decode.entity".into()]), ..Options::default() };
+        assert!(normalize("&lt;script&gt;", &opts).text.contains("&lt;script&gt;"));
+        let opts = Options { disabled: Disabled::resolve(&["decode.esc-hex".into()]), ..Options::default() };
+        assert!(normalize("\\x3cscript", &opts).text.contains("\\x3cscript"));
+    }
+
+    #[test]
+    fn one_bad_byte_does_not_disable_url_decoding() {
+        let n = norm("admin%27%20or%201%3D1--%20&x=%ff");
+        assert!(n.text.contains("admin' or 1=1"), "got: {}", n.text);
+    }
+
+    #[test]
+    fn percent_decode_lossy_cases() {
+        assert_eq!(percent_decode_lossy("a%41%2"), "aA%2");
+        assert_eq!(percent_decode_lossy("%ff"), "\u{fffd}");
+        assert_eq!(percent_decode_lossy("%zz"), "%zz");
+    }
+
+    #[test]
+    fn disabling_percent_decoding_leaves_the_field_encoded() {
+        let opts = Options { disabled: Disabled::resolve(&["decode.percent-lossy".to_string()]), ..Options::default() };
+        assert_eq!(normalize("a%41", &opts).text, "a%41");
+    }
+
+    #[test]
     fn url_decodes_union_select() {
         let n = norm("%55NION%20%53ELECT");
         assert!(n.text.contains("union select"), "got: {}", n.text);
@@ -445,6 +669,57 @@ mod tests {
         let out = canonicalize_ws_comments("1=1 #dropme", &mut f2);
         assert_eq!(out, "1=1");
         assert!(f2.had_comment);
+    }
+
+    #[test]
+    fn capped_fold_matches_the_full_fold() {
+        for s in ["", "abc", "\u{FDFA}\u{FDFA}x", "\u{FF41}\u{0430}e\u{301}", "\u{FB01}\u{2460}"] {
+            let full: Vec<char> = fold_unicode(s).chars().collect();
+            for cap in 0..=full.len() + 2 {
+                let want: String = full.iter().take(cap).collect();
+                assert_eq!(fold_unicode_capped(s, cap), (want, full.len() > cap), "{s:?} cap {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_cuts_exactly_when_the_fold_exceeds_the_cap() {
+        let opts = Options { max_payload: 1024, ..Options::default() };
+        let fdfa = "\u{FDFA}".repeat(56); // folds to 1,008 chars
+        let fits = normalize(&format!("{fdfa}{}", "a".repeat(16)), &opts);
+        assert!(!fits.truncated);
+        assert_eq!(fits.work, 1024);
+        let cut = normalize(&format!("{fdfa}{}", "a".repeat(17)), &opts);
+        assert!(cut.truncated);
+        assert_eq!(cut.work, 1024);
+        assert_eq!(normalize("abc", &opts).work, 3);
+        let uncut = format!("{fdfa}{}", "a".repeat(16));
+        let d = decode(&uncut, &opts);
+        let n = fold_unless_cut(&d, &d.text, &opts).map(|n| n.text);
+        assert_eq!(n, Ok(normalize(&uncut, &opts).text));
+        let d = decode(&format!("{fdfa}{}", "a".repeat(17)), &opts);
+        assert_eq!(fold_unless_cut(&d, &d.text, &opts).map(|n| n.work), Err(1024));
+    }
+
+    #[test]
+    fn a_decoded_part_folds_with_the_pieces_flags() {
+        // Halves of a decoded piece keep its layers and flags; only the fold differs.
+        let d = decode("%3Csvg%20onload%3Dalert(1)%3E\u{0430}", &Options::default());
+        assert_eq!(d.layers, 1);
+        let part = fold(&d, &d.text[..4], &Options::default());
+        assert_eq!(part.text, "<svg");
+        assert_eq!(part.layers, 1);
+        assert!(part.flags.mixed_script);
+        assert!(!part.truncated);
+    }
+
+    #[test]
+    fn work_bound_covers_the_largest_expansion() {
+        for k in [0usize, 1, 10, 56, 57, 2000] {
+            let s = "\u{FDFA}".repeat(k);
+            let opts = Options { max_payload: 1024, ..Options::default() };
+            assert!(normalize(&s, &opts).work <= work_bound(k, 1024), "k {k}");
+        }
     }
 
     #[test]
