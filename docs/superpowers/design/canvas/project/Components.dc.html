@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Venusflytrap design system</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#76A6FF}a:hover{color:#93B9FF}
+</style>
+</helmet>
+<div style="width: 1440px; height: 1040px; box-sizing: border-box; padding: 32px; display: flex; gap: 24px; background: #101215; font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums">
+  <sc-for list="{{themes}}" as="t" hint-placeholder-count="2">
+    <section aria-label="{{t.name}} theme" style="flex: 1; box-sizing: border-box; padding: 24px; border-radius: 18px; background: {{t.base}}; color: {{t.text}}; box-shadow: {{t.shadow3}}; display: flex; flex-direction: column; gap: 20px">
+      <div style="display: flex; align-items: baseline; justify-content: space-between">
+        <h2 style="margin: 0; font-size: 20px; line-height: 28px; font-weight: 600">{{t.name}} theme</h2>
+        <span style="font-size: 12px; color: {{t.text2}}">{{t.source}}</span>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Verdicts · glyph + word, never colour alone</span>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap">
+          <sc-for list="{{t.verdicts}}" as="v" hint-placeholder-count="4">
+            <span style="display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 4px; background: {{v.bg}}; color: {{v.fg}}; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="{{v.glyph}}"></path></svg>{{v.label}}
+            </span>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Kill-chain stages · numbered shapes</span>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap">
+          <sc-for list="{{t.stages}}" as="s" hint-placeholder-count="5">
+            <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 4px; background: {{s.bg}}; color: {{s.fg}}; font-size: 12px; font-weight: 600">
+              <span style="display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 10px; font-weight: 700; background: {{s.badgeBg}}; color: {{s.badgeFg}}; border: {{s.badgeBorder}}; border-radius: {{s.radius}}; transform: {{s.tf}}; box-sizing: border-box"><span style="transform: {{s.untf}}">{{s.n}}</span></span>{{s.label}}
+            </span>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Buttons</span>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
+          <button type="button" style="height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: {{t.accent}}; color: {{t.onAccent}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Apply config</button>
+          <button type="button" style="height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: {{t.accent}}; color: {{t.onAccent}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}, {{t.glowHover}}; cursor: pointer">Hover</button>
+          <button type="button" style="height: 36px; padding: 0 16px; border-radius: 18px; border: 1px solid {{t.borderStrong}}; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; outline: 2px solid {{t.focus}}; outline-offset: 2px; cursor: pointer">Focus</button>
+          <button type="button" style="height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: {{t.danger}}; color: {{t.onDanger}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Ban 1 h</button>
+          <button type="button" disabled style="height: 36px; padding: 0 16px; border-radius: 18px; border: 1px solid {{t.borderStrong}}; background: {{t.sunken}}; color: {{t.disabled}}; font: inherit; font-weight: 500; cursor: not-allowed">Disabled</button>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+        <div style="display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Mode switch</span>
+          <div style="display: flex; align-items: center; gap: 10px">
+            <span role="switch" aria-checked="true" aria-label="Enforce" style="width: 44px; height: 24px; border-radius: 999px; background: {{t.accent}}; display: inline-flex; align-items: center; justify-content: flex-end; padding: 0 3px; box-sizing: border-box; box-shadow: {{t.glowHover}}"><span style="width: 18px; height: 18px; border-radius: 999px; background: {{t.onAccent}}"></span></span>
+            <span style="font-weight: 500">Enforce</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px">
+            <span role="switch" aria-checked="false" aria-label="Monitor only" style="width: 44px; height: 24px; border-radius: 999px; background: {{t.sunken}}; border: 1px solid {{t.borderStrong}}; display: inline-flex; align-items: center; padding: 0 3px; box-sizing: border-box"><span style="width: 18px; height: 18px; border-radius: 999px; background: {{t.muted}}"></span></span>
+            <span style="font-weight: 500; color: {{t.text2}}">Monitor only</span>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Thresholds · scoring.*_at</span>
+          <div style="position: relative; height: 40px">
+            <div style="position: absolute; left: 0; right: 0; top: 10px; height: 4px; border-radius: 2px; background: {{t.sunken}}; box-shadow: {{t.insetShadow}}"></div>
+            <div style="position: absolute; left: 0; width: 40%; top: 18px; height: 3px; background: {{t.allowLine}}"></div>
+            <div style="position: absolute; left: 40%; width: 30%; top: 18px; height: 3px; background: {{t.monitorLine}}"></div>
+            <div style="position: absolute; left: 70%; width: 20%; top: 18px; height: 3px; background: {{t.challengeLine}}"></div>
+            <div style="position: absolute; left: 90%; width: 10%; top: 18px; height: 3px; background: {{t.blockLine}}"></div>
+            <span style="position: absolute; left: calc(70% - 9px); top: 3px; width: 18px; height: 18px; border-radius: 999px; background: {{t.attentionFill}}; border: 1.5px solid {{t.attention}}; box-shadow: {{t.shadow1}}; box-sizing: border-box"></span>
+            <span style="position: absolute; left: calc(90% - 9px); top: 3px; width: 18px; height: 18px; border-radius: 999px; background: {{t.attentionFill}}; border: 1.5px solid {{t.attention}}; box-shadow: {{t.shadow1}}; box-sizing: border-box"></span>
+            <span style="position: absolute; left: 0; top: 24px; font-size: 12px; color: {{t.text2}}">0</span>
+            <span style="position: absolute; left: calc(40% - 8px); top: 24px; font-size: 12px; color: {{t.text2}}">40</span>
+            <span style="position: absolute; left: calc(70% - 8px); top: 24px; font-size: 12px; color: {{t.text2}}">70</span>
+            <span style="position: absolute; left: calc(90% - 8px); top: 24px; font-size: 12px; color: {{t.text2}}">90</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px">
+        <div style="border-radius: 12px; padding: 12px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow1}}; border: 0.5px solid {{t.hairline}}; border-bottom: 2px solid {{t.blockLine}}">
+          <div style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: {{t.text2}}">Active bans</div>
+          <div style="font-size: 28px; line-height: 32px; font-weight: 600">7</div>
+          <div style="font-size: 12px; color: {{t.text2}}">2 expire in &lt; 10 min</div>
+        </div>
+        <div role="status" style="border-radius: 12px; padding: 12px 16px; background: {{t.raisedGlass}}; box-shadow: {{t.shadow2}}, inset 3px 0 0 {{t.allowLine}}; border: 0.5px solid {{t.hairline}}; display: flex; align-items: center; gap: 10px">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{t.allowFg}}" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m8 12 3 3 5-6"></path></svg>
+          <span>Config rev 44 applied</span>
+        </div>
+      </div>
+
+      <div role="dialog" aria-label="Confirm ban" style="border-radius: 18px; padding: 20px; background: {{t.overlay}}; box-shadow: {{t.shadow3}}; border: 0.5px solid {{t.hairline}}; display: flex; flex-direction: column; gap: 12px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="{{t.danger}}" stroke-width="1.6" aria-hidden="true"><path d="M8 2h8l6 6v8l-6 6H8l-6-6V8zM12 8v5M12 16h.01"></path></svg>
+          <span style="font-size: 18px; line-height: 26px; font-weight: 600">Ban 203.0.113.9 for 1 h?</span>
+        </div>
+        <span style="color: {{t.text2}}">Its requests get 403 until 11:35. Allow-listed sources are never banned.</span>
+        <div style="display: flex; justify-content: flex-end; gap: 8px">
+          <button type="button" style="height: 36px; padding: 0 16px; border-radius: 18px; border: 1px solid {{t.borderStrong}}; background: {{t.raised}}; color: {{t.text}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; outline: 2px solid {{t.focus}}; outline-offset: 2px; cursor: pointer">Cancel</button>
+          <button type="button" style="height: 36px; padding: 0 16px; border-radius: 18px; border: 0; background: {{t.danger}}; color: {{t.onDanger}}; font: inherit; font-weight: 500; box-shadow: {{t.shadow1}}; cursor: pointer">Ban for 1 h</button>
+        </div>
+      </div>
+    </section>
+  </sc-for>
+
+  <aside aria-label="Tokens" style="width: 260px; flex-shrink: 0; box-sizing: border-box; padding: 20px; border-radius: 18px; background: #252B36; color: #ECEEF2; box-shadow: 0 6px 12px rgb(0 0 0/.45), 0 28px 56px rgb(0 0 0/.55), inset 0 1px 0 rgb(255 255 255/.10); display: flex; flex-direction: column; gap: 16px; font-size: 13px">
+    <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #B9BFCA">Tokens</span>
+    <sc-for list="{{tokenGroups}}" as="g" hint-placeholder-count="5">
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <span style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #B9BFCA">{{g.title}}</span>
+        <sc-for list="{{g.items}}" as="i" hint-placeholder-count="4">
+          <div style="display: flex; justify-content: space-between; gap: 8px"><span>{{i.k}}</span><span style="font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; color: #B9BFCA">{{i.v}}</span></div>
+        </sc-for>
+      </div>
+    </sc-for>
+    <span style="margin-top: auto; font-size: 12px; color: #B9BFCA">All text pairs ≥ 4.5:1; lines, focus rings and control borders ≥ 3:1 (computed, both themes).</span>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1040}}'>
+class Component extends DCLogic {
+  theme(dark) {
+    const g = {
+      allow: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6',
+      monitor: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+      challenge: 'M12 3 2 21h20L12 3zM12 10v5M12 18h.01',
+      block: 'M8 2h8l6 6v8l-6 6H8l-6-6V8zM9 9l6 6M15 9l-6 6'
+    };
+    const c = dark ? {
+      name: 'Dark', source: 'from reference 1 · charcoal frosted glass',
+      base: '#17191D', sunken: '#101215', raised: '#252B36', raisedGlass: 'rgb(37 43 54 / .88)', overlay: '#2D3442', text: '#ECEEF2', text2: '#B9BFCA', muted: '#9AA2B0', disabled: '#6C7585',
+      hairline: 'rgb(255 255 255 / .08)', borderStrong: '#77808F', focus: '#76A6FF', accent: '#76A6FF', onAccent: '#0A1430', danger: '#FF8A80', onDanger: '#2A0705',
+      attention: '#E6BD68', attentionFill: '#E6BD68',
+      shadow1: '0 1px 2px rgb(0 0 0/.40), 0 2px 8px rgb(0 0 0/.28), inset 0 1px 0 rgb(255 255 255/.06), inset 0 -1px 0 rgb(0 0 0/.30)',
+      shadow2: '0 2px 4px rgb(0 0 0/.40), 0 10px 24px rgb(0 0 0/.40), inset 0 1px 0 rgb(255 255 255/.08), inset 0 -1px 0 rgb(0 0 0/.35)',
+      shadow3: '0 6px 12px rgb(0 0 0/.45), 0 28px 56px rgb(0 0 0/.55), inset 0 1px 0 rgb(255 255 255/.10), inset 0 -1px 0 rgb(0 0 0/.40)',
+      insetShadow: 'inset 0 2px 5px rgb(0 0 0/.55), inset 0 -1px 0 rgb(255 255 255/.05)', glowHover: '0 0 12px rgb(118 166 255/.35)',
+      allowFg: '#7FD99D', allowLine: '#5FC27F', monitorLine: '#9B93FF', challengeLine: '#E0AE4C', blockLine: '#FF6F65',
+      v: [['Allow', '#7FD99D', '#173528'], ['Monitor', '#B0A9FF', '#29275A'], ['Challenge', '#F2C46B', '#3B2E10'], ['Block', '#FF928A', '#4A1F1C']],
+      s: [['Clean', '#B9BFCA', '#2B303A'], ['Recon', '#6CCFD8', '#14343A'], ['Enumeration', '#E9D06A', '#373214'], ['Exploitation', '#FFAA6B', '#44280E'], ['Exfiltration', '#FF92B4', '#47182B']]
+    } : {
+      name: 'Light', source: 'from reference 2 · warm-grey operations board',
+      base: '#D6D1CB', sunken: '#CAC4BD', raised: '#EEEBE7', raisedGlass: 'rgb(238 235 231 / .80)', overlay: '#F7F5F2', text: '#1E1B18', text2: '#48423C', muted: '#565049', disabled: '#8C847B',
+      hairline: 'rgb(30 27 24 / .12)', borderStrong: '#7A7269', focus: '#2353B3', accent: '#2353B3', onAccent: '#FFFFFF', danger: '#B3261E', onDanger: '#FFFFFF',
+      attention: '#7A4F00', attentionFill: '#E9B04A',
+      shadow1: '0 1px 2px rgb(60 48 36/.10), 0 2px 6px rgb(60 48 36/.08), inset 0 1px 0 rgb(255 255 255/.70), inset 0 -1px 0 rgb(60 48 36/.06)',
+      shadow2: '0 2px 4px rgb(60 48 36/.10), 0 8px 20px rgb(60 48 36/.14), inset 0 1px 0 rgb(255 255 255/.75), inset 0 -1px 0 rgb(60 48 36/.08)',
+      shadow3: '0 4px 8px rgb(60 48 36/.12), 0 24px 48px rgb(60 48 36/.22), inset 0 1px 0 rgb(255 255 255/.80), inset 0 -1px 0 rgb(60 48 36/.10)',
+      insetShadow: 'inset 0 2px 4px rgb(60 48 36/.16), inset 0 -1px 0 rgb(255 255 255/.60)', glowHover: '0 0 10px rgb(35 83 179/.22)',
+      allowFg: '#1D6B3A', allowLine: '#2A7444', monitorLine: '#5A4FC0', challengeLine: '#9A5C00', blockLine: '#C0322A',
+      v: [['Allow', '#1D6B3A', '#D3EAD9'], ['Monitor', '#4337A3', '#E1DDF6'], ['Challenge', '#8A4F00', '#F5E2BF'], ['Block', '#A3221A', '#F6D5D1']],
+      s: [['Clean', '#55504A', '#E1DDD8'], ['Recon', '#0F5F6B', '#CFE7EA'], ['Enumeration', '#6E5600', '#F0E5B5'], ['Exploitation', '#9A440A', '#F7DBC5'], ['Exfiltration', '#9C1A3C', '#F5D2DC']]
+    };
+    const glyphs = [g.allow, g.monitor, g.challenge, g.block];
+    c.verdicts = c.v.map(([label, fg, bg], i) => ({ label, fg, bg, glyph: glyphs[i] }));
+    const shapes = [['–', 'circle', true], ['1', 'circle'], ['2', 'square'], ['3', 'diamond'], ['4', 'hex']];
+    c.stages = c.s.map(([label, fg, bg], i) => {
+      const [n, shape, hollow] = shapes[i];
+      return { label, fg, bg, n, badgeBg: hollow ? 'transparent' : fg, badgeFg: hollow ? fg : bg, badgeBorder: hollow ? '1.5px solid ' + fg : '0',
+        radius: shape === 'circle' ? '999px' : (shape === 'hex' ? '5px' : '2px'), tf: shape === 'diamond' ? 'rotate(45deg) scale(.82)' : 'none', untf: shape === 'diamond' ? 'rotate(-45deg)' : 'none' };
+    });
+    return c;
+  }
+  renderVals() {
+    const tokenGroups = [
+      { title: 'Radius', items: [{ k: 'chips', v: '4px' }, { k: 'inputs · nav', v: '8px' }, { k: 'cards · tiles', v: '12px' }, { k: 'modals · pills', v: '18px' }] },
+      { title: 'Border', items: [{ k: 'hairline', v: '0.5px' }, { k: 'standard', v: '1px' }, { k: 'selected', v: '1.5px' }, { k: 'focus', v: '2px' }] },
+      { title: 'Elevation', items: [{ k: 'level 1', v: 'tiles, chips' }, { k: 'level 2', v: 'cards, top bar' }, { k: 'level 3', v: 'modal, detail' }] },
+      { title: 'Spacing', items: [{ k: 'scale', v: '4 8 12 16 24 32 48' }] },
+      { title: 'Type', items: [{ k: 'UI', v: 'Inter 4' }, { k: 'query · ids', v: 'JetBrains Mono' }, { k: 'KPI', v: '28 / 40 / 56' }] },
+      { title: 'Icons', items: [{ k: 'chips', v: '14px' }, { k: 'buttons · nav', v: '18px' }, { k: 'empty · modal', v: '22px' }] }
+    ];
+    return { themes: [this.theme(false), this.theme(true)], tokenGroups };
+  }
+}
+</script>
+</body>
+</html>
