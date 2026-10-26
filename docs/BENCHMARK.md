@@ -48,23 +48,23 @@ unreadable files counted as missed). The baselines read all 658 and have one fig
 
 | Engine | TP | FP | FN (656 / 658) | Recall (656 / 658) | Precision | F1 (656 / 658) | FP rate |
 |---|---|---|---|---|---|---|---|
-| Venusflytrap, library | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
-| Venusflytrap, serve, distinct | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
-| Venusflytrap, serve, pooled:100 | 284 | 271 | 372 / 374 | 43.29% / 43.16% | 51.17% | 0.4690 / 0.4683 | 0.82% |
+| Venusflytrap, library | 288 | 278 | 368 / 370 | 43.90% / 43.77% | 50.88% | 0.4713 / 0.4706 | 0.84% |
+| Venusflytrap, serve, distinct | 288 | 278 | 368 / 370 | 43.90% / 43.77% | 50.88% | 0.4713 / 0.4706 | 0.84% |
+| Venusflytrap, serve, pooled:100 | 288 | 278 | 368 / 370 | 43.90% / 43.77% | 50.88% | 0.4713 / 0.4706 | 0.84% |
 | Venusflytrap, serve, pooled:100, SP1 ban policy (before) | 446 | 15,848 | 210 / 212 | 67.99% / 67.78% | 2.74% | 0.0526 / 0.0526 | 47.71% |
 | libinjection (Python-parsed input) | 214 | 93 | 444 | 32.52% | 69.71% | 0.4435 | 0.28% |
 | Regex baseline (Python-parsed input) | 127 | 126 | 531 | 19.30% | 50.20% | 0.2788 | 0.38% |
 
-These rows are from the tree after the final-review fix wave, which made query keys, cookie names and
-`Accept-Encoding` inspected fields (they were forwarded but not inspected before). Against the previous
-measurement (283 TP / 269 FP library) that added one true positive and two false positives, all three
-from query keys; details in `eval/RESULTS-SP1.md`, "Final review fix wave".
+The first three rows are measured on the combined tree: SP1, recall-lift Plan A and the ban-policy
+redesign together (merge `887760b`). On SP1 alone the library path measured 284 TP / 271 FP; recall-lift
+Plan A adds 4 true positives and 7 false positives (details in `eval/RESULTS-RECALL.md`). The "before"
+row is SP1's ban policy on the SP1-only tree.
 
 How to read this:
 
 - The engine detects about 43% of this corpus's malicious requests, and about half of what it blocks is
-  benign. That is a weak result in absolute terms. It finds more attacks than libinjection (284 vs 214
-  true positives) but raises more false positives (271 vs 93), so libinjection has the higher precision.
+  benign. That is a weak result in absolute terms. It finds more attacks than libinjection (288 vs 214
+  true positives) but raises more false positives (278 vs 93), so libinjection has the higher precision.
 - **Serve-distinct makes the same block/allow decision as library**, request for request. With one
   source per request, state never changes a block/allow decision, which is the expected check. The
   verdict labels are not all identical: 10 malicious requests are Challenge in the library and Block in
@@ -78,6 +78,8 @@ How to read this:
 ## 3. Ban effects
 
 Before = SP1's ban policy; after = the shipped defaults (hostile-share gate, no single-exfiltration ban).
+The distinct and pooled:100 "after" values were re-measured on the combined tree and are unchanged; the
+pooled:10 and pooled:1000 rows were measured on the SP1 tree with the redesigned policy.
 
 | Run | benign sources | benign sources banned (before / after) | collateral FP (before / after) | bans from allowed requests | invariant violations |
 |---|---|---|---|---|---|
@@ -97,7 +99,7 @@ Before = SP1's ban policy; after = the shipped defaults (hostile-share gate, no 
 **Acceptance check.** The SP1 check "collateral FP is no larger than request-level FP" failed under
 SP1's policy (pooled:100: 15,577 against 271): one blocked exfiltration request banned a shared source
 for an hour, and 80 of 100 shared sources were banned. With the redesigned policy it **passes**: 0
-against 271. At pooled:1000 one source, which sends about one request every 100 s, was banned by its
+against 271 on the SP1 tree, and 0 against 278 on the combined tree. At pooled:1000 one source, which sends about one request every 100 s, was banned by its
 third exploitation block within 10 minutes, and that 1 h ban blocked 8 later benign requests. Before
 choosing, shorter first TTLs (60 s: 1,943 collateral), a higher count threshold (5 blocks: 0 at
 pooled:100 but 29,923 at pooled:10) and honeypot-only bans (0, but the corpus has no honeypot hits)
@@ -117,7 +119,7 @@ traffic, so only recall is meaningful. Retention is mutant recall divided by see
 
 | Engine | Seeds detected | Mutants detected | Retention |
 |---|---|---|---|
-| Venusflytrap, final tree | 19 / 22 (86.36%) | 548 / 660 (83.03%) | 96.1% |
+| Venusflytrap, combined tree (SP1 + recall-lift + ban redesign) | 19 / 22 (86.36%) | 548 / 660 (83.03%) | 96.1% |
 | Venusflytrap, start of SP1 (Task 0) | 19 / 22 (86.36%) | 548 / 660 (83.03%) | 96.1% |
 | libinjection (original run) | not re-measured | not re-measured | 57% |
 | Regex baseline (original run) | not re-measured | not re-measured | 54% |
@@ -140,6 +142,13 @@ same inspection.
 | Library (`Shield::inspect`), run 1 / run 2 | 72 / 70 | 224 / 213 | 659 / 645 |
 | Serve, distinct (`Pipeline::decide`), run 1 / run 2 | 70 / 73 | 217 / 233 | 641 / 715 |
 | Serve, pooled:100, SP1 ban policy (not comparable) | 47 | 214 | 458 |
+| Combined tree, single run: library / serve distinct / serve pooled:100 | 91 / 94 / 77 | 274 / 286 / 241 | 833 / 815 / 692 |
+
+The combined-tree row is one run each, on the same machine, after recall-lift Plan A added chunked
+inspection and windowed graph analysis. It is about 20 to 30% slower than SP1 alone at p50 and p95; this
+was not A/B-tested against the SP1 binary in one session, so part of the gap may be machine state. The
+pooled:100 run is now comparable to the others (no source is banned) and is still the fastest, which is
+not explained here.
 
 The library and serve-distinct rows come from an A/B run on one machine state, interleaving the binary
 from before the final-review fix wave with the current one. The earlier binary measured 64 / 191 / 653
@@ -159,7 +168,8 @@ above the 0.75 acceptance floor, and no run shows the stateful path slower than 
 
 ## 6. TCP replay equivalence
 
-Every replayed sample's proxy answer is compared with the in-process decision: 403 must equal
+Both replays below were run on the SP1 tree, before recall-lift and the ban-policy redesign were merged;
+they have not been repeated on the combined tree. Every replayed sample's proxy answer is compared with the in-process decision: 403 must equal
 Block/Challenge and 200 must equal Allow/Monitor. A 400, 413, 431 or 501 from the proxy's HTTP front end
 is counted as `proxy_rejected`, not as a mismatch. Each sample uses its own source (`X-Forwarded-For`
 from a trusted loopback peer), `Connection: close`, and an exact `Content-Length`. Mismatches are
@@ -182,7 +192,7 @@ counted by direction:
 **No request that the engine stops was let through, and no observed allowed request was refused.** Both
 decision-disagreement buckets are 0 over the full corpus. Every in-process Block/Challenge is accounted
 for: 553 answered 403 and 2 more (`00/06/...`, `ec/98/...`) were refused with 400 by the HTTP front end
-before inspection; 555 is also the serve-distinct blocked count (284 TP + 271 FP).
+before inspection; 555 is also the serve-distinct blocked count (284 TP + 271 FP, SP1 tree).
 
 The run is still not clean in the harness sense: 776 samples did not produce a 200 that could be
 compared directly.
