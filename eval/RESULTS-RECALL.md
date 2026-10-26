@@ -311,3 +311,19 @@ The fix does not change the cost beyond run-to-run spread (about ±10%); the mix
 Documentation and minor fixes from the same review: "lossless" is qualified as covering text, not constructs (C3 above, spec §7.3, `CHUNK_OVERLAP` and the shield comments); the M2a change-vs-M0 deltas are recomputed from unrounded values; the M2a reconciliation sentence accounts for the 2 rows shared by C2 and C3; the sink registry no longer claims an alias mechanism; the `decode_once` stage order is corrected; `chain.ban` is documented as a deliberate non-registry construct; the unused `percent-encoding` dependency is removed; `chunk_ranges(s, 0)` no longer panics; and `max_inspect_bytes` / `max_normalize_work` document that they must scale with the proxy's `limits.max_body`. After both commits: `cargo test --workspace` 182 passed, 0 failed, 2 ignored; `cargo clippy --all-targets -- -D warnings` clean.
 
 Recorded for later, not fixed here: whole-field base64 longer than 64 KiB can still be lost at a chunk seam when a multi-byte char straddles the chunk edge (I-1, Plan B); seam stitching in normalized-token space (I-2, Plan B); `canonicalize_ws_comments` applies SQL comment rules to every field, so `x--><script>alert(1)</script>` is allowed (I-4, P0, first item of Plan B); `spawn_blocking` and an inspection time budget in the proxy (I-3, SP1).
+
+## Merge with SP1's final tip (c157149) — 2026-10-26
+
+`recall-lift` (6005bc0) merged with `origin/sp1-serve-hardening` (c157149: six commits after the branch point 3ae8a6a, incl. a28351f, which inspects query keys, cookie names and Accept-Encoding). One textual conflict (`request.rs`: SP1's private `percent_decode_lossy` stand-in dropped in favour of `normalize::percent_decode_lossy`; SP1's cookie helpers kept). One semantic conflict: `overlap_is_charged_once` set the byte budget to exactly one 3,000-byte query value, but the query key `q` is now inspected as its own field first, so the budget became 3,000 + 1 (the test still separates once-charging, which needs 3,001, from double-charging, ~3,768). `cargo test --workspace`: 195 passed, 0 failed, 2 ignored; clippy clean.
+
+Same corpus, split and commands as M2a (release build). Held-out not scored separately (full minus dev gives its totals).
+
+| Run | TP | FP | TN | FN | Recall | Precision | FP rate | p50/p95/p99 µs |
+|---|---|---|---|---|---|---|---|---|
+| library, full | 288 | 278 | 32941 | 368 | 0.4390 | 0.5088 | 0.0084 | 97/289/830 |
+| serve, full | 288 | 278 | 32941 | 368 | 0.4390 | 0.5088 | 0.0084 | 89/270/783 |
+| library, dev | 149 | 147 | 16463 | 180 | 0.4529 | 0.5034 | 0.0089 | 104/311/917 |
+
+Recall is over 656 scored attacks on the full corpus (2 unreadable held-out `.black` files). Serve mode: benign_sources_banned 72, collateral_fp 0, bans_from_allowed 0 (unchanged). Robustness: seeds 19/22, mutants 548/660, retained 96.1% — 0 decision diffs vs M2a.
+
+The two branches' effects are additive. Full corpus vs recall-lift M2a (287 / 276): +1 TP, +2 FP, which is SP1's query-key change as SP1 measured it; vs SP1's tip alone (284 / 271, SP1's RESULTS): +4 TP, +7 FP, which is recall-lift's M2a delta vs M0. Decision diffs vs M2a on the full corpus: 735 — 3 attack-verdict flips (1 malicious Allow→Block, 2 benign Allow→Block), 61 benign Allow→Monitor, 671 score-only (666 benign, 5 malicious); few rows gain a construct, so most shifts come from the extra evidence the newly inspected fields (query keys, Accept-Encoding) add. Dev FP rate 147 / 16,610 = 0.89%, within the 1.0% ceiling. p95 is higher than M2a's 216 µs on this run (289 µs); SP1 measured ~10% p50 cost for the extra fields, and this run was not repeated, so no latency claim is made beyond p95 < 1 ms.
