@@ -409,10 +409,96 @@ pub struct TcpReport {
     /// The proxy refused the request at the HTTP layer (400/413/431/501) while
     /// the lenient in-process parser accepted it.
     pub proxy_rejected: u64,
+    /// Total mismatches; the sum of the five `mismatch_*` buckets below.
     pub mismatched: u64,
+    /// In-process Block/Challenge but the proxy answered 200: a request the
+    /// engine stops reached the upstream. Must be 0; any other value is critical.
+    pub mismatch_block_vs_proxy_allow: u64,
+    /// In-process Allow/Monitor but the proxy answered 403.
+    pub mismatch_allow_vs_proxy_403: u64,
+    /// In-process Allow/Monitor and the proxy answered 502/504: same decision,
+    /// then the upstream (the stub) could not be reached or timed out.
+    pub mismatch_upstream_5xx: u64,
+    /// Connect, write or read failed with no parsable status.
+    pub mismatch_io: u64,
+    /// Any other status/decision pair.
+    pub mismatch_other: u64,
+    /// Up to 20 examples per mismatch bucket, as `<bucket> <rel> ...`.
     pub mismatch_examples: Vec<String>,
     /// First 20 proxy-rejected files, as `rel status=<code>`.
     pub proxy_rejected_examples: Vec<String>,
+}
+
+/// How one replayed sample compares with the in-process decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayOutcome {
+    MatchedBlock,
+    MatchedAllow,
+    ProxyRejected,
+    BlockVsProxyAllow,
+    AllowVsProxy403,
+    Upstream5xx,
+    Io,
+    Other,
+}
+
+impl ReplayOutcome {
+    /// `blocked`: the in-process verdict is Block/Challenge.
+    pub fn classify(status: &Result<u16, String>, blocked: bool) -> Self {
+        match (status, blocked) {
+            (Err(_), _) => ReplayOutcome::Io,
+            (Ok(403), true) => ReplayOutcome::MatchedBlock,
+            (Ok(200), false) => ReplayOutcome::MatchedAllow,
+            (Ok(400 | 413 | 431 | 501), _) => ReplayOutcome::ProxyRejected,
+            (Ok(200), true) => ReplayOutcome::BlockVsProxyAllow,
+            (Ok(403), false) => ReplayOutcome::AllowVsProxy403,
+            (Ok(502 | 504), false) => ReplayOutcome::Upstream5xx,
+            (Ok(_), _) => ReplayOutcome::Other,
+        }
+    }
+
+    fn bucket(self) -> &'static str {
+        match self {
+            ReplayOutcome::MatchedBlock => "matched_block",
+            ReplayOutcome::MatchedAllow => "matched_allow",
+            ReplayOutcome::ProxyRejected => "proxy_rejected",
+            ReplayOutcome::BlockVsProxyAllow => "mismatch_block_vs_proxy_allow",
+            ReplayOutcome::AllowVsProxy403 => "mismatch_allow_vs_proxy_403",
+            ReplayOutcome::Upstream5xx => "mismatch_upstream_5xx",
+            ReplayOutcome::Io => "mismatch_io",
+            ReplayOutcome::Other => "mismatch_other",
+        }
+    }
+}
+
+impl TcpReport {
+    fn add(&mut self, outcome: ReplayOutcome, example: impl FnOnce() -> String) {
+        let n = match outcome {
+            ReplayOutcome::MatchedBlock => &mut self.matched_block,
+            ReplayOutcome::MatchedAllow => &mut self.matched_allow,
+            ReplayOutcome::ProxyRejected => {
+                if self.proxy_rejected_examples.len() < 20 {
+                    self.proxy_rejected_examples.push(example());
+                }
+                self.proxy_rejected += 1;
+                return;
+            }
+            ReplayOutcome::BlockVsProxyAllow => &mut self.mismatch_block_vs_proxy_allow,
+            ReplayOutcome::AllowVsProxy403 => &mut self.mismatch_allow_vs_proxy_403,
+            ReplayOutcome::Upstream5xx => &mut self.mismatch_upstream_5xx,
+            ReplayOutcome::Io => &mut self.mismatch_io,
+            ReplayOutcome::Other => &mut self.mismatch_other,
+        };
+        *n += 1;
+        let in_bucket = *n;
+        if matches!(outcome, ReplayOutcome::MatchedBlock | ReplayOutcome::MatchedAllow) {
+            return;
+        }
+        self.mismatched += 1;
+        if in_bucket <= 20 {
+            self.mismatch_examples.push(format!("{} {}", outcome.bucket(), example()));
+        }
+    }
 }
 
 const REPLAY_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -495,32 +581,11 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
             let status = send_and_read(proxy_addr, &raw, REPLAY_IO_TIMEOUT).await;
             r.replayed += 1;
             let blocked = attack(d.judgment.verdict);
-            let status = match status {
-                Ok(code) => code,
-                Err(e) => {
-                    r.mismatched += 1;
-                    if r.mismatch_examples.len() < 20 {
-                        r.mismatch_examples.push(format!("{} io_failure={e} in_process_block={blocked}", s.rel));
-                    }
-                    continue;
-                }
-            };
-            match (status, blocked) {
-                (403, true) => r.matched_block += 1,
-                (200, false) => r.matched_allow += 1,
-                (400 | 413 | 431 | 501, _) => {
-                    r.proxy_rejected += 1;
-                    if r.proxy_rejected_examples.len() < 20 {
-                        r.proxy_rejected_examples.push(format!("{} status={status}", s.rel));
-                    }
-                }
-                (code, blocked) => {
-                    r.mismatched += 1;
-                    if r.mismatch_examples.len() < 20 {
-                        r.mismatch_examples.push(format!("{} status={code} in_process_block={blocked}", s.rel));
-                    }
-                }
-            }
+            let outcome = ReplayOutcome::classify(&status, blocked);
+            r.add(outcome, || match &status {
+                Ok(code) => format!("{} status={code} in_process={:?} score={}", s.rel, d.judgment.verdict, d.judgment.score),
+                Err(e) => format!("{} io_failure={e} in_process={:?}", s.rel, d.judgment.verdict),
+            });
         }
         Ok(r)
     })
@@ -634,6 +699,47 @@ Host: x
         ];
         let r = run_tcp(Config::default(), &samples, 10).unwrap();
         assert_eq!((r.matched_allow, r.matched_block, r.mismatched, r.proxy_rejected), (1, 1, 0, 0), "{r:?}");
+    }
+
+    #[test]
+    fn replay_mismatches_are_bucketed_by_direction() {
+        use ReplayOutcome::*;
+        let ok = |c: u16| Ok::<u16, String>(c);
+        let cases = [
+            (ok(403), true, MatchedBlock),
+            (ok(200), false, MatchedAllow),
+            (ok(413), true, ProxyRejected),
+            (ok(400), false, ProxyRejected),
+            (ok(200), true, BlockVsProxyAllow),
+            (ok(403), false, AllowVsProxy403),
+            (ok(502), false, Upstream5xx),
+            (ok(504), false, Upstream5xx),
+            (ok(502), true, Other),
+            (ok(500), false, Other),
+            (Err("connect: refused".into()), true, Io),
+            (Err("write timeout".into()), false, Io),
+        ];
+        let mut r = TcpReport::default();
+        for (status, blocked, want) in cases {
+            let got = ReplayOutcome::classify(&status, blocked);
+            assert_eq!(got, want, "{status:?} blocked={blocked}");
+            r.add(got, || "x".into());
+        }
+        assert_eq!((r.matched_block, r.matched_allow, r.proxy_rejected), (1, 1, 2));
+        assert_eq!(
+            (r.mismatch_block_vs_proxy_allow, r.mismatch_allow_vs_proxy_403, r.mismatch_upstream_5xx, r.mismatch_io, r.mismatch_other),
+            (1, 1, 2, 2, 2)
+        );
+        assert_eq!(r.mismatched, 8);
+        assert_eq!(r.mismatch_examples.len(), 8);
+        assert!(r.mismatch_examples.iter().any(|e| e.starts_with("mismatch_block_vs_proxy_allow ")));
+        // Examples are capped per bucket, so a flood of one kind cannot hide another.
+        for _ in 0..50 {
+            r.add(Upstream5xx, || "y".into());
+        }
+        r.add(BlockVsProxyAllow, || "z".into());
+        assert!(r.mismatch_examples.contains(&"mismatch_block_vs_proxy_allow z".to_string()));
+        assert_eq!(r.mismatch_examples.iter().filter(|e| e.starts_with("mismatch_upstream_5xx")).count(), 20);
     }
 
     #[test]

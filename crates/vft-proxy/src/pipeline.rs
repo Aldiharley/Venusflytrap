@@ -1,6 +1,8 @@
 //! The data-plane decision function shared by the proxy handler and the eval:
-//! allow-list → ban fast-track → adapt → pure inspect (no lock) → sharded
-//! chain observe → finalize. No lock is held during inspection (H3).
+//! client address → allow-list → ban fast-track → adapt → pure inspect (no
+//! lock) → sharded chain observe → finalize. No lock is held during inspection
+//! (H3). The handler runs the fast-track alone ([`Pipeline::fast_track`])
+//! before reading the body.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -131,29 +133,61 @@ impl Pipeline {
         peer
     }
 
+    /// The chain key and ban eligibility of the client behind `peer`.
+    fn source(&self, peer: IpAddr, headers: &HeaderMap) -> Source {
+        let ip = self.client_ip(peer, headers);
+        Source {
+            ip,
+            key: SourceKey::new(ip, self.shield.config().chain.ipv6_prefix),
+            // An allow-listed source (checked on its canonical address) is
+            // inspected normally and is never banned, so a ban on its address
+            // or shared prefix cannot block it.
+            may_ban: !self.shield.intel().is_allowed(&canonical(ip)),
+        }
+    }
+
+    fn banned(&self, src: &Source, now_ms: u64) -> Option<Judgment> {
+        if !src.may_ban {
+            return None;
+        }
+        self.chain.active_ban(src.key, now_ms).map(|ban| self.shield.banned_judgment(&ban))
+    }
+
+    /// Spec §5.3 step 3: the ban fast-track from the request head alone, so
+    /// the handler can answer a banned source before reading its body. The
+    /// returned request has an empty body (it was never read). [`decide`]
+    /// applies the same check, so serve and eval cannot drift.
+    ///
+    /// [`decide`]: Pipeline::decide
+    pub fn fast_track(&self, parts: &Parts, peer: Option<IpAddr>, now_ms: u64) -> Option<Decision> {
+        let src = self.source(peer?, &parts.headers);
+        let judgment = self.banned(&src, now_ms)?;
+        let request = adapt::from_parts(parts, b"", Some(src.ip));
+        Some(Decision { request, judgment, src: Some(src.key) })
+    }
+
     pub fn decide(&self, parts: &Parts, body: &[u8], peer: Option<IpAddr>, now_ms: u64) -> Decision {
-        let ip = peer.map(|p| self.client_ip(p, &parts.headers));
-        let request = adapt::from_parts(parts, body, ip);
-        let Some(ip) = ip else {
+        let Some(peer) = peer else {
+            let request = adapt::from_parts(parts, body, None);
             let judgment = self.shield.inspect(&request);
             return Decision { request, judgment, src: None };
         };
-        let key = SourceKey::new(ip, self.shield.config().chain.ipv6_prefix);
-        // An allow-listed source (checked on its canonical address) is inspected
-        // normally and is never banned, so a ban on its address or shared prefix
-        // cannot block it.
-        let may_ban = !self.shield.intel().is_allowed(&canonical(ip));
-        if may_ban {
-            if let Some(ban) = self.chain.active_ban(key, now_ms) {
-                let judgment = self.shield.banned_judgment(&ban);
-                return Decision { request, judgment, src: Some(key) };
-            }
+        let src = self.source(peer, &parts.headers);
+        let request = adapt::from_parts(parts, body, Some(src.ip));
+        if let Some(judgment) = self.banned(&src, now_ms) {
+            return Decision { request, judgment, src: Some(src.key) };
         }
         let judgment = self.shield.inspect(&request);
-        let outcome = self.chain.observe(key, event_for(&judgment), now_ms, may_ban);
+        let outcome = self.chain.observe(src.key, event_for(&judgment), now_ms, src.may_ban);
         let judgment = self.shield.finalize(judgment, &outcome);
-        Decision { request, judgment, src: Some(key) }
+        Decision { request, judgment, src: Some(src.key) }
     }
+}
+
+struct Source {
+    ip: IpAddr,
+    key: SourceKey,
+    may_ban: bool,
 }
 
 #[cfg(test)]
@@ -220,6 +254,67 @@ mod tests {
         assert_eq!(d2.judgment.verdict, Verdict::Block);
         let other: IpAddr = "203.0.113.10".parse().unwrap();
         assert_eq!(p.decide(&parts("/", CHROME), b"", Some(other), 1_000).judgment.verdict, Verdict::Allow);
+    }
+
+    /// Every probe goes through `decide`; failures are collected so one run shows them all.
+    fn assert_all_blocked(probes: &[(&str, &[(&str, &str)])]) {
+        let p = pipeline();
+        let mut missed = Vec::new();
+        for (n, (uri, headers)) in probes.iter().enumerate() {
+            let peer = IpAddr::from([198, 51, 100, 100 + n as u8]);
+            let d = p.decide(&parts(uri, headers), b"", Some(peer), 0);
+            if !matches!(d.judgment.verdict, Verdict::Block | Verdict::Challenge) {
+                missed.push(format!("{uri} {headers:?}: {:?} {} {}", d.judgment.verdict, d.judgment.score, d.judgment.reason));
+            }
+        }
+        assert!(missed.is_empty(), "not blocked:\n{}", missed.join("\n"));
+    }
+
+    #[test]
+    fn cookie_names_and_unparsed_cookie_segments_are_inspected() {
+        // Final review C1: a segment without `=` and a cookie name are attacker bytes.
+        assert_all_blocked(&[
+            ("/x", &[("cookie", "1 union select password from users")]),
+            ("/x", &[("cookie", "<script>alert(1)</script>=1")]),
+            ("/x", &[("cookie", "a=1; 1 union select password from users")]),
+        ]);
+    }
+
+    #[test]
+    fn query_keys_and_accept_encoding_are_inspected() {
+        // Final review C2: query keys and Accept-Encoding are forwarded, so inspected.
+        assert_all_blocked(&[
+            ("/x?1%20union%20select%20password%20from%20users", &[]),
+            ("/x?1%20union%20select%20password%20from%20users=1", &[]),
+            ("/x?%3Cscript%3Ealert(1)%3C/script%3E", &[]),
+            ("/x", &[("accept-encoding", "1 union select password from users")]),
+        ]);
+    }
+
+    #[test]
+    fn real_browser_cookies_and_query_keys_stay_allowed() {
+        let p = pipeline();
+        let peer: IpAddr = "198.51.100.77".parse().unwrap();
+        for uri in ["/search?q=shoes&sort=price_asc&utm_source=news", "/p?flag", "/a?x[]=1&x[]=2"] {
+            let d = p.decide(&parts(uri, CHROME), b"", Some(peer), 0);
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "{uri}: {}", d.judgment.reason);
+        }
+    }
+
+    #[test]
+    fn fast_track_answers_banned_sources_from_the_head_and_agrees_with_decide() {
+        let p = pipeline();
+        let peer: IpAddr = "203.0.113.40".parse().unwrap();
+        let head = parts("/upload", CHROME);
+        assert!(p.fast_track(&head, Some(peer), 0).is_none(), "not banned yet");
+        assert!(p.fast_track(&head, None, 0).is_none(), "no peer, no source");
+        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(peer), 0).judgment.banned_source);
+        let ft = p.fast_track(&head, Some(peer), 1_000).expect("banned source is fast-tracked");
+        let d = p.decide(&head, b"x=1", Some(peer), 1_000);
+        assert_eq!((ft.judgment.verdict, ft.judgment.banned_source), (Verdict::Block, true));
+        assert_eq!((d.judgment.verdict, d.judgment.banned_source), (Verdict::Block, true));
+        assert_eq!(ft.src, d.src);
+        assert!(ft.request.body.is_empty());
     }
 
     #[test]

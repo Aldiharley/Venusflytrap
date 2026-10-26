@@ -204,13 +204,11 @@ fn render(corpus: &[Sample], results: &[EngineResult], seed: u64, n_each: usize)
         ));
     }
 
-    m.push_str("\n## Reading the result\n\n");
+    m.push_str("\n## Reading this\n\n");
     m.push_str(
-        "- The regex baseline should collapse on the obfuscated set (encoding/case/comment \
-         mutations) — this is claim C1 in RESEARCH.md, reproduced.\n\
-         - The tokenizer baseline recovers much of the recall but at a higher false-positive \
-         rate, because it flags lone dangerous tokens without checking that they form a \
-         reachable construct.\n",
+        "- These rows only show that every engine runs end to end on a synthetic corpus built \
+         from the payloads the detectors were written against. They are not evidence for or \
+         against any claim in RESEARCH.md; measured results are in docs/BENCHMARK.md.\n",
     );
     m
 }

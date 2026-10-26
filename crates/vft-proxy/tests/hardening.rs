@@ -267,3 +267,106 @@ async fn client_that_never_reads_is_dropped_at_max_connection_ms() {
     assert!(waited >= Duration::from_millis(450), "slot was not held by A: {waited:?}");
     drop(a);
 }
+
+async fn proxy_with_state(cfg: Config, upstream: std::net::SocketAddr) -> (std::net::SocketAddr, Arc<ProxyState>) {
+    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), true));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(serve_listener(state.clone(), l));
+    (addr, state)
+}
+
+fn forwarded_lines(up: &Stub, name: &str) -> Vec<String> {
+    let fwd = String::from_utf8_lossy(&up.last.lock().unwrap()).into_owned();
+    fwd.split("\r\n")
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn every_x_forwarded_for_line_is_kept_in_order_with_the_peer_appended() {
+    // Final review I3: two XFF lines from an untrusted peer must not collapse to the first.
+    let up = stub(true).await;
+    let p = proxy(short_cfg(), up.addr).await;
+    let raw = b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX-Forwarded-For: 198.51.100.1\r\nX-Forwarded-For: 198.51.100.2\r\n\r\n";
+    let resp = send(p, raw).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    assert_eq!(forwarded_lines(&up, "x-forwarded-for"), vec!["198.51.100.1, 198.51.100.2, 127.0.0.1".to_string()]);
+}
+
+const SPOOFED: &[u8] = b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX-Venusflytrap-Stage: Exfiltration\r\nX-Venusflytrap-Score: 77\r\nX-Venusflytrap-Verdict: Block\r\nX-VenusFlytrap-Other: 1\r\n\r\n";
+
+#[tokio::test]
+async fn client_decision_headers_never_reach_upstream_when_off() {
+    // Final review I4.
+    let up = stub(true).await;
+    let p = proxy(short_cfg(), up.addr).await;
+    let resp = send(p, SPOOFED).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let fwd = String::from_utf8_lossy(&up.last.lock().unwrap()).to_ascii_lowercase();
+    assert!(!fwd.contains("x-venusflytrap"), "{fwd}");
+}
+
+#[tokio::test]
+async fn upstream_mode_forwards_only_proxy_set_decision_headers() {
+    let up = stub(true).await;
+    let mut cfg = short_cfg();
+    cfg.proxy.decision_headers = vft_core::config::DecisionHeaders::Upstream;
+    let p = proxy(cfg, up.addr).await;
+    let resp = send(p, SPOOFED).await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let score = forwarded_lines(&up, "x-venusflytrap-score");
+    let verdict = forwarded_lines(&up, "x-venusflytrap-verdict");
+    assert_eq!(score.len(), 1, "{score:?}");
+    assert_ne!(score[0], "77", "client score forwarded");
+    assert_eq!(verdict.len(), 1, "{verdict:?}");
+    assert!(verdict[0] == "Allow" || verdict[0] == "Monitor", "{verdict:?}");
+    assert!(forwarded_lines(&up, "x-venusflytrap-stage").is_empty(), "client stage forwarded");
+    assert!(forwarded_lines(&up, "x-venusflytrap-other").is_empty());
+}
+
+#[tokio::test]
+async fn banned_source_gets_403_before_its_body_is_read() {
+    // Final review I8 (spec §5.3 step 3): the ban fast-track runs before the body read.
+    let up = stub(true).await;
+    let mut cfg = short_cfg();
+    cfg.limits.body_read_timeout_ms = 10_000;
+    let (p, state) = proxy_with_state(cfg, up.addr).await;
+    let me = vft_core::SourceKey::new("127.0.0.1".parse().unwrap(), 64);
+    state.pipeline.chain().ban(me, vft_core::BanCause::Manual, vft_proxy::now_ms());
+    let mut s = TcpStream::connect(p).await.unwrap();
+    // A large declared body that is never sent: only the fast-track can answer in time.
+    s.write_all(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 60000\r\nConnection: close\r\n\r\n").await.unwrap();
+    let t = Instant::now();
+    let (out, _) = read_until_closed(&mut s, Duration::from_secs(3)).await;
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+    assert!(out.ends_with("Request blocked.\n"), "{out}");
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert_eq!(up.conns.load(Ordering::SeqCst), 0);
+}
+
+const XXE_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<!DOCTYPE xxe [\r\n<!ELEMENT name ANY >\r\n<!ENTITY xxe SYSTEM \"file:///etc/passwd\" >]>\r\n<name>&xxe;</name>";
+
+#[tokio::test]
+async fn challenge_and_block_have_distinct_bodies() {
+    // Final review I8 / spec decision 10.
+    let up = stub(true).await;
+    let mut cfg = short_cfg();
+    cfg.scoring.chain_stage_bonus = 0; // keep the XXE request in the Challenge band
+    let p = proxy(cfg, up.addr).await;
+    let raw = format!(
+        "POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\r\n{XXE_BODY}",
+        XXE_BODY.len()
+    );
+    let challenge = send(p, raw.as_bytes()).await;
+    assert!(challenge.starts_with("HTTP/1.1 403"), "{challenge}");
+    assert!(challenge.ends_with("Request requires verification.\n"), "{challenge}");
+    let p2 = proxy(short_cfg(), up.addr).await;
+    let block = send(p2, b"GET /x?id=1%20union%20select%20password%20from%20users HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert!(block.starts_with("HTTP/1.1 403"), "{block}");
+    assert!(block.ends_with("Request blocked.\n"), "{block}");
+    assert_eq!(up.conns.load(Ordering::SeqCst), 0);
+}

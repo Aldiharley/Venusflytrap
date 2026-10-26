@@ -1013,7 +1013,9 @@ mod tests {
     #[test]
     fn overlap_is_charged_once() {
         let mut cfg = small_payload_cfg();
-        cfg.shield.max_inspect_bytes = 3000;
+        // The query key "q" is inspected as its own field (1 byte) before the
+        // 3000-byte value; double-charging the overlaps would need ~3,768.
+        cfg.shield.max_inspect_bytes = 3000 + "q".len();
         assert!(!has_limit(&Shield::new(cfg).inspect(&query_req("a".repeat(3000)))));
     }
 

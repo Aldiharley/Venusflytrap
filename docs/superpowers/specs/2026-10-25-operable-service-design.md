@@ -156,6 +156,8 @@ Staging: SP1 implements these rules over the verdict plus a minimal `contributio
 | Live clients | per-client `mpsc(256)` | overflow → `Resync` + fresh snapshot |
 | Background tasks | `supervise(name, fut)`: restart on error/panic, 1 s → 60 s backoff, reset after 60 s healthy; one cancellation token | — |
 
+SP1 implementation note (intentional simplification): there is no separate `BanStore` type. Bans live in their own map inside each shard's `ChainTracker`, so they share the chain's 64-way sharding and shard lock (held for one lookup or insert), have their own capacity (`chain.ban_policy.max_bans`), and are never evicted by the source LRU. The §5.3 step 3 fast-track is `Pipeline::fast_track`, which reads that map before the body is collected; `Pipeline::decide` runs the same check.
+
 ### 5.6 Config and hot reload
 
 Two layers: the operator's `shield.yaml` (never rewritten by Venusflytrap) and an API-managed `state/overrides.yaml` (sparse `key: value`; scalars override, lists replace). `/api/v1/options` reports each option's source (default, base, override).

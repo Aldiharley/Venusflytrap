@@ -32,15 +32,15 @@ request → normalize → token-graph taint → detectors → four-valued lattic
 
 Measured on a real labelled corpus (33,877 HTTP requests: 33,219 benign, 658 malicious), through both the
 stateless library path and the stateful serve path that the proxy runs. Recall is over the 656 malicious
-files that were readable on the measuring machine (43.01% if the two unreadable files count as missed).
+files that were readable on the measuring machine (43.16% if the two unreadable files count as missed).
 Full method, ban effects, mutation robustness, latency and limits are in
 [`docs/BENCHMARK.md`](docs/BENCHMARK.md); a pooled-source run there fails one acceptance check, and that
 is stated plainly.
 
 | Engine | TP | FP | Recall | Precision | FP rate |
 |---|---|---|---|---|---|
-| Venusflytrap, library | 283 | 269 | 43.14% | 51.27% | 0.81% |
-| Venusflytrap, serve (distinct sources) | 283 | 269 | 43.14% | 51.27% | 0.81% |
+| Venusflytrap, library | 284 | 271 | 43.29% | 51.17% | 0.82% |
+| Venusflytrap, serve (distinct sources) | 284 | 271 | 43.29% | 51.17% | 0.82% |
 | libinjection | 214 | 93 | 32.52% | 69.71% | 0.28% |
 
 These are modest numbers and they are reported as measured. The baseline reads a slightly different
@@ -99,6 +99,13 @@ assert_eq!(shield.inspect(&req).verdict, Verdict::Block);
   (pluggable via the `AiOracle` trait); threat intel is file-backed/offline.
 - Known hard problems it does not magically solve: parser-differential evasion
   (WAFFLED-style) and adversarial mutation (WAF-A-MoLE) — see RESEARCH.md.
+- **Known open fail-opens (forwarded uninspected today):** field content past
+  `shield.max_payload` (65,536 characters per field; in practice the rest of a
+  request body up to the 1 MiB body limit), tokens past the 4,096-token graph
+  cap, and a percent-encoded layer that does not decode to valid UTF-8 (left
+  encoded). Fixes are planned. The `Content-Length` header is forwarded without
+  inspection (it is validated as a length); `Connection` is not inspected and
+  never forwarded. Details: [`docs/BENCHMARK.md`](docs/BENCHMARK.md) section 7.
 
 ## License
 

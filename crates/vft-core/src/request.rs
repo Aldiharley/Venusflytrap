@@ -65,12 +65,26 @@ impl Request {
         canonical_path(&self.path)
     }
 
-    /// All inspectable fields: query params, headers, cookies, and the body as a
-    /// single field. The path is inspected separately (it has path-specific
-    /// semantics such as traversal and recon).
+    /// All inspectable fields: query keys and values, headers, cookie names
+    /// and values, and the body as a single field. The path is inspected
+    /// separately (it has path-specific semantics such as traversal and recon).
+    ///
+    /// Not inspected: the `Connection` header (hop-by-hop, stripped before
+    /// forwarding) and `Content-Length` (validated by the HTTP front end), and
+    /// a raw `Cookie` header whose every segment is a well-formed
+    /// `token=value` pair (its names and values are inspected as cookie
+    /// fields instead).
     pub fn fields(&self) -> Vec<Field> {
         let mut out = Vec::new();
         for (k, v) in &self.query {
+            // The key is forwarded too, so it is attacker payload like the value.
+            if !k.is_empty() {
+                out.push(Field {
+                    loc: Location::Query,
+                    name: format!("key:{k}"),
+                    raw: k.clone(),
+                });
+            }
             out.push(Field {
                 loc: Location::Query,
                 name: k.clone(),
@@ -78,18 +92,15 @@ impl Request {
             });
         }
         for (k, v) in &self.headers {
-            // Skip hop-by-hop / noisy headers that are not attacker payload vectors
-            // in the usual sense; keep the interesting ones.
             let lname = k.to_ascii_lowercase();
-            if matches!(
-                lname.as_str(),
-                "connection" | "content-length" | "accept-encoding"
-            ) {
+            if matches!(lname.as_str(), "connection" | "content-length") {
                 continue;
             }
-            // The raw Cookie header is covered by the parsed cookies below, so
-            // skip it only when they exist; otherwise inspect it as a header.
-            if lname == "cookie" && !self.cookies.is_empty() {
+            // The raw Cookie header is covered by the parsed cookies below only
+            // when every segment parses as `token=value`; anything else (a
+            // segment without `=`, a name that is not an RFC 6265 token) is
+            // inspected as a header as well.
+            if lname == "cookie" && !self.cookies.is_empty() && cookie_header_is_well_formed(v) {
                 continue;
             }
             out.push(Field {
@@ -99,6 +110,11 @@ impl Request {
             });
         }
         for (k, v) in &self.cookies {
+            out.push(Field {
+                loc: Location::Cookie,
+                name: format!("name:{k}"),
+                raw: k.clone(),
+            });
             out.push(Field {
                 loc: Location::Cookie,
                 name: k.clone(),
@@ -114,6 +130,19 @@ impl Request {
         }
         out
     }
+}
+
+/// RFC 6265 `cookie-name`: a token (visible ASCII, no separators).
+fn is_cookie_name_token(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() && !b"()<>@,;:\\\"/[]?={}".contains(&b))
+}
+
+/// Every non-empty `;`-separated segment is `token=value`.
+fn cookie_header_is_well_formed(v: &str) -> bool {
+    v.split(';').all(|seg| {
+        let seg = seg.trim_start();
+        seg.trim_end().is_empty() || seg.split_once('=').is_some_and(|(k, _)| is_cookie_name_token(k))
+    })
 }
 
 /// The path as a backend would resolve it: percent-decoded (up to 3 layers;
@@ -162,6 +191,37 @@ pub fn canonical_path(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_header_well_formedness() {
+        for ok in ["a=1", "a=1; b=2", "_ga=GA1.1.1; theme=dark;", "a=", "a=1;  b=x=y"] {
+            assert!(cookie_header_is_well_formed(ok), "{ok:?}");
+        }
+        for bad in ["1 union select", "a=1; junk", "<script>=1", "=1", "a b=1", "a\"=1", "a =1"] {
+            assert!(!cookie_header_is_well_formed(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn query_keys_and_cookie_names_are_fields() {
+        let mut req = Request::get("/x");
+        req.query.push(("k".into(), "v".into()));
+        req.query.push(("".into(), "w".into()));
+        req.cookies.push(("c".into(), "d".into()));
+        req.headers.push(("Accept-Encoding".into(), "gzip".into()));
+        req.headers.push(("Connection".into(), "close".into()));
+        let f: Vec<(Location, String, String)> =
+            req.fields().into_iter().map(|f| (f.loc, f.name, f.raw)).collect();
+        let want = |l, n: &str, r: &str| f.contains(&(l, n.to_string(), r.to_string()));
+        assert!(want(Location::Query, "key:k", "k"), "{f:?}");
+        assert!(want(Location::Query, "k", "v"));
+        assert!(want(Location::Query, "", "w"));
+        assert!(!f.iter().any(|(_, n, _)| n == "key:"), "empty key is not a field");
+        assert!(want(Location::Cookie, "name:c", "c"));
+        assert!(want(Location::Cookie, "c", "d"));
+        assert!(want(Location::Header, "Accept-Encoding", "gzip"));
+        assert!(!f.iter().any(|(_, n, _)| n == "Connection"));
+    }
 
     #[test]
     fn canonical_path_cases() {

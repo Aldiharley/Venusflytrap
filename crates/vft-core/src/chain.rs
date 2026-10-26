@@ -77,7 +77,8 @@ pub fn event_for(j: &Judgment) -> Event {
             return Event::Exploitation;
         }
     }
-    if dangerous(Family::Recon) {
+    // An allowed request never stages a source, whatever the config (principle 2).
+    if dangerous(Family::Recon) && j.verdict.rank() >= Verdict::Monitor.rank() {
         return Event::Recon;
     }
     let scanner = j
@@ -311,6 +312,23 @@ mod tests {
         assert_eq!(event_for(&monitor), Event::Benign, "a forwarded request never stages a source");
         let challenge = judgment(Verdict::Challenge, vec![scanner_ua()]);
         assert_eq!(event_for(&challenge), Event::Enumeration);
+    }
+
+    #[test]
+    fn recon_stages_only_when_the_request_is_not_allowed() {
+        // Final review F1 (principle 2): an allowed request never stages a source.
+        let recon = Contribution {
+            engine: "intent".into(),
+            field: None,
+            construct: Some("sensitive-path".into()),
+            family: Some(Family::Recon),
+            value: FourValued::Dangerous,
+            weight: 0.7,
+            points: 0.0,
+        };
+        assert_eq!(event_for(&judgment(Verdict::Allow, vec![recon.clone()])), Event::Benign);
+        assert_eq!(event_for(&judgment(Verdict::Monitor, vec![recon.clone()])), Event::Recon);
+        assert_eq!(event_for(&judgment(Verdict::Block, vec![recon])), Event::Recon);
     }
 
     #[test]
