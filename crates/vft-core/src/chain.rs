@@ -4,7 +4,10 @@
 //! contributions), never from latent evidence, so a request the engine allows
 //! cannot advance a source. Stage is the maximum over events inside the window
 //! and therefore decays. Bans are a separate policy with TTLs and are never
-//! evicted by the source LRU. Time is passed in (`now_ms`) — no clock here.
+//! evicted by the source LRU. An automatic ban also needs the source's recent
+//! traffic to be mostly hostile (`min_hostile_share`), so a busy shared source
+//! is not banned for a few blocks among benign requests. Time is passed in
+//! (`now_ms`) — no clock here.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv6Addr};
@@ -150,6 +153,29 @@ pub struct ChainOutcome {
 struct SourceState {
     events: VecDeque<(u64, Event)>,
     last_seen: u64,
+    /// Request tally over the ban window: (bucket index, requests, hostile).
+    tally: VecDeque<(u64, u32, u32)>,
+}
+
+/// The ban window is tallied in this many buckets of `within_secs / TALLY_BUCKETS`,
+/// so memory per source is bounded whatever its request rate. The tally spans
+/// between 0.9 and 1.0 x `within_secs`; the exploitation count keeps exact times.
+const TALLY_BUCKETS: u64 = 10;
+
+/// Count one request in the tally and return (requests, hostile) in the window.
+fn tally(t: &mut VecDeque<(u64, u32, u32)>, now_ms: u64, within_ms: u64, hostile: bool) -> (u32, u32) {
+    let bucket = now_ms / (within_ms / TALLY_BUCKETS).max(1);
+    while t.front().is_some_and(|(b, _, _)| b.saturating_add(TALLY_BUCKETS) <= bucket) {
+        t.pop_front();
+    }
+    if t.back().map(|(b, _, _)| *b) != Some(bucket) {
+        t.push_back((bucket, 0, 0));
+    }
+    if let Some((_, n, h)) = t.back_mut() {
+        *n = n.saturating_add(1);
+        *h = h.saturating_add(u32::from(hostile));
+    }
+    t.iter().fold((0, 0), |(n, h), (_, bn, bh)| (n.saturating_add(*bn), h.saturating_add(*bh)))
 }
 
 fn stage_of(events: &VecDeque<(u64, Event)>) -> Option<Stage> {
@@ -181,7 +207,7 @@ impl ChainTracker {
         let st = self
             .sources
             .entry(key)
-            .or_insert_with(|| SourceState { events: VecDeque::new(), last_seen: now_ms });
+            .or_insert_with(|| SourceState { events: VecDeque::new(), last_seen: now_ms, tally: VecDeque::new() });
         st.last_seen = now_ms;
         while st.events.front().is_some_and(|(t, _)| now_ms.saturating_sub(*t) > window_ms) {
             st.events.pop_front();
@@ -199,8 +225,10 @@ impl ChainTracker {
             .iter()
             .filter(|(t, e)| e.is_exploit() && now_ms.saturating_sub(*t) <= within_ms)
             .count();
+        let (requests, hostile) = tally(&mut st.tally, now_ms, within_ms, ev != Event::Benign);
 
         let bp = &self.cfg.ban_policy;
+        let hostile_enough = f64::from(hostile) >= bp.min_hostile_share * f64::from(requests);
         let cause = if !may_ban {
             None
         } else if ev == Event::Honeypot && bp.on_honeypot {
@@ -212,7 +240,7 @@ impl ChainTracker {
         } else {
             None
         };
-        let new_ban = cause.map(|c| self.ban(key, c, now_ms));
+        let new_ban = cause.filter(|_| hostile_enough).map(|c| self.ban(key, c, now_ms));
         self.evict();
         ChainOutcome { stage_before, stage_after, advanced: stage_after > stage_before, new_ban }
     }
@@ -346,6 +374,77 @@ mod tests {
         assert!(t.observe(key(2), Event::Exploitation, MIN, true).new_ban.is_none());
         let o = t.observe(key(2), Event::Exploitation, 2 * MIN, true);
         assert_eq!(o.new_ban.map(|b| b.cause), Some(BanCause::RepeatedExploitation));
+    }
+
+    /// `n` benign requests from `k`, one second apart from `from_ms`.
+    fn benign(t: &mut ChainTracker, k: SourceKey, n: u64, from_ms: u64) {
+        for i in 0..n {
+            assert!(t.observe(k, Event::Benign, from_ms + i * 1_000, true).new_ban.is_none());
+        }
+    }
+
+    #[test]
+    fn blocks_diluted_by_benign_traffic_do_not_ban() {
+        // A busy shared source (NAT) is not banned for a few blocks among benign traffic.
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        benign(&mut t, key(8), 100, 0);
+        for i in 0..3 {
+            assert!(t.observe(key(8), Event::Exploitation, 100_000 + i * 1_000, true).new_ban.is_none());
+        }
+    }
+
+    #[test]
+    fn hostile_share_threshold_is_inclusive() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        benign(&mut t, key(9), 3, 0);
+        let bans: Vec<_> = (0..3).map(|i| t.observe(key(9), Event::Exploitation, 10_000 + i, true).new_ban).collect();
+        assert!(bans[2].is_some(), "3 hostile of 6 requests = 0.5 bans");
+        benign(&mut t, key(10), 4, 0);
+        for i in 0..3 {
+            assert!(t.observe(key(10), Event::Exploitation, 10_000 + i, true).new_ban.is_none(), "3 of 7");
+        }
+    }
+
+    #[test]
+    fn honeypot_on_a_busy_source_does_not_ban() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        benign(&mut t, key(11), 10, 0);
+        assert!(t.observe(key(11), Event::Honeypot, 20_000, true).new_ban.is_none());
+    }
+
+    #[test]
+    fn single_exfiltration_bans_only_when_enabled() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        assert!(t.observe(key(12), Event::Exfiltration, 0, true).new_ban.is_none(), "off by default");
+        let mut cfg = ChainConfig::default();
+        cfg.ban_policy.on_exfiltration_block = true;
+        let mut t = ChainTracker::new(&cfg);
+        let o = t.observe(key(12), Event::Exfiltration, 0, true);
+        assert_eq!(o.new_ban.map(|b| b.cause), Some(BanCause::Exfiltration));
+        benign(&mut t, key(13), 10, 0);
+        assert!(t.observe(key(13), Event::Exfiltration, 20_000, true).new_ban.is_none(), "gated on a busy source");
+    }
+
+    #[test]
+    fn zero_share_and_exfiltration_trigger_reproduce_sp1() {
+        let mut cfg = ChainConfig::default();
+        cfg.ban_policy.on_exfiltration_block = true;
+        cfg.ban_policy.min_hostile_share = 0.0;
+        let mut t = ChainTracker::new(&cfg);
+        benign(&mut t, key(14), 100, 0);
+        assert!(t.observe(key(14), Event::Exfiltration, 200_000, true).new_ban.is_some());
+    }
+
+    #[test]
+    fn benign_traffic_older_than_the_ban_window_stops_diluting() {
+        let cfg = ChainConfig::default();
+        let within = cfg.ban_policy.within_secs * 1000;
+        let mut t = ChainTracker::new(&cfg);
+        benign(&mut t, key(15), 100, 0);
+        let start = within + 100_000;
+        let bans: Vec<_> =
+            (0..3).map(|i| t.observe(key(15), Event::Exploitation, start + i * 1_000, true).new_ban).collect();
+        assert!(bans[2].is_some());
     }
 
     #[test]

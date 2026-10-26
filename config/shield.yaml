@@ -27,12 +27,14 @@ chain:
   ipv6_prefix: 64         # IPv6 sources are aggregated to this prefix
   ban_policy:
     on_honeypot: true
-    on_exfiltration_block: true
+    on_exfiltration_block: false  # true: one exfiltration block is a ban trigger
     exploitation_blocks: 3  # ban after this many exploitation blocks ...
     within_secs: 600        # ... within this many seconds
     ttl_secs: 3600          # first ban length; doubles on re-offence
     ttl_max_secs: 86400
     max_bans: 100000
+    min_hostile_share: 0.5  # any automatic ban also needs >= this share of the source's
+                            # requests in within_secs to be hostile (spares busy NATs); 0 = off
 
 honeypot:
   decoy_paths:

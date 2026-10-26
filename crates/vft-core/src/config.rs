@@ -182,10 +182,12 @@ impl Default for ChainConfig {
 }
 
 /// When a source gets banned, and for how long.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BanPolicy {
     pub on_honeypot: bool,
+    /// A single exfiltration block is a ban trigger. Off by default:
+    /// exfiltration blocks still count toward `exploitation_blocks`.
     pub on_exfiltration_block: bool,
     /// Ban after this many exploitation blocks within `within_secs`.
     /// A "block" here is a Challenge or Block verdict: both are answered
@@ -196,18 +198,24 @@ pub struct BanPolicy {
     pub ttl_secs: u64,
     pub ttl_max_secs: u64,
     pub max_bans: usize,
+    /// An automatic ban also needs hostile requests to be at least this share
+    /// of the source's requests in the last `within_secs`, so a busy shared
+    /// source (NAT) is not banned for a few blocks among benign traffic.
+    /// 0 turns the gate off.
+    pub min_hostile_share: f64,
 }
 
 impl Default for BanPolicy {
     fn default() -> Self {
         BanPolicy {
             on_honeypot: true,
-            on_exfiltration_block: true,
+            on_exfiltration_block: false,
             exploitation_blocks: 3,
             within_secs: 600,
             ttl_secs: 3600,
             ttl_max_secs: 86_400,
             max_bans: 100_000,
+            min_hostile_share: 0.5,
         }
     }
 }
@@ -385,6 +393,10 @@ impl Config {
         if b.max_bans < 640 {
             bad("chain.ban_policy.max_bans", format!("must be >= 640 (at least 10 per shard), got {}", b.max_bans));
         }
+        // `contains` is false for NaN.
+        if !(0.0..=1.0).contains(&b.min_hostile_share) {
+            bad("chain.ban_policy.min_hostile_share", format!("must be in 0.0..=1.0, got {}", b.min_hostile_share));
+        }
 
         for p in &self.proxy.trusted_proxies {
             if p.parse::<std::net::IpAddr>().is_err() {
@@ -484,6 +496,17 @@ mod tests {
         let shipped: Config =
             serde_yaml::from_str(include_str!("../../../config/shield.yaml")).expect("shipped yaml parses");
         assert!(shipped.validate().is_ok(), "{:?}", shipped.validate());
+        assert_eq!(shipped.chain.ban_policy, BanPolicy::default());
+    }
+
+    #[test]
+    fn hostile_share_must_be_a_fraction() {
+        for bad in ["-0.1", "1.1", ".nan"] {
+            let y = format!("chain:\n  ban_policy:\n    min_hostile_share: {bad}\n");
+            assert!(issues(&y).iter().any(|i| i.key == "chain.ban_policy.min_hostile_share"), "{bad}");
+        }
+        assert!(issues("chain:\n  ban_policy:\n    min_hostile_share: 0\n").is_empty());
+        assert!(issues("chain:\n  ban_policy:\n    min_hostile_share: 1\n").is_empty());
     }
 
     #[test]

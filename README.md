@@ -32,15 +32,16 @@ request → normalize → token-graph taint → detectors → four-valued lattic
 
 Measured on a real labelled corpus (33,877 HTTP requests: 33,219 benign, 658 malicious), through both the
 stateless library path and the stateful serve path that the proxy runs. Recall is over the 656 malicious
-files that were readable on the measuring machine (43.16% if the two unreadable files count as missed).
+files that were readable on the measuring machine (43.77% if the two unreadable files count as missed).
 Full method, ban effects, mutation robustness, latency and limits are in
-[`docs/BENCHMARK.md`](docs/BENCHMARK.md); a pooled-source run there fails one acceptance check, and that
-is stated plainly.
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md). That includes the shared-source ban check, which failed under
+the first ban policy and passes after the ban-policy redesign.
 
 | Engine | TP | FP | Recall | Precision | FP rate |
 |---|---|---|---|---|---|
-| Venusflytrap, library | 284 | 271 | 43.29% | 51.17% | 0.82% |
-| Venusflytrap, serve (distinct sources) | 284 | 271 | 43.29% | 51.17% | 0.82% |
+| Venusflytrap, library | 288 | 278 | 43.90% | 50.88% | 0.84% |
+| Venusflytrap, serve (distinct sources) | 288 | 278 | 43.90% | 50.88% | 0.84% |
+| Venusflytrap, serve (100 shared sources) | 288 | 278 | 43.90% | 50.88% | 0.84% |
 | libinjection | 214 | 93 | 32.52% | 69.71% | 0.28% |
 
 These are modest numbers and they are reported as measured. The baseline reads a slightly different

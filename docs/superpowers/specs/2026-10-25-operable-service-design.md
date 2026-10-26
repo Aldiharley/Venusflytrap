@@ -325,7 +325,7 @@ Shared files: `shield.rs`, `judgment.rs`, `config.rs`. SP1's detection-neutral s
 
 ## 9. Decisions adopted (from the architecture review's recommendations)
 
-1. Bans only on a honeypot hit, an exfiltration block, or 3 exploitation blocks within 10 min; TTL 1 h, doubling on re-offence up to 24 h; permanent bans only by hand.
+1. Bans only on a honeypot hit, an exfiltration block, or 3 exploitation blocks within 10 min; TTL 1 h, doubling on re-offence up to 24 h; permanent bans only by hand. *Amended 2026-10-26 by `2026-10-26-ban-policy-redesign-design.md`: no single-exfiltration ban by default, and every automatic ban also needs the source's hostile share in the last 10 min to be at least 0.5.*
 2. Persist bans, not chain windows.
 3. Payload snippets in history off by default (opt-in 128 characters, never credential headers).
 4. Sample 1% of Allows; per-minute rollups count 100%.
