@@ -3,7 +3,7 @@
 # article's shield/scoring/chain/honeypot YAML split.
 
 shield:
-  max_payload: 65536      # bytes inspected per field before work begins
+  max_payload: 65536      # characters inspected per field; content past this is NOT inspected (known fail-open, docs/BENCHMARK.md section 7)
   decode_cap: 14          # max decode layers peeled to a fixpoint
   deep_threshold: 3       # layers at/above this raise the "deep nesting" signal
 
@@ -18,11 +18,21 @@ scoring:
   monitor_at: 40          # >= this => Monitor, else Allow
   conflict_threshold: 0.6 # weight above which Safe-vs-Dangerous is a real conflict
   chain_stage_bonus: 15   # added to score when the source advances a kill-chain stage
+  corroboration_cap: 15   # max points corroborating weak signals may add in total
 
 chain:
   window_secs: 3600       # per-source event memory window
   max_sources: 4096       # bounded LRU of tracked sources
   events_per_source: 64
+  ipv6_prefix: 64         # IPv6 sources are aggregated to this prefix
+  ban_policy:
+    on_honeypot: true
+    on_exfiltration_block: true
+    exploitation_blocks: 3  # ban after this many exploitation blocks ...
+    within_secs: 600        # ... within this many seconds
+    ttl_secs: 3600          # first ban length; doubles on re-offence
+    ttl_max_secs: 86400
+    max_bans: 100000
 
 honeypot:
   decoy_paths:
@@ -45,3 +55,18 @@ honeypot:
     - /config.json
     - /.ssh/id_rsa
     - /wp-config.php
+
+proxy:
+  trusted_proxies: []       # peers whose X-Forwarded-For is trusted (exact IPs)
+  decision_headers: off     # off | upstream (never sent to clients)
+
+limits:
+  max_body: 1048576         # bytes; larger bodies get 413 before any upstream connection
+  max_headers: 100
+  max_connections: 1024
+  header_read_timeout_ms: 10000
+  body_read_timeout_ms: 30000
+  upstream_connect_timeout_ms: 5000
+  upstream_response_timeout_ms: 30000
+  response_idle_timeout_ms: 30000   # max gap between upstream response-body chunks
+  max_connection_ms: 300000         # hard cap on one client connection's lifetime

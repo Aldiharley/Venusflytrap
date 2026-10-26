@@ -19,6 +19,6 @@ serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 regex.workspace = true
-tokio = { version = "1.41.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.41.0", features = ["rt-multi-thread", "net", "io-util", "time", "macros"] }
 
 [dev-dependencies]

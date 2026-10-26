@@ -4,8 +4,9 @@ Cargo.lock.orig
 corpus/*.jsonl
 !corpus/.gitkeep
 
-# research material (names outside projects) and raw generated renders
+# research material (names outside projects), execution scratch, raw generated renders
 /research_notes/
 /reports/
+/.superpowers/
 /ui/assets/props/raw/
 /ui/assets/props/picks/

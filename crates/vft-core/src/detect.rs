@@ -159,20 +159,14 @@ impl FieldDetector for AiDetector<'_> {
     }
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
         let s = self.oracle.score(ctx.norm, ctx.analysis);
-        // When the oracle is confident the field is clean (score 0), emit Safe at
-        // a weight above the conflict threshold so the lattice's conflict
-        // arbitration can actually engage when another engine shouts Dangerous
-        // (M4). This only damps a single-engine detection slightly; it never
-        // suppresses a block outright, so it cannot weaken a true positive into
-        // an allow.
+        // Absence of evidence is Belnap's None, not Safe: a clean field says
+        // nothing about another field's attack (H4).
         let (value, weight) = if s >= 0.6 {
             (FourValued::Dangerous, s)
         } else if s >= 0.35 {
             (FourValued::Suspicious, s)
-        } else if s > 0.0 {
-            (FourValued::None, 0.3)
         } else {
-            (FourValued::Safe, 0.7)
+            (FourValued::None, 0.0)
         };
         Evidence::new(value, weight, vec![], format!("ai score {s:.2}"))
     }
@@ -181,7 +175,7 @@ impl FieldDetector for AiDetector<'_> {
 /// Request-level intent detector (path recon / empty-payload probing). Not a
 /// field detector — it looks at the whole request.
 pub fn intent_evidence(req: &Request, cfg: &Config) -> Evidence {
-    let path = req.path.to_lowercase();
+    let path = req.canonical_path().to_lowercase();
     // Prefix match only — NOT substring. A substring match flags benign nested
     // paths like `/api/config.json` just because they contain `/config.json`
     // (M5). Recon targets are hit at a path prefix (`/.env`, `/actuator/...`).
@@ -259,5 +253,14 @@ mod tests {
         let req = Request::get("/.env");
         let e = intent_evidence(&req, &cfg);
         assert_eq!(e.value, FourValued::Dangerous);
+    }
+
+    #[test]
+    fn intent_flags_encoded_env_probe() {
+        let cfg = Config::default();
+        for p in ["/.%65nv", "/%2eenv", "//.env"] {
+            let e = intent_evidence(&Request::get(p), &cfg);
+            assert_eq!(e.value, FourValued::Dangerous, "missed {p}");
+        }
     }
 }

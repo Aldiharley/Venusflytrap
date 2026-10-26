@@ -1,9 +1,7 @@
 //! FR9 — The orchestrator. Wires normalize → graph/taint → detectors → lattice
 //! → score, plus honeypot, intel, and (optionally) the chain tracker.
 
-use std::time::Instant;
-
-use crate::chain::{ChainTracker, Event};
+use crate::chain::{event_for, BanRecord, ChainOutcome, ChainTracker, SourceKey};
 use crate::config::Config;
 use crate::detect::{
     intent_evidence, AiDetector, AiOracle, ApiSafetyDetector, FieldCtx, FieldDetector,
@@ -12,11 +10,11 @@ use crate::detect::{
 use crate::graph;
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
-use crate::judgment::{EngineReport, Family, Judgment, Pattern, Verdict};
-use crate::lattice::Evidence;
+use crate::judgment::{Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Verdict};
+use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{normalize, Options};
 use crate::request::Request;
-use crate::score::arbitrate;
+use crate::score::{arbitrate, Scored};
 
 pub struct Shield {
     cfg: Config,
@@ -55,27 +53,25 @@ impl Shield {
         &self.cfg
     }
 
-    /// Stateless inspection: no chain memory.
+    pub fn intel(&self) -> &Intel {
+        &self.intel
+    }
+
+    /// Pure, stateless inspection: no chain memory, no clock.
     pub fn inspect(&self, req: &Request) -> Judgment {
-        self.inspect_inner(req, None)
-    }
-
-    /// Stateful inspection: feeds the chain tracker and may escalate/ban.
-    pub fn inspect_stateful(&self, req: &Request, chain: &mut ChainTracker) -> Judgment {
-        self.inspect_inner(req, Some(chain))
-    }
-
-    fn inspect_inner(&self, req: &Request, chain: Option<&mut ChainTracker>) -> Judgment {
         // Intel allow-list short-circuit (still inspect, but never hard-block on
         // intel; allow-list only suppresses the intel deny pin).
+        // Lists are keyed by the canonical address (IPv4-mapped IPv6 -> IPv4),
+        // the same canonicalization the chain's source keys use.
         let denied = req
             .src_ip
-            .map(|ip| self.intel.is_denied(&ip) && !self.intel.is_allowed(&ip))
+            .map(|ip| {
+                let ip = canonical(ip);
+                self.intel.is_denied(&ip) && !self.intel.is_allowed(&ip)
+            })
             .unwrap_or(false);
 
-        let mut engines: Vec<EngineReport> = Vec::new();
-        let mut weighted: Vec<(f32, Evidence)> = Vec::new();
-        let mut matched: Vec<Pattern> = Vec::new();
+        let mut rec = Recorder::default();
         let mut max_layers = 0u8;
 
         // Per-field detection.
@@ -97,19 +93,27 @@ impl Shield {
                 norm: &n,
                 analysis: &analysis,
             };
+            let fref = FieldRef::of(&field);
             for (det, w) in &field_detectors {
                 let e = det.assess(&ctx);
-                record(&mut engines, &mut weighted, &mut matched, det.name(), *w, e);
+                rec.record(det.name(), *w, Some(fref.clone()), e);
             }
             // AI detector
             let e = ai.assess(&ctx);
-            record(
-                &mut engines,
-                &mut weighted,
-                &mut matched,
-                ai.name(),
-                self.cfg.scoring.weight_ai,
-                e,
+            rec.record(ai.name(), self.cfg.scoring.weight_ai, Some(fref), e);
+        }
+
+        if let Some(first) = req.non_utf8_headers.first() {
+            rec.record(
+                "adapter",
+                self.cfg.scoring.weight_api,
+                Some(FieldRef::header(first)),
+                Evidence::new(
+                    FourValued::Suspicious,
+                    0.6,
+                    vec![Pattern::new(Family::Limit, "limit.header-non-utf8")],
+                    format!("non-UTF-8 bytes in header(s): {}", req.non_utf8_headers.join(", ")),
+                ),
             );
         }
 
@@ -120,17 +124,15 @@ impl Shield {
             let analysis = graph::analyze(&n.text);
             if !analysis.reachable.is_empty() {
                 let e = Evidence::new(
-                    crate::lattice::FourValued::Dangerous,
+                    FourValued::Dangerous,
                     0.9,
                     analysis.reachable.clone(),
                     "dangerous construct in path",
                 );
-                record(
-                    &mut engines,
-                    &mut weighted,
-                    &mut matched,
+                rec.record(
                     "graph-taint",
                     self.cfg.scoring.weight_graph,
+                    Some(FieldRef::path()),
                     e,
                 );
             }
@@ -138,23 +140,14 @@ impl Shield {
 
         // Request-level intent (recon of sensitive paths).
         let intent = intent_evidence(req, &self.cfg);
-        record(
-            &mut engines,
-            &mut weighted,
-            &mut matched,
-            "intent",
-            self.cfg.scoring.weight_intent,
-            intent,
-        );
+        rec.record("intent", self.cfg.scoring.weight_intent, Some(FieldRef::path()), intent);
 
         // Intel UA fingerprint.
         let ua_e = self.intel.ua_evidence(req.user_agent());
-        record(
-            &mut engines,
-            &mut weighted,
-            &mut matched,
+        rec.record(
             "intel",
             self.cfg.scoring.weight_intent,
+            Some(FieldRef::header("user-agent")),
             ua_e,
         );
 
@@ -163,107 +156,147 @@ impl Shield {
         let honeypot_hit = self.honeypot.check(req);
         if let Some(e) = honeypot_hit {
             hard_block = true;
-            record(
-                &mut engines,
-                &mut weighted,
-                &mut matched,
-                "honeypot",
-                1.0,
-                e,
-            );
+            rec.record("honeypot", 1.0, Some(FieldRef::path()), e);
         }
 
-        // Chain inference (stateful only).
-        let mut chain_stage = None;
-        let mut banned_source = false;
-        let mut extra = 0u8;
-        if let (Some(chain), Some(ip)) = (chain, req.src_ip) {
-            let families: Vec<Family> = matched.iter().map(|p| p.family).collect();
-            let honeypot = families.contains(&Family::Honeypot);
-            let event = classify_event(&matched, honeypot);
-            let (stage, ban) = chain.observe(ip, event, Instant::now());
-            chain_stage = stage;
-            banned_source = ban || chain.is_banned(&ip);
-            if banned_source {
-                hard_block = true;
-            }
-            if stage.is_some() {
-                extra = self.cfg.scoring.chain_stage_bonus;
-            }
-        } else if let Some(ip) = req.src_ip {
-            // stateless: still reflect prior ban via intel deny only
-            let _ = ip;
-        }
-
-        let (score, mut verdict, conflict) =
-            arbitrate(&weighted, &self.cfg.scoring, hard_block, extra);
-        if banned_source {
-            verdict = Verdict::Block;
-        }
-
-        let reason = build_reason(&matched, conflict, banned_source, hard_block);
+        let (score, verdict, conflict) = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
+        let reason = build_reason(&rec.matched, conflict, false, hard_block);
 
         Judgment {
             verdict,
             score,
-            engines,
-            matched,
-            chain_stage,
+            engines: rec.engines,
+            matched: rec.matched,
+            contributions: rec.contributions,
+            chain_stage: None,
             normalized_layers: max_layers,
-            banned_source,
+            banned_source: false,
             reason,
         }
     }
-}
 
-fn classify_event(matched: &[Pattern], honeypot: bool) -> Event {
-    let families: Vec<Family> = matched.iter().map(|p| p.family).collect();
-    // Exfiltration refinement from pattern names.
-    let exfil = matched.iter().any(|p| {
-        matches!(p.name.as_str(), "union-select" | "union-all-select")
-            || p.name == "load_file"
-            || p.name == "schema-enum"
-    });
-    if honeypot {
-        Event::Honeypot
-    } else if exfil {
-        Event::Exfiltration
-    } else if families
-        .iter()
-        .any(|f| matches!(f, Family::Sqli | Family::Xss | Family::CommandInjection | Family::PathTraversal))
-    {
-        Event::Exploitation
-    } else if families.contains(&Family::Recon) {
-        Event::Recon
-    } else if families.contains(&Family::Intel) {
-        Event::Enumeration
-    } else {
-        Event::Benign
+    /// Apply a chain outcome to a judgment. Never lowers the verdict.
+    pub fn finalize(&self, mut j: Judgment, o: &ChainOutcome) -> Judgment {
+        j.chain_stage = o.stage_after;
+        if o.advanced && o.stage_after.is_some() {
+            let bumped = j.score.saturating_add(self.cfg.scoring.chain_stage_bonus).min(100);
+            let v = crate::score::band(bumped, &self.cfg.scoring);
+            if v.rank() > j.verdict.rank() {
+                j.verdict = v;
+            }
+            j.score = j.score.max(bumped);
+        }
+        if let Some(b) = o.new_ban {
+            j.banned_source = true;
+            j.verdict = Verdict::Block;
+            j.score = 100;
+            j.reason = format!(
+                "{} (source banned: {:?}, {} s)",
+                j.reason,
+                b.cause,
+                (b.until_ms - b.since_ms) / 1000
+            );
+        }
+        j
     }
-}
 
-fn record(
-    engines: &mut Vec<EngineReport>,
-    weighted: &mut Vec<(f32, Evidence)>,
-    matched: &mut Vec<Pattern>,
-    name: &str,
-    weight: f32,
-    e: Evidence,
-) {
-    for p in &e.patterns {
-        if !matched.contains(p) {
-            matched.push(p.clone());
+    /// The judgment for a request from an actively banned source (no inspection).
+    pub fn banned_judgment(&self, ban: &BanRecord) -> Judgment {
+        Judgment {
+            verdict: Verdict::Block,
+            score: 100,
+            engines: Vec::new(),
+            matched: Vec::new(),
+            contributions: vec![Contribution {
+                engine: "chain".into(),
+                field: None,
+                construct: Some("chain.ban".into()),
+                family: None,
+                value: FourValued::Dangerous,
+                weight: 1.0,
+                points: 0.0,
+            }],
+            chain_stage: None,
+            normalized_layers: 0,
+            banned_source: true,
+            reason: format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms),
         }
     }
-    engines.push(EngineReport {
-        engine: name.to_string(),
-        value: e.value,
-        weight: e.weight,
-        score_contribution: 0.0, // filled lazily; kept for format compatibility
-        patterns: e.patterns.clone(),
-        note: e.note.clone(),
-    });
-    weighted.push((weight, e));
+
+    /// Single-threaded stateful inspection: ban fast-track, pure inspect,
+    /// chain observe, finalize. The proxy runs the same steps over a sharded store.
+    pub fn inspect_stateful(&self, req: &Request, chain: &mut ChainTracker, now_ms: u64) -> Judgment {
+        let Some(ip) = req.src_ip else {
+            return self.inspect(req);
+        };
+        let key = SourceKey::new(ip, self.cfg.chain.ipv6_prefix);
+        // An allow-listed source is inspected normally and is never banned,
+        // so a ban recorded against its address (or shared /64) cannot block it.
+        let may_ban = !self.intel.is_allowed(&canonical(ip));
+        if may_ban {
+            if let Some(b) = chain.active_ban(key, now_ms) {
+                return self.banned_judgment(&b);
+            }
+        }
+        let j = self.inspect(req);
+        let o = chain.observe(key, event_for(&j), now_ms, may_ban);
+        self.finalize(j, &o)
+    }
+}
+
+fn canonical(ip: std::net::IpAddr) -> std::net::IpAddr {
+    SourceKey::new(ip, 128).ip()
+}
+
+#[derive(Default)]
+struct Recorder {
+    engines: Vec<EngineReport>,
+    scored: Vec<Scored>,
+    matched: Vec<Pattern>,
+    contributions: Vec<Contribution>,
+}
+
+impl Recorder {
+    fn record(&mut self, name: &str, engine_weight: f32, field: Option<FieldRef>, e: Evidence) {
+        for p in &e.patterns {
+            if !self.matched.contains(p) {
+                self.matched.push(p.clone());
+            }
+        }
+        if e.value != FourValued::None {
+            if e.patterns.is_empty() {
+                self.contributions.push(Contribution {
+                    engine: name.to_string(),
+                    field: field.clone(),
+                    construct: None,
+                    family: None,
+                    value: e.value,
+                    weight: e.weight,
+                    points: 0.0,
+                });
+            }
+            for p in &e.patterns {
+                self.contributions.push(Contribution {
+                    engine: name.to_string(),
+                    field: field.clone(),
+                    construct: Some(p.name.clone()),
+                    family: Some(p.family),
+                    value: e.value,
+                    weight: e.weight,
+                    points: 0.0,
+                });
+            }
+        }
+        self.engines.push(EngineReport {
+            engine: name.to_string(),
+            value: e.value,
+            weight: e.weight,
+            score_contribution: 0.0, // filled lazily; kept for format compatibility
+            patterns: e.patterns.clone(),
+            note: e.note.clone(),
+        });
+        self.scored.push(Scored { engine: name.to_string(), engine_weight, field, evidence: e });
+    }
 }
 
 fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -> String {
@@ -291,10 +324,61 @@ fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, hard: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::{BanCause, ChainTracker};
+    use crate::judgment::{Family, FieldRef, Stage};
+    use crate::lattice::FourValued;
+    use crate::request::Location;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn shield() -> Shield {
         Shield::new(Config::default())
+    }
+
+    #[test]
+    fn raw_cookie_header_is_inspected_when_cookies_not_parsed() {
+        // A library caller may supply only the raw Cookie header. It must not
+        // be skipped: the skip is valid only when parsed cookies cover it.
+        let mut req = Request::get("/x");
+        req.headers
+            .push(("Cookie".into(), "id=1 union select password from users".into()));
+        assert!(req.cookies.is_empty());
+        let j = shield().inspect(&req);
+        assert!(
+            matches!(j.verdict, Verdict::Block | Verdict::Challenge),
+            "{:?} {}",
+            j.verdict,
+            j.score
+        );
+    }
+
+    #[test]
+    fn clean_header_does_not_damp_attack() {
+        // H4: an unrelated clean field must not pull a Block down to Challenge.
+        let mut req = Request::get("/items");
+        req.query.push(("id".into(), "1 union select password from users".into()));
+        req.headers.push(("Accept-Language".into(), "en".into()));
+        let j = shield().inspect(&req);
+        assert_eq!(j.verdict, Verdict::Block, "score {} {}", j.score, j.reason);
+    }
+
+    #[test]
+    fn env_probe_not_damped_below_challenge() {
+        let mut req = Request::get("/.env");
+        req.headers.push(("Accept-Language".into(), "en".into()));
+        let j = shield().inspect(&req);
+        assert!(j.verdict.rank() >= Verdict::Challenge.rank(), "{:?} {}", j.verdict, j.score);
+    }
+
+    #[test]
+    fn many_weak_signals_cannot_reach_block() {
+        // M1: 25 values of `red;blue` must not add up to a Block.
+        let mut req = Request::get("/form");
+        for i in 0..25 {
+            req.query.push((format!("c{i}"), "red;blue".into()));
+        }
+        let j = shield().inspect(&req);
+        assert!(j.score < shield().config().scoring.block_at, "score {}", j.score);
+        assert_ne!(j.verdict, Verdict::Block);
     }
 
     #[test]
@@ -303,6 +387,21 @@ mod tests {
         req.query.push(("id".into(), "1 union select password from users".into()));
         let j = shield().inspect(&req);
         assert_eq!(j.verdict, Verdict::Block, "score {} reason {}", j.score, j.reason);
+    }
+
+    #[test]
+    fn contributions_carry_field_and_construct() {
+        let mut req = Request::get("/items");
+        req.query.push(("id".into(), "1 union select password from users".into()));
+        let j = shield().inspect(&req);
+        let c = j
+            .contributions
+            .iter()
+            .find(|c| c.construct.as_deref() == Some("union-select"))
+            .expect("union-select contribution");
+        assert_eq!(c.field, Some(FieldRef { loc: Location::Query, name: "id".into() }));
+        assert_eq!(c.family, Some(Family::Sqli));
+        assert_eq!(c.value, FourValued::Dangerous);
     }
 
     #[test]
@@ -326,23 +425,96 @@ mod tests {
         assert!(matches!(j.verdict, Verdict::Block | Verdict::Challenge), "v {:?} s {}", j.verdict, j.score);
     }
 
+    fn browser(path: &str, ip: IpAddr) -> Request {
+        let mut r = Request::get(path);
+        r.src_ip = Some(ip);
+        r.headers.push(("User-Agent".into(), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36".into()));
+        r.headers.push(("Accept".into(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".into()));
+        r.headers.push(("Accept-Language".into(), "en-US,en;q=0.9".into()));
+        r
+    }
+
     #[test]
-    fn chain_escalates_and_bans() {
+    fn browser_is_never_staged_or_banned() {
+        // C1 regression: latent shell-meta from ';' in browser headers must not
+        // advance the chain.
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1));
+        for i in 0..5 {
+            let j = s.inspect_stateful(&browser("/index.html", ip), &mut chain, i * 1000);
+            assert_eq!(j.verdict, Verdict::Allow, "request {i}: {}", j.reason);
+            assert!(!j.banned_source);
+            assert_eq!(j.chain_stage, None);
+        }
+    }
+
+    #[test]
+    fn repeated_exploitation_bans_then_fast_tracks() {
         let s = shield();
         let mut chain = ChainTracker::new(&s.config().chain);
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let mut xss = Request::get("/p");
+        xss.src_ip = Some(ip);
+        xss.query.push(("q".into(), "<script>alert(1)</script>".into()));
+        let j1 = s.inspect_stateful(&xss, &mut chain, 0);
+        assert_eq!(j1.verdict, Verdict::Block);
+        assert!(!j1.banned_source);
+        let _ = s.inspect_stateful(&xss, &mut chain, 1_000);
+        let j3 = s.inspect_stateful(&xss, &mut chain, 2_000);
+        assert!(j3.banned_source, "third exploitation block within 10 min bans");
+        let benign = browser("/index.html", ip);
+        let j4 = s.inspect_stateful(&benign, &mut chain, 3_000);
+        assert_eq!(j4.verdict, Verdict::Block);
+        assert!(j4.banned_source);
+    }
 
+    #[test]
+    fn allow_listed_source_is_never_banned_even_via_mapped_ipv6() {
+        let mut s = shield();
+        let v4: IpAddr = "192.0.2.7".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        s.intel_mut().add_allow_ip(v4);
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let mut hp = Request::get("/.git/config");
+        hp.src_ip = Some(mapped);
+        let j1 = s.inspect_stateful(&hp, &mut chain, 0);
+        assert!(!j1.banned_source, "allow-listed honeypot hit must not ban");
+        assert_eq!(chain.ban_count(), 0);
+        let j2 = s.inspect_stateful(&browser("/index.html", mapped), &mut chain, 1_000);
+        assert!(!j2.banned_source);
+        assert_eq!(j2.verdict, Verdict::Allow, "{}", j2.reason);
+        // Even a ban forced onto the allow-listed address does not fast-track it.
+        chain.ban(SourceKey::new(v4, 64), BanCause::Manual, 2_000);
+        let j3 = s.inspect_stateful(&browser("/index.html", v4), &mut chain, 3_000);
+        assert!(!j3.banned_source);
+        assert_eq!(j3.verdict, Verdict::Allow, "{}", j3.reason);
+        // A non-allow-listed neighbour is unaffected by the allow-list and bans normally.
+        let other: IpAddr = "192.0.2.8".parse().unwrap();
+        hp.src_ip = Some(other);
+        assert!(s.inspect_stateful(&hp, &mut chain, 4_000).banned_source);
+    }
+
+    #[test]
+    fn deny_list_matches_mapped_ipv6() {
+        let mut s = shield();
+        s.intel_mut().add_deny_ip("192.0.2.9".parse().unwrap());
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("::ffff:192.0.2.9".parse().unwrap());
+        assert_eq!(s.inspect(&r).verdict, Verdict::Block);
+    }
+
+    #[test]
+    fn chain_bonus_applies_only_on_advance() {
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
         let mut recon = Request::get("/.env");
         recon.src_ip = Some(ip);
-        let j1 = s.inspect_stateful(&recon, &mut chain);
-        assert!(j1.chain_stage.is_some());
-
-        let mut exploit = Request::get("/p");
-        exploit.src_ip = Some(ip);
-        exploit.query.push(("id".into(), "1 union select a,b".into()));
-        let j2 = s.inspect_stateful(&exploit, &mut chain);
-        assert!(j2.banned_source);
-        assert_eq!(j2.verdict, Verdict::Block);
+        let j1 = s.inspect_stateful(&recon, &mut chain, 0);
+        let j2 = s.inspect_stateful(&recon, &mut chain, 1_000);
+        assert_eq!(j1.chain_stage, Some(Stage::Recon));
+        assert!(j2.score < j1.score, "no bonus without an advance (M2): {} vs {}", j2.score, j1.score);
     }
 
     #[test]
