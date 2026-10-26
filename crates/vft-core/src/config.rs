@@ -73,6 +73,33 @@ pub struct ShieldConfig {
     pub max_payload: usize,
     pub decode_cap: u8,
     pub deep_threshold: u8,
+    /// Token windows (4096 tokens, overlapping by 64) analyzed per field before
+    /// giving up. When they run out the field is reported as `limit.graph-truncated`.
+    pub max_graph_windows: usize,
+    /// Bytes of one request's fields inspected (each field charged once, so
+    /// chunk overlap is free). Default 4 MiB: a 1 MiB body after lossy UTF-8
+    /// inflation, plus headers.
+    /// Past it the rest is skipped and the request is reported as
+    /// `limit.payload-truncated`. Must be >= `max_payload`.
+    ///
+    /// Scale it together with `max_normalize_work` and the proxy's
+    /// `limits.max_body`: lossy UTF-8 can triple a binary body (each invalid byte
+    /// becomes a 3-byte U+FFFD), so raising `max_body` alone makes large binary
+    /// uploads hard-block on this budget.
+    pub max_inspect_bytes: usize,
+    /// Folded chars all normalizations of one request may produce (field chunks,
+    /// split pieces and the path). Default 8 Mi chars, 2 x `max_inspect_bytes`.
+    /// A normalization that could pass it is not run: inspection stops and the
+    /// request is reported as `limit.payload-truncated`. Must be >= `max_payload`.
+    ///
+    /// Scale it together with `max_inspect_bytes` and the proxy's
+    /// `limits.max_body`: benign multi-MB text that NFKC expands (ligatures,
+    /// squared CJK units, U+FDFA) can reach this cap and hard-block. Inspection
+    /// time grows roughly linearly with it.
+    pub max_normalize_work: usize,
+    /// Construct or decoder ids switched off (see `venusflytrap ablate`).
+    /// Every id must be registered; unknown ids fail validation.
+    pub disabled: Vec<String>,
 }
 
 impl Default for ShieldConfig {
@@ -81,6 +108,10 @@ impl Default for ShieldConfig {
             max_payload: 64 * 1024,
             decode_cap: 14,
             deep_threshold: 3,
+            max_graph_windows: 32,
+            max_inspect_bytes: 4 * 1024 * 1024,
+            max_normalize_work: 8 * 1024 * 1024,
+            disabled: Vec::new(),
         }
     }
 }
@@ -281,6 +312,18 @@ impl Config {
         if sh.deep_threshold == 0 || sh.deep_threshold > sh.decode_cap {
             bad("shield.deep_threshold", format!("must be in 1..=decode_cap, got {}", sh.deep_threshold));
         }
+        if !(1..=1024).contains(&sh.max_graph_windows) {
+            bad("shield.max_graph_windows", format!("must be in 1..=1024, got {}", sh.max_graph_windows));
+        }
+        if sh.max_inspect_bytes < sh.max_payload {
+            bad("shield.max_inspect_bytes", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_inspect_bytes));
+        }
+        if sh.max_normalize_work < sh.max_payload {
+            bad("shield.max_normalize_work", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_normalize_work));
+        }
+        for id in crate::graph::sinks::unknown_ids(&sh.disabled) {
+            bad("shield.disabled", format!("unknown construct id {id:?}"));
+        }
 
         let s = &self.scoring;
         for (key, w) in [
@@ -396,6 +439,43 @@ mod tests {
     fn issues(yaml: &str) -> Vec<ConfigIssue> {
         let cfg: Config = serde_yaml::from_str(yaml).expect("parses");
         cfg.validate().err().unwrap_or_default()
+    }
+
+    #[test]
+    fn inspect_budget_at_least_one_field() {
+        assert!(issues("shield:
+  max_inspect_bytes: 1000
+").iter().any(|i| i.key == "shield.max_inspect_bytes"));
+        assert!(issues("shield:
+  max_inspect_bytes: 1048576
+").is_empty());
+    }
+
+    #[test]
+    fn normalize_work_at_least_one_field() {
+        assert_eq!(Config::default().shield.max_normalize_work, 2 * Config::default().shield.max_inspect_bytes);
+        assert!(issues("shield:
+  max_normalize_work: 1000
+").iter().any(|i| i.key == "shield.max_normalize_work"));
+        assert!(issues("shield:
+  max_normalize_work: 65536
+").is_empty());
+    }
+
+    #[test]
+    fn graph_windows_bounds() {
+        assert!(issues("shield:
+  max_graph_windows: 0
+").iter().any(|i| i.key == "shield.max_graph_windows"));
+        assert!(issues("shield:
+  max_graph_windows: 32
+").is_empty());
+    }
+
+    #[test]
+    fn disabled_ids_must_be_registered() {
+        assert!(issues("shield:\n  disabled: [nope.nope]\n").iter().any(|i| i.key == "shield.disabled"));
+        assert!(issues("shield:\n  disabled: [sqli.union-select]\n").is_empty());
     }
 
     #[test]

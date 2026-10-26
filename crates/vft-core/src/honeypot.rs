@@ -1,7 +1,6 @@
 //! FR5 — Honeypot: decoy paths no legitimate client should ever touch.
 
 use crate::config::HoneypotConfig;
-use crate::judgment::{Family, Pattern};
 use crate::lattice::{Evidence, FourValued};
 use crate::request::Request;
 
@@ -23,7 +22,7 @@ impl Honeypot {
             Some(Evidence::new(
                 FourValued::Dangerous,
                 1.0,
-                vec![Pattern::new(Family::Honeypot, "decoy-hit")],
+                vec![crate::graph::sinks::HONEYPOT_DECOY_HIT.pattern()],
                 format!("honeypot decoy path hit: {path}"),
             ))
         } else {

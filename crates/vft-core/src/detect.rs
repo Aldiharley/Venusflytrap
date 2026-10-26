@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::graph;
-use crate::judgment::{Family, Pattern};
+use crate::graph::sinks::{self, ConstructInfo, Disabled};
 use crate::lattice::{Evidence, FourValued};
 use crate::normalize::Normalized;
 use crate::request::{Field, Location, Request};
@@ -14,6 +14,7 @@ pub struct FieldCtx<'a> {
     pub field: &'a Field,
     pub norm: &'a Normalized,
     pub analysis: &'a graph::Analysis,
+    pub disabled: &'a Disabled,
 }
 
 /// A detector over a single normalized field.
@@ -59,9 +60,9 @@ impl FieldDetector for SignatureDetector {
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
         let t = &ctx.norm.text;
         let mut hits = Vec::new();
-        for (needle, fam, name) in SIGNATURES {
-            if t.contains(needle) {
-                hits.push(Pattern::new(*fam, *name));
+        for &(needle, c) in SIGNATURES {
+            if t.contains(needle) && !ctx.disabled.is(c) {
+                hits.push(c.pattern());
             }
         }
         if hits.is_empty() {
@@ -72,14 +73,14 @@ impl FieldDetector for SignatureDetector {
     }
 }
 
-const SIGNATURES: &[(&str, Family, &str)] = &[
-    ("union all select", Family::Sqli, "union-all-select"),
-    ("' or '1'='1", Family::Sqli, "classic-or"),
-    ("information_schema", Family::Sqli, "schema-enum"),
-    ("<script>alert", Family::Xss, "alert-script"),
-    ("onerror=", Family::Xss, "onerror"),
-    ("/etc/passwd", Family::PathTraversal, "etc-passwd"),
-    ("$(cat ", Family::CommandInjection, "cat-subst"),
+static SIGNATURES: &[(&str, &ConstructInfo)] = &[
+    ("union all select", &sinks::SIG_UNION_ALL_SELECT),
+    ("' or '1'='1", &sinks::SIG_CLASSIC_OR),
+    ("information_schema", &sinks::SIG_SCHEMA_ENUM),
+    ("<script>alert", &sinks::SIG_ALERT_SCRIPT),
+    ("onerror=", &sinks::SIG_ONERROR),
+    ("/etc/passwd", &sinks::SIG_ETC_PASSWD),
+    ("$(cat ", &sinks::SIG_CAT_SUBST),
 ];
 
 /// API-safety: numeric/identifier fields carrying injection structure, or
@@ -93,11 +94,14 @@ impl FieldDetector for ApiSafetyDetector {
         let name = ctx.field.name.to_lowercase();
         let looks_numeric_field =
             name == "id" || name.ends_with("_id") || name == "page" || name == "count";
-        if looks_numeric_field && !ctx.analysis.reachable.is_empty() {
+        if looks_numeric_field
+            && !ctx.analysis.reachable.is_empty()
+            && !ctx.disabled.is(&sinks::API_TYPE_VIOLATION)
+        {
             return Evidence::new(
                 FourValued::Dangerous,
                 0.7,
-                vec![Pattern::new(Family::Sqli, "type-violation")],
+                vec![sinks::API_TYPE_VIOLATION.pattern()],
                 "numeric field carries injection structure",
             );
         }
@@ -174,7 +178,10 @@ impl FieldDetector for AiDetector<'_> {
 
 /// Request-level intent detector (path recon / empty-payload probing). Not a
 /// field detector — it looks at the whole request.
-pub fn intent_evidence(req: &Request, cfg: &Config) -> Evidence {
+pub fn intent_evidence(req: &Request, cfg: &Config, disabled: &Disabled) -> Evidence {
+    if disabled.is(&sinks::RECON_SENSITIVE_PATH) {
+        return Evidence::none("recon disabled");
+    }
     let path = req.canonical_path().to_lowercase();
     // Prefix match only — NOT substring. A substring match flags benign nested
     // paths like `/api/config.json` just because they contain `/config.json`
@@ -197,7 +204,7 @@ pub fn intent_evidence(req: &Request, cfg: &Config) -> Evidence {
         return Evidence::new(
             value,
             weight,
-            vec![Pattern::new(Family::Recon, "sensitive-path-probe")],
+            vec![sinks::RECON_SENSITIVE_PATH.pattern()],
             format!("recon probe of sensitive path {path}"),
         );
     }
@@ -213,11 +220,13 @@ mod tests {
         field: &'a Field,
         norm: &'a Normalized,
         analysis: &'a graph::Analysis,
+        disabled: &'a Disabled,
     ) -> FieldCtx<'a> {
         FieldCtx {
             field,
             norm,
             analysis,
+            disabled,
         }
     }
 
@@ -230,7 +239,8 @@ mod tests {
         };
         let n = normalize(&f.raw, &Options::default());
         let a = graph::analyze(&n.text);
-        let e = GraphTaintDetector.assess(&ctx_for(&f, &n, &a));
+        let d = Disabled::default();
+        let e = GraphTaintDetector.assess(&ctx_for(&f, &n, &a, &d));
         assert_eq!(e.value, FourValued::Dangerous);
     }
 
@@ -243,7 +253,8 @@ mod tests {
         };
         let n = normalize(&f.raw, &Options::default());
         let a = graph::analyze(&n.text);
-        let e = ApiSafetyDetector.assess(&ctx_for(&f, &n, &a));
+        let d = Disabled::default();
+        let e = ApiSafetyDetector.assess(&ctx_for(&f, &n, &a, &d));
         assert_eq!(e.value, FourValued::Dangerous);
     }
 
@@ -251,7 +262,7 @@ mod tests {
     fn intent_flags_env_probe() {
         let cfg = Config::default();
         let req = Request::get("/.env");
-        let e = intent_evidence(&req, &cfg);
+        let e = intent_evidence(&req, &cfg, &Disabled::default());
         assert_eq!(e.value, FourValued::Dangerous);
     }
 
@@ -259,7 +270,7 @@ mod tests {
     fn intent_flags_encoded_env_probe() {
         let cfg = Config::default();
         for p in ["/.%65nv", "/%2eenv", "//.env"] {
-            let e = intent_evidence(&Request::get(p), &cfg);
+            let e = intent_evidence(&Request::get(p), &cfg, &Disabled::default());
             assert_eq!(e.value, FourValued::Dangerous, "missed {p}");
         }
     }

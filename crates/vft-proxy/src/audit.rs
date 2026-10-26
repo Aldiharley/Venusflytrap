@@ -224,7 +224,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(v["ts_ms"], 1_700_000_000_000u64);
         assert_eq!(v["request_id"], 7);
-        assert!(v["contributions"].as_array().unwrap().iter().any(|c| c["construct"] == "union-select"));
+        assert!(v["contributions"].as_array().unwrap().iter().any(|c| c["construct"] == "sqli.union-select"));
         let _ = std::fs::remove_file(&p);
     }
 

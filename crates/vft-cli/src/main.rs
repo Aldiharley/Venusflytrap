@@ -6,6 +6,7 @@ mod bench;
 mod corpus;
 mod eval;
 
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +91,29 @@ enum Command {
         /// Maximum samples to replay in `--mode tcp`.
         #[arg(long, default_value_t = 1000)]
         limit: usize,
+        /// Split manifest from eval/split.py (use with --side).
+        #[arg(long, requires = "side")]
+        manifest: Option<PathBuf>,
+        /// Which half of the split to score: dev or heldout.
+        #[arg(long, requires = "manifest")]
+        side: Option<String>,
+        /// Disable a construct or decoder by id (repeatable).
+        #[arg(long)]
+        disable: Vec<String>,
+    },
+    /// Leave-one-out ablation in library mode; writes a TSV.
+    Ablate {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, requires = "side")]
+        manifest: Option<PathBuf>,
+        #[arg(long, requires = "manifest")]
+        side: Option<String>,
+        /// Construct ids to ablate (repeatable); default: every registered construct.
+        #[arg(long = "id")]
+        ids: Vec<String>,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Configuration tools.
     Config {
@@ -171,10 +195,15 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
-        Command::Eval { corpus, mode, sources, step_ms, out, limit } => {
-            let cfg = load_config(cli.config.as_ref())?;
+        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable } => {
+            let mut cfg = load_config(cli.config.as_ref())?;
+            cfg.shield.disabled.extend(disable);
+            cfg.validate().map_err(|e| anyhow::anyhow!(e.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("; ")))?;
             let sources: eval::Sources = sources.parse().map_err(anyhow::Error::msg)?;
-            let samples = eval::load_corpus(&corpus)?;
+            let mut samples = eval::load_corpus(&corpus)?;
+            if let (Some(m), Some(s)) = (manifest.as_ref(), side.as_deref()) {
+                samples = eval::select_side(samples, &eval::load_manifest(m)?, s)?;
+            }
             if mode == EvalMode::Tcp {
                 let r = eval::run_tcp(cfg, &samples, limit)?;
                 println!("{}", serde_json::to_string_pretty(&r)?);
@@ -187,6 +216,30 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report.invariant_violations > 0 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0) {
                 std::process::exit(3);
+            }
+        }
+        Command::Ablate { corpus, manifest, side, ids, out } => {
+            let cfg = load_config(cli.config.as_ref())?;
+            let mut samples = eval::load_corpus(&corpus)?;
+            if let (Some(m), Some(s)) = (manifest.as_ref(), side.as_deref()) {
+                samples = eval::select_side(samples, &eval::load_manifest(m)?, s)?;
+            }
+            let all: Vec<&'static str> = vft_core::graph::sinks::constructs().iter().map(|c| c.id).collect();
+            let chosen: Vec<&'static str> = if ids.is_empty() {
+                all
+            } else {
+                let mut v = Vec::new();
+                for id in &ids {
+                    let c = vft_core::graph::sinks::lookup(id).ok_or_else(|| anyhow::anyhow!("unknown construct id {id:?}"))?;
+                    v.push(c.id);
+                }
+                v
+            };
+            let rows = eval::ablate(&cfg, &samples, &chosen)?;
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&out)?);
+            writeln!(f, "id\tkind\ttp\tfp\td_tp\td_fp\tnet")?;
+            for r in &rows {
+                writeln!(f, "{}\t{}\t{}\t{}\t{}\t{}\t{}", r.id, r.kind, r.tp, r.fp, r.d_tp, r.d_fp, r.d_tp - r.d_fp)?;
             }
         }
         Command::Config { action: ConfigCmd::Validate { file } } => match Config::load(&file) {

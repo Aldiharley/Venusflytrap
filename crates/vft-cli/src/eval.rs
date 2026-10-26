@@ -3,7 +3,7 @@
 //! proxy serves (`Pipeline::decide`) statefully, with the raw Cookie header,
 //! and reports ban effects. Both modes share one lenient raw-request parser.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -51,6 +51,42 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Sample>) -> anyhow::Result<()> {
         out.push(Sample { rel, label, raw, unreadable });
     }
     Ok(())
+}
+
+/// Read `manifest.tsv` from `eval/split.py`: relpath, label, sha256, side.
+pub fn load_manifest(path: &Path) -> anyhow::Result<HashMap<String, (u8, String)>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut m = HashMap::new();
+    for (n, line) in text.lines().enumerate() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() != 4 {
+            anyhow::bail!("{}:{}: expected 4 tab-separated columns", path.display(), n + 1);
+        }
+        let label: u8 = cols[1].parse()?;
+        m.insert(cols[0].to_string(), (label, cols[3].to_string()));
+    }
+    Ok(m)
+}
+
+/// Keep the samples on `side` ("dev" or "heldout"). Every sample must be in the
+/// manifest with the same label, so a stale manifest fails loudly.
+pub fn select_side(samples: Vec<Sample>, manifest: &HashMap<String, (u8, String)>, side: &str) -> anyhow::Result<Vec<Sample>> {
+    if side != "dev" && side != "heldout" {
+        anyhow::bail!("--side must be dev or heldout, got {side:?}");
+    }
+    let mut out = Vec::new();
+    for s in samples {
+        let Some((label, sd)) = manifest.get(&s.rel) else {
+            anyhow::bail!("{} is not in the manifest", s.rel);
+        };
+        if *label != s.label {
+            anyhow::bail!("{}: manifest label {} != corpus label {}", s.rel, label, s.label);
+        }
+        if sd == side {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 pub struct Parsed {
@@ -555,9 +591,59 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
     })
 }
 
+#[derive(Debug, Serialize)]
+pub struct AblationRow {
+    pub id: &'static str,
+    pub kind: String,
+    pub tp: u64,
+    pub fp: u64,
+    /// True positives this construct contributes: baseline TP minus TP with it disabled.
+    pub d_tp: i64,
+    /// False positives this construct contributes.
+    pub d_fp: i64,
+}
+
+/// Leave-one-out over `ids` in library mode: one baseline run, then one run per
+/// id with only that id added to `shield.disabled`.
+pub fn ablate(cfg: &Config, samples: &[Sample], ids: &[&'static str]) -> anyhow::Result<Vec<AblationRow>> {
+    let lib = |c: Config| -> anyhow::Result<Metrics> {
+        let sources: Sources = "distinct".parse().map_err(anyhow::Error::msg)?;
+        Ok(run(c, samples, false, sources, 100, None)?.library)
+    };
+    let base = lib(cfg.clone())?;
+    let mut rows = Vec::new();
+    for &id in ids {
+        let info = vft_core::graph::sinks::lookup(id).ok_or_else(|| anyhow::anyhow!("unknown construct id {id:?}"))?;
+        let mut c = cfg.clone();
+        if !c.shield.disabled.iter().any(|d| d == id) {
+            c.shield.disabled.push(id.to_string());
+        }
+        let m = lib(c)?;
+        rows.push(AblationRow {
+            id: info.id,
+            kind: format!("{:?}", info.kind),
+            tp: m.tp,
+            fp: m.fp,
+            d_tp: base.tp as i64 - m.tp as i64,
+            d_fp: base.fp as i64 - m.fp as i64,
+        });
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ablate_reports_what_a_construct_contributes() {
+        let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let rows = ablate(&Config::default(), &[attack, benign], &["sqli.union-select"]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "sqli.union-select");
+        assert_eq!((rows[0].d_tp, rows[0].d_fp), (1, 0));
+    }
 
     #[test]
     fn replay_io_failures_are_errors_and_early_replies_are_read() {
@@ -706,5 +792,34 @@ Host: x
         assert!("pooled:x".parse::<Sources>().is_err());
         let s = Sources::Pooled(10);
         assert_eq!(s.ip_for(0, "a/b.white"), s.ip_for(99, "a/b.white"));
+    }
+
+    fn sample(rel: &str, label: u8) -> Sample {
+        Sample { rel: rel.into(), label, raw: b"GET / HTTP/1.1\r\n\r\n".to_vec(), unreadable: None }
+    }
+
+    fn manifest_file(text: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("vft-manifest-{}-{}.tsv", std::process::id(), text.len()));
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[test]
+    fn select_side_keeps_only_that_side() {
+        let p = manifest_file("a.white\t0\tff\tdev\nb.black\t1\tee\theldout\n");
+        let m = load_manifest(&p).unwrap();
+        let picked = select_side(vec![sample("a.white", 0), sample("b.black", 1)], &m, "dev").unwrap();
+        assert_eq!(picked.iter().map(|s| s.rel.as_str()).collect::<Vec<_>>(), vec!["a.white"]);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn select_side_rejects_unknown_files_and_label_mismatch() {
+        let p = manifest_file("a.white\t0\tff\tdev\n");
+        let m = load_manifest(&p).unwrap();
+        assert!(select_side(vec![sample("zzz.white", 0)], &m, "dev").is_err());
+        assert!(select_side(vec![sample("a.white", 1)], &m, "dev").is_err());
+        assert!(select_side(vec![sample("a.white", 0)], &m, "test").is_err());
+        let _ = std::fs::remove_file(p);
     }
 }
