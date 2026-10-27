@@ -236,8 +236,8 @@ mod tests {
         for (name, hs) in [("chrome", CHROME), ("firefox", FIREFOX), ("safari", SAFARI)] {
             for i in 0..10 {
                 let d = p.decide(&parts("/products?page=2", hs), b"", Some(peer), i * 500);
-                assert_eq!(d.judgment.verdict, Verdict::Allow, "{name} #{i}: {}", d.judgment.reason);
-                assert!(!d.judgment.banned_source, "{name} #{i} banned");
+                assert_eq!(d.judgment.verdict, Verdict::Allow, "{name} #{i}: {}", d.judgment.decided_by.msg);
+                assert!(!d.judgment.banned(), "{name} #{i} banned");
                 assert_eq!(vft_core::event_for(&d.judgment), vft_core::Event::Benign);
             }
         }
@@ -254,12 +254,12 @@ mod tests {
         let p = pipeline();
         let peer: IpAddr = "203.0.113.9".parse().unwrap();
         let d1 = p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 0);
-        assert!(blocked(d1.judgment.verdict), "{}", d1.judgment.reason);
-        assert!(!d1.judgment.banned_source, "a single exfiltration block no longer bans");
+        assert!(blocked(d1.judgment.verdict), "{}", d1.judgment.decided_by.msg);
+        assert!(!d1.judgment.banned(), "a single exfiltration block no longer bans");
         let _ = p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 500);
-        assert!(p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 900).judgment.banned_source);
+        assert!(p.decide(&parts(EXFIL, CHROME), b"", Some(peer), 900).judgment.banned());
         let d2 = p.decide(&parts("/", CHROME), b"", Some(peer), 1_000);
-        assert!(d2.judgment.banned_source);
+        assert!(d2.judgment.banned());
         assert_eq!(d2.judgment.verdict, Verdict::Block);
         let other: IpAddr = "203.0.113.10".parse().unwrap();
         assert_eq!(p.decide(&parts("/", CHROME), b"", Some(other), 1_000).judgment.verdict, Verdict::Allow);
@@ -272,15 +272,15 @@ mod tests {
         let nat: IpAddr = "198.51.100.200".parse().unwrap();
         for i in 0..50 {
             let d = p.decide(&parts("/products?page=2", CHROME), b"", Some(nat), i * 1_000);
-            assert_eq!(d.judgment.verdict, Verdict::Allow, "#{i}: {}", d.judgment.reason);
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "#{i}: {}", d.judgment.decided_by.msg);
         }
         for i in 0..3 {
             let d = p.decide(&parts(EXFIL, CHROME), b"", Some(nat), 50_000 + i * 1_000);
-            assert!(blocked(d.judgment.verdict), "attack #{i}: {}", d.judgment.reason);
-            assert!(!d.judgment.banned_source, "attack #{i} banned the shared source");
+            assert!(blocked(d.judgment.verdict), "attack #{i}: {}", d.judgment.decided_by.msg);
+            assert!(!d.judgment.banned(), "attack #{i} banned the shared source");
         }
         let d = p.decide(&parts("/products?page=2", CHROME), b"", Some(nat), 60_000);
-        assert_eq!(d.judgment.verdict, Verdict::Allow, "{}", d.judgment.reason);
+        assert_eq!(d.judgment.verdict, Verdict::Allow, "{}", d.judgment.decided_by.msg);
     }
 
     /// Every probe goes through `decide`; failures are collected so one run shows them all.
@@ -291,7 +291,7 @@ mod tests {
             let peer = IpAddr::from([198, 51, 100, 100 + n as u8]);
             let d = p.decide(&parts(uri, headers), b"", Some(peer), 0);
             if !matches!(d.judgment.verdict, Verdict::Block | Verdict::Challenge) {
-                missed.push(format!("{uri} {headers:?}: {:?} {} {}", d.judgment.verdict, d.judgment.score, d.judgment.reason));
+                missed.push(format!("{uri} {headers:?}: {:?} {} {}", d.judgment.verdict, d.judgment.score, d.judgment.decided_by.msg));
             }
         }
         assert!(missed.is_empty(), "not blocked:\n{}", missed.join("\n"));
@@ -324,7 +324,7 @@ mod tests {
         let peer: IpAddr = "198.51.100.77".parse().unwrap();
         for uri in ["/search?q=shoes&sort=price_asc&utm_source=news", "/p?flag", "/a?x[]=1&x[]=2"] {
             let d = p.decide(&parts(uri, CHROME), b"", Some(peer), 0);
-            assert_eq!(d.judgment.verdict, Verdict::Allow, "{uri}: {}", d.judgment.reason);
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "{uri}: {}", d.judgment.decided_by.msg);
         }
     }
 
@@ -335,11 +335,11 @@ mod tests {
         let head = parts("/upload", CHROME);
         assert!(p.fast_track(&head, Some(peer), 0).is_none(), "not banned yet");
         assert!(p.fast_track(&head, None, 0).is_none(), "no peer, no source");
-        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(peer), 0).judgment.banned_source);
+        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(peer), 0).judgment.banned());
         let ft = p.fast_track(&head, Some(peer), 1_000).expect("banned source is fast-tracked");
         let d = p.decide(&head, b"x=1", Some(peer), 1_000);
-        assert_eq!((ft.judgment.verdict, ft.judgment.banned_source), (Verdict::Block, true));
-        assert_eq!((d.judgment.verdict, d.judgment.banned_source), (Verdict::Block, true));
+        assert_eq!((ft.judgment.verdict, ft.judgment.banned()), (Verdict::Block, true));
+        assert_eq!((d.judgment.verdict, d.judgment.banned()), (Verdict::Block, true));
         assert_eq!(ft.src, d.src);
         assert!(ft.request.body.is_empty());
     }
@@ -414,14 +414,14 @@ mod tests {
         assert!(cfg.validate().is_ok());
         let p = Pipeline::new(Arc::new(Shield::new(cfg)));
         let attacker: IpAddr = "203.0.113.50".parse().unwrap();
-        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(attacker), 0).judgment.banned_source);
+        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(attacker), 0).judgment.banned());
         for i in 0..2_000u32 {
             let ip = IpAddr::from([10, 20, (i >> 8) as u8, i as u8]);
             let d = p.decide(&parts("/index.html", CHROME), b"", Some(ip), 1 + u64::from(i));
-            assert_eq!(d.judgment.verdict, Verdict::Allow, "#{i}: {}", d.judgment.reason);
+            assert_eq!(d.judgment.verdict, Verdict::Allow, "#{i}: {}", d.judgment.decided_by.msg);
         }
         let d = p.decide(&parts("/index.html", CHROME), b"", Some(attacker), 5_000);
-        assert!(d.judgment.banned_source, "ban evicted by benign source churn");
+        assert!(d.judgment.banned(), "ban evicted by benign source churn");
         assert_eq!(d.judgment.verdict, Verdict::Block);
     }
 
@@ -434,18 +434,18 @@ mod tests {
         shield.intel_mut().add_allow_ip(v4);
         let p = Pipeline::new(Arc::new(shield));
         let d1 = p.decide(&parts("/.git/config", CHROME), b"", Some(mapped), 0);
-        assert!(!d1.judgment.banned_source, "allow-listed honeypot hit must not ban");
+        assert!(!d1.judgment.banned(), "allow-listed honeypot hit must not ban");
         let d2 = p.decide(&parts("/index.html", CHROME), b"", Some(mapped), 1_000);
-        assert!(!d2.judgment.banned_source);
-        assert_eq!(d2.judgment.verdict, Verdict::Allow, "{}", d2.judgment.reason);
+        assert!(!d2.judgment.banned());
+        assert_eq!(d2.judgment.verdict, Verdict::Allow, "{}", d2.judgment.decided_by.msg);
         // Even a ban forced onto the address does not fast-track an allow-listed source.
         p.chain().ban(SourceKey::new(v4, 64), vft_core::BanCause::Manual, 2_000);
         let d3 = p.decide(&parts("/index.html", CHROME), b"", Some(v4), 3_000);
-        assert!(!d3.judgment.banned_source);
-        assert_eq!(d3.judgment.verdict, Verdict::Allow, "{}", d3.judgment.reason);
+        assert!(!d3.judgment.banned());
+        assert_eq!(d3.judgment.verdict, Verdict::Allow, "{}", d3.judgment.decided_by.msg);
         // A non-allow-listed neighbour still bans normally.
         let other: IpAddr = "192.0.2.8".parse().unwrap();
-        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(other), 4_000).judgment.banned_source);
+        assert!(p.decide(&parts("/.git/config", CHROME), b"", Some(other), 4_000).judgment.banned());
     }
 
     #[test]

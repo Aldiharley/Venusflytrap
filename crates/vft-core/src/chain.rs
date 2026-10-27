@@ -317,7 +317,7 @@ mod tests {
 
     fn scanner_ua() -> Contribution {
         Contribution {
-            engine: "intel".into(),
+            engine: "intel",
             field: None,
             construct: Some("intel.scanner-ua".into()),
             family: Some(Family::Intel),
@@ -339,7 +339,7 @@ mod tests {
     fn recon_stages_only_when_the_request_is_not_allowed() {
         // Final review F1 (principle 2): an allowed request never stages a source.
         let recon = Contribution {
-            engine: "intent".into(),
+            engine: "intent",
             field: None,
             construct: Some("sensitive-path".into()),
             family: Some(Family::Recon),

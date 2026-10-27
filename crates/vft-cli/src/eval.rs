@@ -320,15 +320,15 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             lat.push(t2.elapsed().as_micros() as u64);
             let sj = &d.judgment;
             srv.add(attack(sj.verdict), s.label);
-            banned = sj.banned_source;
-            let fresh_ban = sj.banned_source && !sj.contributions.iter().any(|c| c.construct.as_deref() == Some("chain.ban"));
+            banned = sj.banned();
+            let fresh_ban = sj.chain.and_then(|o| o.new_ban).is_some();
             if fresh_ban && lj.verdict == Verdict::Allow {
                 bans_from_allowed += 1;
             }
             if s.label == 0 {
                 let key = SourceKey::new(ip, 64);
                 benign_sources.insert(key);
-                if sj.banned_source {
+                if sj.banned() {
                     benign_banned.insert(key);
                 }
                 if attack(sj.verdict) && !attack(lj.verdict) {

@@ -34,7 +34,7 @@ pub mod shield;
 pub use chain::{event_for, BanCause, BanRecord, ChainOutcome, ChainTracker, Event, SourceKey};
 pub use config::{BanPolicy, Config};
 pub use detect::{AiOracle, HeuristicOracle};
-pub use judgment::{Cause, CauseKind, Contribution, EngineReport, Family, FieldRef, Judgment, Pattern, Stage, Verdict};
+pub use judgment::{Cause, CauseKind, Contribution, Family, FieldRef, Judgment, Pattern, Stage, Verdict};
 pub use lattice::FourValued;
 pub use request::{Field, Location, Request};
 pub use shield::Shield;

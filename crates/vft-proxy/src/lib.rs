@@ -262,7 +262,7 @@ async fn forward(state: &ProxyState, parts: &http::request::Parts, body: Bytes, 
         if let Ok(v) = HeaderValue::from_str(&format!("{:?}", j.verdict)) {
             headers.insert("x-venusflytrap-verdict", v);
         }
-        if let Some(stage) = j.chain_stage.and_then(|s| HeaderValue::from_str(&format!("{s:?}")).ok()) {
+        if let Some(stage) = j.stage().and_then(|s| HeaderValue::from_str(&format!("{s:?}")).ok()) {
             headers.insert("x-venusflytrap-stage", stage);
         }
     }

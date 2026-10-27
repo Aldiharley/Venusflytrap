@@ -86,7 +86,7 @@ fn nfkc_expansion_flood_terminates() {
     let j = shield.inspect(&req);
     assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.payload-truncated")));
     assert_eq!(j.verdict, vft_core::Verdict::Block);
-    assert_eq!(j.reason, "hard-block: limit.payload-truncated (request not fully inspected)");
+    assert_eq!(j.decided_by.kind, vft_core::CauseKind::Limit);
 }
 
 proptest! {
@@ -142,7 +142,7 @@ fn normalization_work_timings() {
             j = shield.inspect(req);
             best = best.min(t.elapsed());
         }
-        eprintln!("{name}: {:?} score {} in {best:?} ({})", j.verdict, j.score, j.reason);
+        eprintln!("{name}: {:?} score {} in {best:?} ({})", j.verdict, j.score, j.decided_by.msg);
     }
 }
 

@@ -92,9 +92,9 @@ impl FieldRef {
 
 /// One piece of non-`None` evidence about one field, with the construct that
 /// produced it. Decision-grade input for the kill chain and the "why" panel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Contribution {
-    pub engine: String,
+    pub engine: &'static str,
     pub field: Option<FieldRef>,
     /// Construct name (today's pattern name; stable dotted ids arrive with the
     /// construct registry).
@@ -102,19 +102,8 @@ pub struct Contribution {
     pub family: Option<Family>,
     pub value: crate::lattice::FourValued,
     pub weight: f32,
-    /// Points added to the score. Filled in SP2; 0.0 until then.
+    /// Points this contribution added to the score.
     pub points: f32,
-}
-
-/// One detector's contribution, kept for explainability and the audit log.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EngineReport {
-    pub engine: String,
-    pub value: crate::lattice::FourValued,
-    pub weight: f32,
-    pub score_contribution: f32,
-    pub patterns: Vec<Pattern>,
-    pub note: String,
 }
 
 /// What kind of thing decided a judgment.
@@ -147,16 +136,11 @@ pub struct Cause {
 pub struct Judgment {
     pub verdict: Verdict,
     pub score: u8,
-    pub engines: Vec<EngineReport>,
-    pub matched: Vec<Pattern>,
     pub contributions: Vec<Contribution>,
     pub decided_by: Cause,
     /// The chain observation applied by `Shield::finalize`.
     pub chain: Option<crate::chain::ChainOutcome>,
-    pub chain_stage: Option<Stage>,
     pub normalized_layers: u8,
-    pub banned_source: bool,
-    pub reason: String,
 }
 
 impl Judgment {
@@ -164,8 +148,6 @@ impl Judgment {
         Judgment {
             verdict: Verdict::Allow,
             score: 0,
-            engines: Vec::new(),
-            matched: Vec::new(),
             contributions: Vec::new(),
             decided_by: Cause {
                 kind: CauseKind::NoEvidence,
@@ -175,10 +157,33 @@ impl Judgment {
                 msg: "no evidence".into(),
             },
             chain: None,
-            chain_stage: None,
             normalized_layers: 0,
-            banned_source: false,
-            reason: "no evidence".into(),
         }
+    }
+
+    /// The source is banned: by this request (`chain.new_ban`) or already (fast-track).
+    pub fn banned(&self) -> bool {
+        self.decided_by.kind == CauseKind::Ban
+    }
+
+    /// The source's kill-chain stage after this request, when a chain was observed.
+    pub fn stage(&self) -> Option<Stage> {
+        self.chain.and_then(|o| o.stage_after)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_read_cause_and_chain() {
+        let mut j = Judgment::allow();
+        assert!(!j.banned());
+        assert_eq!(j.stage(), None);
+        j.decided_by.kind = CauseKind::Ban;
+        j.chain = Some(crate::chain::ChainOutcome { stage_after: Some(Stage::Recon), ..Default::default() });
+        assert!(j.banned());
+        assert_eq!(j.stage(), Some(Stage::Recon));
     }
 }

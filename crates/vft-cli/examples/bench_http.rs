@@ -69,11 +69,15 @@ fn main() {
             _ => None,
         };
         if let Some(k) = kind {
-            let fams: Vec<String> = j
-                .matched
-                .iter()
-                .map(|p| format!("{:?}:{}", p.family, p.name))
-                .collect();
+            let mut fams: Vec<String> = Vec::new();
+            for c in &j.contributions {
+                if let (Some(f), Some(n)) = (c.family, c.construct.as_deref()) {
+                    let s = format!("{f:?}:{n}");
+                    if !fams.contains(&s) {
+                        fams.push(s);
+                    }
+                }
+            }
             writeln!(
                 dw,
                 "{}\t{}\t{}\t{}\t{}",
@@ -81,7 +85,7 @@ fn main() {
                 j.score,
                 j.normalized_layers,
                 fams.join("|"),
-                j.reason.replace(['\t', '\n'], " ")
+                j.decided_by.msg.replace(['\t', '\n'], " ")
             )
             .unwrap();
         }
