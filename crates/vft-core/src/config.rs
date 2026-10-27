@@ -3,15 +3,31 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Config schema version. Only 1 exists.
+    pub version: u32,
     pub shield: ShieldConfig,
     pub scoring: ScoringConfig,
     pub chain: ChainConfig,
     pub honeypot: HoneypotConfig,
     pub proxy: ProxyConfig,
     pub limits: LimitsConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            version: 1,
+            shield: ShieldConfig::default(),
+            scoring: ScoringConfig::default(),
+            chain: ChainConfig::default(),
+            honeypot: HoneypotConfig::default(),
+            proxy: ProxyConfig::default(),
+            limits: LimitsConfig::default(),
+        }
+    }
 }
 
 /// Data-plane settings that the engine itself does not use.
@@ -310,6 +326,10 @@ impl Config {
         let mut v: Vec<ConfigIssue> = Vec::new();
         let mut bad = |key: &str, message: String| v.push(ConfigIssue { key: key.into(), message });
 
+        if self.version != 1 {
+            bad("version", format!("must be 1, got {}", self.version));
+        }
+
         let sh = &self.shield;
         if sh.max_payload < 1024 {
             bad("shield.max_payload", format!("must be >= 1024, got {}", sh.max_payload));
@@ -558,5 +578,15 @@ mod tests {
     fn missing_explicit_file_is_an_error() {
         let r = Config::load_or_default(Some(std::path::Path::new("Z:/definitely/not/here.yaml")));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn version_defaults_to_one_and_other_versions_are_rejected() {
+        assert_eq!(Config::default().version, 1);
+        assert!(issues("version: 1\n").is_empty());
+        assert!(issues("version: 2\n").iter().any(|i| i.key == "version"));
+        let shipped: Config =
+            serde_yaml::from_str(include_str!("../../../config/shield.yaml")).expect("shipped yaml parses");
+        assert_eq!(shipped.version, 1);
     }
 }
