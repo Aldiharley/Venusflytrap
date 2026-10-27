@@ -19,7 +19,7 @@
   }
 
   const dropped = $derived(app.counters?.dropped_total ?? 0);
-  const liveLabel = $derived(app.stale && app.live === 'Connected' ? 'Stale' : app.live);
+  const liveLabel = $derived(app.liveLabel);
 </script>
 
 <header class="bar glass">

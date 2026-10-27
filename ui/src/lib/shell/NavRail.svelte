@@ -24,7 +24,7 @@
       </li>
     {/each}
   </ul>
-  <p class="foot secondary">Live: {app.stale && app.live === 'Connected' ? 'Stale' : app.live}</p>
+  <p class="foot secondary">Live: {app.liveLabel}</p>
 </nav>
 
 <style>

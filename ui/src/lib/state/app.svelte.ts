@@ -17,6 +17,10 @@ class AppState {
   lastFrameAt = $state(0);
   now = $state(Date.now());
   stale = $derived(this.live !== 'Connected' || this.now - this.lastFrameAt > STALE_MS);
+  /** The one live label every screen shows: the real LiveState, or 'Stale' when connected but silent for 20 s. */
+  liveLabel = $derived<LiveState | 'Stale'>(
+    this.live === 'Connected' && this.now - this.lastFrameAt > STALE_MS ? 'Stale' : this.live,
+  );
   private stops: (() => void)[] = [];
   /** Bumped by stop(); a start() that finds it changed after its await was stopped or superseded. */
   private gen = 0;

@@ -66,3 +66,16 @@ test('start() registers a subscription and the clock; stop() clears them', async
   expect(g.unsubscribed()).toBe(1);
   expect(vi.getTimerCount()).toBe(0);
 });
+
+test('liveLabel: Connected when fresh, Stale when connected but silent, real state otherwise', () => {
+  app.live = 'Connected';
+  app.now = 1_000_000;
+  app.lastFrameAt = app.now - 1_000;
+  expect(app.liveLabel).toBe('Connected');
+  app.lastFrameAt = app.now - 21_000;
+  expect(app.liveLabel).toBe('Stale');
+  app.live = 'Reconnecting';
+  expect(app.liveLabel).toBe('Reconnecting');
+  app.live = 'Offline';
+  expect(app.liveLabel).toBe('Offline');
+});

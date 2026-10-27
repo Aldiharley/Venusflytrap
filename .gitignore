@@ -10,3 +10,7 @@ corpus/*.jsonl
 /.superpowers/
 /ui/assets/props/raw/
 /ui/assets/props/picks/
+# generated art stays out of git until its licence is confirmed
+/ui/assets/props/*.webp
+/ui/assets/props/manifest.json
+/ui/assets/scenes/

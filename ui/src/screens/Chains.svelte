@@ -111,7 +111,7 @@
   <label class="check"><input type="checkbox" bind:checked={bannedOnly} /> Banned only</label>
   <label>Source <input class="mono" bind:value={search} placeholder="Key or IP" /></label>
   <span class="secondary num count">{order.length} of ≤ 500</span>
-  <span class="secondary">Live: {app.stale ? 'paused' : app.live} · dropped {app.counters?.dropped_total ?? 0}</span>
+  <span class="secondary">Live: {app.liveLabel} · dropped {fmtCount(app.counters?.dropped_total ?? 0)}</span>
 </div>
 
 <div class="region" bind:this={region} {onfocusin} {onfocusout}>

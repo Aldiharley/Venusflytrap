@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { Dashboard } from '../lib/api/types';
   import { Pause, Play, Table2 } from '../lib/icons';
+  import { fmtCount } from '../lib/format';
   import { app } from '../lib/state/app.svelte';
   import { router } from '../lib/state/router.svelte';
   import { motion } from '../lib/state/theme.svelte';
@@ -45,7 +46,7 @@
 
 <header class="head">
   <h1 tabindex="-1">{title}</h1>
-  <p class="secondary status">Live: {app.stale ? 'paused' : app.live} · dropped {app.counters?.dropped_total ?? 0}</p>
+  <p class="secondary status">Live: {app.liveLabel} · dropped {fmtCount(app.counters?.dropped_total ?? 0)}</p>
 </header>
 
 <div class="layout">
