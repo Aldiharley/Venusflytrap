@@ -47,6 +47,66 @@ the first ban policy and passes after the ban-policy redesign.
 These are modest numbers and they are reported as measured. The baseline reads a slightly different
 parse of the same corpus. `venusflytrap bench` is a synthetic smoke test, not a result.
 
+## Operator console
+
+The console (`ui/`) is an operator UI built to answer three questions quickly: is the shield healthy and
+what is it stopping, why was this request blocked and which setting decided it, and what do I change.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/console-topology-light.png" alt="Traffic topology in the light theme: an isometric scene with an internet edge, three source clusters (clean, recon, exploitation), the Venusflytrap shield tower, five route blocks, honeypot decoy pods and a quarantine pen, joined by lines coloured and dashed by verdict, with a rate on each line."></td>
+    <td width="50%"><img src="docs/images/console-topology-dark.png" alt="The same Traffic topology scene in the dark theme."></td>
+  </tr>
+</table>
+
+*Traffic topology, light and dark. Every node is keyboard-focusable, and a table view carries every number the
+map shows.*
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/console-dashboard-light.png" alt="Dashboard in the light theme: rate tiles for allow, monitor, challenge and block, active bans and honeypot hits, a stacked chart of requests over time, sources by kill-chain stage, and a table of top constructs."></td>
+    <td width="50%"><img src="docs/images/console-chains-dark.png" alt="Attack chains in the dark theme: a grid with one row per source and columns for Recon, Enumeration, Exploitation and Exfiltration, showing the time each stage was first reached and a count, plus requests and blocked, honeypot hits, ban state and last seen."></td>
+  </tr>
+</table>
+
+*Dashboard (light) and Attack chains (dark). All figures in these screenshots come from deterministic
+fixtures, not from a running shield, and are not results.*
+
+What exists today:
+
+- **Shell.** Top status bar (worst component state, config revision, live-connection state, dropped-event
+  count, theme switch) and a navigation rail. Themes are light, dark or system.
+- **Dashboard.** Allow / Monitor / Challenge / Block rates, requests over time (with a table alternative),
+  sources by kill-chain stage, top constructs, active bans and honeypot hits.
+- **Traffic topology.** An isometric scene of source clusters by stage, the shield, the busiest route
+  groups, honeypot decoys and a quarantine pen. Line colour, dash pattern and width carry the verdict and
+  volume; moving packets are motion only and stop under reduced motion.
+- **Attack chains.** A grid of sources against Recon, Enumeration, Exploitation and Exfiltration with the
+  first-reached time and a count per cell, ban state, and filters for minimum stage, banned-only and source.
+- **Accessibility.** Verdicts and stages always carry a glyph and a word, never colour alone.
+
+**Status.** This is SP6a. The shell, Dashboard, Traffic topology and Attack chains run on deterministic
+fixtures; nothing is wired to a backend yet (the admin API and live channel arrive in later sub-projects,
+SP3 to SP5). Monitor, Request details, Source, Honeypot & bans, Settings and Keys are placeholders planned
+for SP6b.
+
+Verified quality bar: axe-core reports zero serious or critical violations in the light and dark themes on
+the screens above, the strict Content Security Policy holds with no inline styles, and the initial JavaScript
+is about 29 KB gzipped against a 150 KB budget.
+
+The isometric props and empty-state scenes are generated images kept out of git until their licence is
+confirmed, so a fresh clone builds without them and simply omits the images.
+
+Run it:
+
+```bash
+cd ui
+npm install
+npm run dev     # http://localhost:5173 ; append ?static to freeze the simulated live feed
+```
+
+Test commands and the screenshot script are in [`ui/README.md`](ui/README.md).
+
 ## Usage
 
 ```bash
@@ -82,6 +142,7 @@ assert_eq!(shield.inspect(&req).verdict, Verdict::Block);
 - `crates/vft-proxy` — hyper reverse proxy, decision headers, JSONL audit log.
 - `crates/vft-cli` — `scan` / `bench` / `serve` plus the benchmark corpus and
   baselines.
+- `ui/` — the operator console (Svelte 5 + Vite); see [Operator console](#operator-console).
 
 ## Documents
 
@@ -90,6 +151,9 @@ assert_eq!(shield.inspect(&req).verdict, Verdict::Block);
 - [`docs/TECH_SPEC.md`](docs/TECH_SPEC.md) — architecture and data model.
 - [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — build phases.
 - [`docs/BENCHMARK.md`](docs/BENCHMARK.md) — real-corpus results, library and serve side by side.
+- [`docs/superpowers/specs/2026-10-25-console-design.md`](docs/superpowers/specs/2026-10-25-console-design.md) — operator console design spec.
+- [`docs/superpowers/design/console-ux-architecture.md`](docs/superpowers/design/console-ux-architecture.md) — console screens, behaviour and copy.
+- [`docs/superpowers/design/console-design-system.md`](docs/superpowers/design/console-design-system.md) — console tokens, components and topology styling.
 
 ## Safety & limits
 
