@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 use crate::config::{Config, ConfigError, ConfigIssue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OptionKind {
     Int { min: i64, max: i64 },
@@ -27,6 +28,7 @@ pub enum OptionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Expertise {
     Basic,
@@ -35,6 +37,7 @@ pub enum Expertise {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Apply {
     /// Takes effect on the next request after a reload.
@@ -44,6 +47,7 @@ pub enum Apply {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OptionDescriptor {
     pub key: &'static str,
     pub kind: OptionKind,
@@ -223,6 +227,7 @@ pub(crate) fn yaml_tree(s: &str) -> Result<Value, ConfigError> {
 
 /// Where an option's effective value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Default,

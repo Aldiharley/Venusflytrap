@@ -119,6 +119,7 @@ impl SourceKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum BanCause {
     Honeypot,
     Exfiltration,
@@ -127,6 +128,7 @@ pub enum BanCause {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct BanRecord {
     pub since_ms: u64,
     pub until_ms: u64,
@@ -142,6 +144,7 @@ impl BanRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ChainOutcome {
     pub stage_before: Option<Stage>,
     pub stage_after: Option<Stage>,

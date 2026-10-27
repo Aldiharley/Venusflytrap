@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Attack family a matched pattern belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Family {
     Sqli,
     Xss,
@@ -38,6 +39,7 @@ impl Pattern {
 
 /// Kill-chain stage inferred for a source across requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Stage {
     Recon = 0,
     Enumeration = 1,
@@ -47,6 +49,7 @@ pub enum Stage {
 
 /// Final action band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Verdict {
     Allow,
     Monitor,
@@ -68,6 +71,7 @@ impl Verdict {
 
 /// Which field of the request a piece of evidence is about.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FieldRef {
     pub loc: crate::request::Location,
     pub name: String,
@@ -93,6 +97,7 @@ impl FieldRef {
 /// One piece of non-`None` evidence about one field, with the construct that
 /// produced it. Decision-grade input for the kill chain and the "why" panel.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Contribution {
     pub engine: &'static str,
     pub field: Option<FieldRef>,
@@ -108,6 +113,7 @@ pub struct Contribution {
 
 /// What kind of thing decided a judgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum CauseKind {
     NoEvidence,
     Detection,
@@ -121,6 +127,7 @@ pub enum CauseKind {
 
 /// The one setting that decided a judgment, with the construct and field behind it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Cause {
     pub kind: CauseKind,
     /// A key of `options::REGISTRY`, e.g. "scoring.block_at".
@@ -133,6 +140,7 @@ pub struct Cause {
 
 /// The engine's decision about a single request.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Judgment {
     pub verdict: Verdict,
     pub score: u8,
