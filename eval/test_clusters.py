@@ -40,9 +40,10 @@ class ClusterTests(unittest.TestCase):
 
     def test_misses_are_allow_or_monitor_on_malicious_rows(self):
         total, n_groups, ranked = cl.clusters(dev_rows(), "1", cl.MISS, 20)
-        self.assertEqual((total, n_groups), (3, 2))
+        self.assertEqual((total, n_groups), (4, 3))
         self.assertEqual(ranked[0], (("NoEvidence:scoring.monitor_at", "", "", ""), 2, ["d/m1.black", "d/m2.black"]))
         self.assertEqual(ranked[1][0], ("Detection:scoring.monitor_at", "xss.html-tag", "cookie", "session"))
+        self.assertEqual(ranked[2], (("NoEvidence:scoring.monitor_at", "test.neutral", "header", "x-sample"), 1, ["d/m4.black"]))
 
     def test_side_drops_held_out_rows_before_counting(self):
         total, _, ranked = cl.clusters(cl.load(CSV), "0", cl.ATTACK, 20)
@@ -53,11 +54,20 @@ class ClusterTests(unittest.TestCase):
         total, n_groups, ranked = cl.clusters(dev_rows(), "0", cl.ATTACK, 1)
         self.assertEqual((total, n_groups, len(ranked)), (4, 2, 1))
 
+    def test_key_uses_top_field_only_when_field_is_empty(self):
+        row = {"cause": "c", "top": "t", "field": "query:Name", "top_field": "header:Other"}
+        self.assertEqual(cl.key(row), ("c", "t", "query", "name"))
+        row["field"] = ""
+        self.assertEqual(cl.key(row), ("c", "t", "header", "other"))
+        del row["top_field"]
+        self.assertEqual(cl.key(row), ("c", "t", "", ""), "a DQ1-era CSV has no top_field column")
+
     def test_cli_prints_both_tables(self):
         code, out, _ = run_main([CSV, "--manifest", MANIFEST, "--side", "dev", "--top", "5"])
         self.assertEqual(code, 0)
         self.assertIn("false positives (label 0, Challenge/Block): 4 rows in 2 groups\n", out)
-        self.assertIn("misses (label 1, Allow/Monitor): 3 rows in 2 groups\n", out)
+        self.assertIn("misses (label 1, Allow/Monitor): 4 rows in 3 groups\n", out)
+        self.assertIn("1\tNoEvidence:scoring.monitor_at\ttest.neutral\theader\tx-sample\td/m4.black\n", out)
         self.assertIn("3\tDetection:scoring.block_at\tsqli.union-select\tquery\tid\td/fp1.white d/fp2.white d/fp3.white\n", out)
         self.assertNotIn("h/", out)
 

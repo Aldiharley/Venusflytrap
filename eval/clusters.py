@@ -1,12 +1,14 @@
 """Rank false positives and misses in an eval CSV by shared cause.
 
 Rows of `venusflytrap eval --out` are grouped by (cause, top construct, field
-location, field name in lower case). False positives are benign rows (label 0)
-whose library verdict is Challenge or Block; misses are malicious rows (label
-1) whose library verdict is Allow or Monitor. Only the CSV (and the split
-manifest) is read, never a corpus file. With --manifest and --side, rows of the
-other half are dropped before anything is counted, so held-out rows stay
-unopened during development.
+location, field name in lower case). The field is the deciding `field`, or the
+top contribution's `top_field` when `field` is empty (a row below every
+threshold has no deciding field); CSVs without `top_field` still load. False
+positives are benign rows (label 0) whose library verdict is Challenge or
+Block; misses are malicious rows (label 1) whose library verdict is Allow or
+Monitor. Only the CSV (and the split manifest) is read, never a corpus file.
+With --manifest and --side, rows of the other half are dropped before anything
+is counted, so held-out rows stay unopened during development.
 
 Usage: py -I -X utf8 eval/clusters.py <csv> [--manifest M --side dev|heldout] [--top N]
 Exit status: 0 printed, 2 invalid input.
@@ -60,7 +62,8 @@ def select(rows, sides, side):
 
 
 def key(row):
-    loc, _, name = row["field"].partition(":")
+    field = row["field"] or row.get("top_field") or ""
+    loc, _, name = field.partition(":")
     return (row["cause"], row["top"], loc, name.lower())
 
 
