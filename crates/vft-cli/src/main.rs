@@ -218,7 +218,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, out.as_deref())?;
+            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref() })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report.invariant_violations > 0
                 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0)

@@ -328,13 +328,42 @@ fn attack(v: Verdict) -> bool {
     matches!(v, Verdict::Block | Verdict::Challenge)
 }
 
-pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, csv: Option<&Path>) -> anyhow::Result<Report> {
+/// Optional outputs of [`run`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Outputs<'a> {
+    /// Per-sample CSV.
+    pub csv: Option<&'a Path>,
+}
+
+/// One CSV cell (RFC 4180): quoted when it holds a comma, a quote or a line break.
+fn csv_cell(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\"")).into()
+    } else {
+        s.into()
+    }
+}
+
+/// The construct of the contribution that added the most points (the first on
+/// a tie), as the shield's `top_contribution` picks it; `None` when no
+/// contribution has points.
+fn top_construct(cs: &[vft_core::Contribution]) -> Option<&str> {
+    let mut best: Option<&vft_core::Contribution> = None;
+    for c in cs {
+        if best.map_or(c.points > 0.0, |b| c.points > b.points) {
+            best = Some(c);
+        }
+    }
+    best.and_then(|c| c.construct.as_deref())
+}
+
+pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, out: Outputs<'_>) -> anyhow::Result<Report> {
     let shield = Arc::new(Shield::new(cfg));
     let pipeline = Pipeline::new(shield.clone());
-    let mut csv_out = match csv {
+    let mut csv_out = match out.csv {
         Some(p) => {
             let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause")?;
+            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top")?;
             Some(f)
         }
         None => None,
@@ -408,7 +437,22 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         }
         if let Some(f) = csv_out.as_mut() {
             let constructs: Vec<&str> = lj.contributions.iter().filter_map(|c| c.construct.as_deref()).collect();
-            writeln!(f, "{},{},{:?},{},{},{},{},{:?}:{}", s.rel, s.label, lj.verdict, serve_verdict, lj.score, banned, constructs.join("|"), lj.decided_by.kind, lj.decided_by.option_key)?;
+            let field = lj.decided_by.field.as_ref().map(|r| r.label()).unwrap_or_default();
+            writeln!(
+                f,
+                "{},{},{:?},{},{},{},{},{:?}:{},{},{}",
+                s.rel,
+                s.label,
+                lj.verdict,
+                serve_verdict,
+                lj.score,
+                banned,
+                constructs.join("|"),
+                lj.decided_by.kind,
+                lj.decided_by.option_key,
+                csv_cell(&field),
+                top_construct(&lj.contributions).unwrap_or("")
+            )?;
         }
     }
     lat.sort_unstable();
@@ -677,7 +721,7 @@ pub struct AblationRow {
 pub fn ablate(cfg: &Config, samples: &[Sample], ids: &[&'static str]) -> anyhow::Result<Vec<AblationRow>> {
     let lib = |c: Config| -> anyhow::Result<Metrics> {
         let sources: Sources = "distinct".parse().map_err(anyhow::Error::msg)?;
-        Ok(run(c, samples, false, sources, 100, None)?.library)
+        Ok(run(c, samples, false, sources, 100, Outputs::default())?.library)
     };
     let base = lib(cfg.clone())?;
     let mut rows = Vec::new();
@@ -934,5 +978,33 @@ Host: x
         assert!(s.starts_with("{\"tp\":5,\"fp\":0,\"tn\":10,\"fn\":5,\"recall\":0.5,"), "{s}");
         let at = |k: &str| s.find(k).unwrap_or_else(|| panic!("{k} missing in {s}"));
         assert!(at("\"fp_rate\":") < at("\"recall_ci95\":") && at("\"recall_ci95\":") < at("\"fp_rate_ci95\":"), "{s}");
+    }
+
+    #[test]
+    fn csv_cells_are_quoted_only_when_needed() {
+        assert_eq!(csv_cell("query:id"), "query:id");
+        assert_eq!(csv_cell("query:a,b"), "\"query:a,b\"");
+        assert_eq!(csv_cell("x\"y"), "\"x\"\"y\"");
+        assert_eq!(csv_cell("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn csv_names_the_deciding_field_and_top_construct() {
+        let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let p = std::env::temp_dir().join(format!("vft-eval-csv-{}.csv", std::process::id()));
+        run(Config::default(), &[attack, benign], false, Sources::Distinct, 100, Outputs { csv: Some(&p) }).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        let mut lines = text.lines();
+        let header = lines.next().unwrap();
+        assert!(header.starts_with("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top"), "{header}");
+        let a: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(a[0], "a.black");
+        assert!(matches!(a[2], "Block" | "Challenge"), "{a:?}");
+        assert_eq!(a[8], "query:q", "{a:?}");
+        assert!(!a[9].is_empty() && a[6].split('|').any(|c| c == a[9]), "top {} must be one of {}", a[9], a[6]);
+        let b: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!((b[0], b[2], b[8]), ("b.white", "Allow", ""), "{b:?}");
     }
 }
