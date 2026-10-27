@@ -208,6 +208,10 @@ pub struct Metrics {
     pub precision: f64,
     pub f1: f64,
     pub fp_rate: f64,
+    /// Wilson 95 % interval of `recall` (TP out of TP + FN).
+    pub recall_ci95: [f64; 2],
+    /// Wilson 95 % interval of `fp_rate` (FP out of FP + TN).
+    pub fp_rate_ci95: [f64; 2],
 }
 
 impl Metrics {
@@ -226,8 +230,28 @@ impl Metrics {
         self.precision = p;
         self.f1 = if r + p > 0.0 { 2.0 * r * p / (r + p) } else { 0.0 };
         self.fp_rate = self.fp as f64 / (self.fp + self.tn).max(1) as f64;
+        let (lo, hi) = wilson(self.tp, self.tp + self.fn_);
+        self.recall_ci95 = [lo, hi];
+        let (lo, hi) = wilson(self.fp, self.fp + self.tn);
+        self.fp_rate_ci95 = [lo, hi];
         self
     }
+}
+
+/// Wilson score interval for `k` successes in `n` trials at z = 1.96 (95 %),
+/// clamped to [0, 1]. `(0, 0)` when `n` is 0.
+fn wilson(k: u64, n: u64) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    const Z: f64 = 1.96;
+    let n = n as f64;
+    let p = k as f64 / n;
+    let z2 = Z * Z;
+    let denom = 1.0 + z2 / n;
+    let center = (p + z2 / (2.0 * n)) / denom;
+    let half = Z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denom;
+    ((center - half).max(0.0), (center + half).min(1.0))
 }
 
 #[derive(Debug, Serialize)]
@@ -883,5 +907,32 @@ Host: x
         assert!(select_side(vec![sample("a.white", 1)], &m, "dev").is_err());
         assert!(select_side(vec![sample("a.white", 0)], &m, "test").is_err());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn wilson_matches_known_intervals() {
+        let close = |(lo, hi): (f64, f64), (a, b): (f64, f64)| (lo - a).abs() < 1e-4 && (hi - b).abs() < 1e-4;
+        assert_eq!(wilson(0, 0), (0.0, 0.0));
+        assert!(close(wilson(0, 10), (0.0, 0.2775)), "{:?}", wilson(0, 10));
+        assert!(close(wilson(5, 10), (0.2366, 0.7634)), "{:?}", wilson(5, 10));
+        assert!(close(wilson(10, 10), (0.7225, 1.0)), "{:?}", wilson(10, 10));
+    }
+
+    #[test]
+    fn metrics_carry_wilson_intervals_after_the_existing_fields() {
+        let mut m = Metrics::default();
+        for i in 0..10 {
+            m.add(i < 5, 1); // 5 TP, 5 FN
+        }
+        for _ in 0..10 {
+            m.add(false, 0); // 10 TN
+        }
+        let m = m.finish();
+        assert!((m.recall_ci95[0] - 0.2366).abs() < 1e-4 && (m.recall_ci95[1] - 0.7634).abs() < 1e-4, "{:?}", m.recall_ci95);
+        assert!(m.fp_rate_ci95[0].abs() < 1e-12 && (m.fp_rate_ci95[1] - 0.2775).abs() < 1e-4, "{:?}", m.fp_rate_ci95);
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.starts_with("{\"tp\":5,\"fp\":0,\"tn\":10,\"fn\":5,\"recall\":0.5,"), "{s}");
+        let at = |k: &str| s.find(k).unwrap_or_else(|| panic!("{k} missing in {s}"));
+        assert!(at("\"fp_rate\":") < at("\"recall_ci95\":") && at("\"recall_ci95\":") < at("\"fp_rate_ci95\":"), "{s}");
     }
 }
