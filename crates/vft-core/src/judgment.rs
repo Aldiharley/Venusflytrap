@@ -16,6 +16,8 @@ pub enum Family {
     /// The request hit an inspection limit or carried bytes that could not be
     /// decoded as-is.
     Limit,
+    /// A heuristic anomaly signal that belongs to no attack family.
+    Anomaly,
 }
 
 /// A concrete structural pattern the engine recognized.

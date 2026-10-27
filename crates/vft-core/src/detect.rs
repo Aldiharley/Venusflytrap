@@ -106,11 +106,14 @@ impl FieldDetector for ApiSafetyDetector {
             );
         }
         // Oversized header value is a mild signal.
-        if ctx.field.loc == Location::Header && ctx.field.raw.len() > 4096 {
+        if ctx.field.loc == Location::Header
+            && ctx.field.raw.len() > 4096
+            && !ctx.disabled.is(&sinks::API_OVERSIZED_HEADER)
+        {
             return Evidence::new(
                 FourValued::Suspicious,
                 0.3,
-                vec![],
+                vec![sinks::API_OVERSIZED_HEADER.pattern()],
                 "oversized header value",
             );
         }
@@ -172,7 +175,10 @@ impl FieldDetector for AiDetector<'_> {
         } else {
             (FourValued::None, 0.0)
         };
-        Evidence::new(value, weight, vec![], format!("ai score {s:.2}"))
+        if value == FourValued::None || ctx.disabled.is(&sinks::AI_ANOMALY_SCORE) {
+            return Evidence::none(format!("ai score {s:.2}"));
+        }
+        Evidence::new(value, weight, vec![sinks::AI_ANOMALY_SCORE.pattern()], format!("ai score {s:.2}"))
     }
 }
 
@@ -273,5 +279,18 @@ mod tests {
             let e = intent_evidence(&Request::get(p), &cfg, &Disabled::default());
             assert_eq!(e.value, FourValued::Dangerous, "missed {p}");
         }
+    }
+
+    #[test]
+    fn every_threat_evidence_names_a_construct() {
+        let shield = crate::Shield::new(crate::Config::default());
+        let mut r = crate::Request::get("/p");
+        r.query.push(("q".into(), "%27%22%3E%3C!--{{}}$$((;;||&&".into()));
+        r.headers.push(("X-Big".into(), "a".repeat(5000)));
+        let j = shield.inspect(&r);
+        for c in &j.contributions {
+            assert!(c.construct.is_some(), "{} on {:?} has no construct", c.engine, c.field);
+        }
+        assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("api.oversized-header")));
     }
 }

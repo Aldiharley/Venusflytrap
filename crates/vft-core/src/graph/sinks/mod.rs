@@ -58,6 +58,8 @@ pub static SIG_ONERROR: ConstructInfo = ConstructInfo { id: "sig.onerror", famil
 pub static SIG_ETC_PASSWD: ConstructInfo = ConstructInfo { id: "sig.etc-passwd", family: Some(Family::PathTraversal), kind: ConstructKind::Signature, summary: "literal `/etc/passwd`" };
 pub static SIG_CAT_SUBST: ConstructInfo = ConstructInfo { id: "sig.cat-subst", family: Some(Family::CommandInjection), kind: ConstructKind::Signature, summary: "literal `$(cat `" };
 pub static API_TYPE_VIOLATION: ConstructInfo = ConstructInfo { id: "api.type-violation", family: Some(Family::Sqli), kind: ConstructKind::Signature, summary: "numeric-looking field (id, *_id, page, count) carries a formed construct" };
+pub static API_OVERSIZED_HEADER: ConstructInfo = ConstructInfo { id: "api.oversized-header", family: Some(Family::Anomaly), kind: ConstructKind::Signature, summary: "a header value longer than 4096 bytes" };
+pub static AI_ANOMALY_SCORE: ConstructInfo = ConstructInfo { id: "ai.anomaly-score", family: Some(Family::Anomaly), kind: ConstructKind::Signature, summary: "the heuristic anomaly oracle scored the field at or above 0.35" };
 pub static RECON_SENSITIVE_PATH: ConstructInfo = ConstructInfo { id: "recon.sensitive-path-probe", family: Some(Family::Recon), kind: ConstructKind::Signature, summary: "canonical path starts with a configured sensitive path" };
 pub static HONEYPOT_DECOY_HIT: ConstructInfo = ConstructInfo { id: "honeypot.decoy-hit", family: Some(Family::Honeypot), kind: ConstructKind::Signature, summary: "canonical path hits a configured decoy" };
 pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-ua", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "User-Agent matches a scanner fingerprint" };
@@ -106,6 +108,8 @@ static REGISTRY: &[&ConstructInfo] = &[
     &SIG_ETC_PASSWD,
     &SIG_CAT_SUBST,
     &API_TYPE_VIOLATION,
+    &API_OVERSIZED_HEADER,
+    &AI_ANOMALY_SCORE,
     &RECON_SENSITIVE_PATH,
     &HONEYPOT_DECOY_HIT,
     &INTEL_SCANNER_UA,
