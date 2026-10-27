@@ -108,6 +108,10 @@ enum Command {
         /// cost (would_fp) or not change (already) if promoted.
         #[arg(long)]
         promotion: bool,
+        /// Write every scored request, as the engine receives it, to this JSONL
+        /// file in eval/parse_corpus.py's schema (plus `rel`), for eval/baselines.py.
+        #[arg(long)]
+        dump_requests: Option<PathBuf>,
     },
     /// Leave-one-out ablation in library mode; writes a TSV.
     Ablate {
@@ -209,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
-        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable, shadow, promotion } => {
+        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable, shadow, promotion, dump_requests } => {
             let mut cfg = load_config(cli.config.as_ref())?;
             cfg.shield.disabled.extend(disable);
             cfg.shield.shadow.extend(shadow);
@@ -223,8 +227,8 @@ fn main() -> anyhow::Result<()> {
                 samples = eval::select_side(samples, &eval::load_manifest(m)?, s)?;
             }
             if mode == EvalMode::Tcp {
-                if promotion {
-                    anyhow::bail!("--promotion needs --mode library or serve");
+                if promotion || dump_requests.is_some() {
+                    anyhow::bail!("--promotion and --dump-requests need --mode library or serve");
                 }
                 let r = eval::run_tcp(cfg, &samples, limit)?;
                 println!("{}", serde_json::to_string_pretty(&r)?);
@@ -233,7 +237,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref(), promotion })?;
+            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref(), promotion, dump: dump_requests.as_deref() })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if let Some(rows) = &report.promotion {
                 eprintln!("construct\twould_tp\twould_fp\talready\tpromote");

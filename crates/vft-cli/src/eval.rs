@@ -353,6 +353,44 @@ pub struct Outputs<'a> {
     pub csv: Option<&'a Path>,
     /// Count shadow-construct hits per class into `Report.promotion` (`--promotion`).
     pub promotion: bool,
+    /// JSONL of every scored request as the engine receives it (`--dump-requests`).
+    pub dump: Option<&'a Path>,
+}
+
+/// Latin-1 view of bytes: each byte becomes the char with that code point, so
+/// Python's `s.encode("latin-1")` returns exactly these bytes.
+fn latin1(b: &[u8]) -> String {
+    b.iter().map(|&c| char::from(c)).collect()
+}
+
+/// One `--dump-requests` line, in `eval/parse_corpus.py`'s schema plus `rel`.
+#[derive(Serialize)]
+struct DumpRow<'a> {
+    label: u8,
+    method: &'a str,
+    path: String,
+    query: Vec<[String; 2]>,
+    headers: Vec<[String; 2]>,
+    cookies: Vec<[String; 2]>,
+    body: String,
+    rel: &'a str,
+}
+
+/// The request exactly as `adapt::from_parts` built it. Every string is the
+/// Latin-1 view of its UTF-8 bytes; the raw `Cookie` header goes only into
+/// `cookies`, as in parse_corpus.py.
+fn dump_line(rel: &str, label: u8, req: &vft_core::Request) -> serde_json::Result<String> {
+    let pair = |(k, v): &(String, String)| [latin1(k.as_bytes()), latin1(v.as_bytes())];
+    serde_json::to_string(&DumpRow {
+        label,
+        method: &req.method,
+        path: latin1(req.path.as_bytes()),
+        query: req.query.iter().map(pair).collect(),
+        headers: req.headers.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("cookie")).map(pair).collect(),
+        cookies: req.cookies.iter().map(pair).collect(),
+        body: latin1(&req.body),
+        rel,
+    })
 }
 
 /// One CSV cell (RFC 4180): quoted when it holds a comma, a quote or a line break.
@@ -394,6 +432,10 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         }
         None => None,
     };
+    let mut dump_out = match out.dump {
+        Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+        None => None,
+    };
     let (mut lib, mut srv) = (Metrics::default(), Metrics::default());
     let (mut parse_failures, mut skipped_headers, mut invariant_violations) = (0u64, 0u64, 0u64);
     let (mut collateral_fp, mut bans_from_allowed) = (0u64, 0u64);
@@ -425,6 +467,9 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         skipped_headers += u64::from(p.skipped_headers);
         let ip = sources.ip_for(i, &s.rel);
         let req = adapt::from_parts(&p.parts, &p.body, Some(ip));
+        if let Some(w) = dump_out.as_mut() {
+            writeln!(w, "{}", dump_line(&s.rel, s.label, &req)?)?;
+        }
         let t = Instant::now();
         let lj = shield.inspect(&req);
         explain_lib.add(&s.rel, &lj);
@@ -497,6 +542,9 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
                 shadow.join("|")
             )?;
         }
+    }
+    if let Some(mut w) = dump_out {
+        w.flush()?;
     }
     lat.sort_unstable();
     let pct = |q: f64| lat.get(((lat.len().max(1) - 1) as f64 * q).round() as usize).copied().unwrap_or(0);
@@ -1130,7 +1178,7 @@ Host: x
         let mut cfg = Config::default();
         cfg.shield.shadow = vec!["intel.scanner-ua".into()];
         let p = std::env::temp_dir().join(format!("vft-eval-promo-{}.csv", std::process::id()));
-        let r = run(cfg, &samples, false, Sources::Distinct, 100, Outputs { csv: Some(&p), promotion: true }).unwrap();
+        let r = run(cfg, &samples, false, Sources::Distinct, 100, Outputs { csv: Some(&p), promotion: true, dump: None }).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let _ = std::fs::remove_file(&p);
         assert_eq!(
@@ -1219,5 +1267,32 @@ Host: x
         let r = run_tcp(Config::default(), &samples, 100).unwrap();
         assert_eq!((r.mismatch_upstream_5xx, r.mismatch_io, r.mismatched), (0, 0, 0), "{r:?}");
         assert_eq!(r.matched_allow, 60, "{r:?}");
+    }
+
+    #[test]
+    fn latin1_maps_each_byte_to_one_char() {
+        assert_eq!(latin1(b"a=1"), "a=1");
+        assert_eq!(latin1("\u{e9}".as_bytes()), "\u{c3}\u{a9}");
+        assert_eq!(latin1(&[0xe9]), "\u{e9}");
+    }
+
+    #[test]
+    fn dump_requests_writes_parse_corpus_rows_for_scored_samples_only() {
+        let mut raw = b"POST /f?a=1 HTTP/1.1\r\nHost: x\r\nCookie: s=1; t=2\r\n\r\nname=".to_vec();
+        raw.push(0xe9);
+        let samples = vec![
+            Sample { rel: "d/a.white".into(), label: 0, raw, unreadable: None },
+            Sample { rel: "d/b.black".into(), label: 1, raw: b"\r\n\r\n".to_vec(), unreadable: None },
+            Sample { rel: "d/c.black".into(), label: 1, raw: Vec::new(), unreadable: Some("denied".into()) },
+        ];
+        let p = std::env::temp_dir().join(format!("vft-eval-dump-{}.jsonl", std::process::id()));
+        let r = run(Config::default(), &samples, false, Sources::Distinct, 100, Outputs { dump: Some(&p), ..Default::default() }).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!((r.parse_failures, r.read_failures), (1, 1));
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            vec!["{\"label\":0,\"method\":\"POST\",\"path\":\"/f\",\"query\":[[\"a\",\"1\"]],\"headers\":[[\"host\",\"x\"]],\"cookies\":[[\"s\",\"1\"],[\"t\",\"2\"]],\"body\":\"name=\u{e9}\",\"rel\":\"d/a.white\"}"]
+        );
     }
 }
