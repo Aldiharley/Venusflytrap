@@ -1,0 +1,32 @@
+const nf = new Intl.NumberFormat('en-US');
+
+export function fmtRps(n: number): string {
+  if (n <= 0) return '0/s';
+  if (n < 10) return `${n.toFixed(1)}/s`;
+  return `${Math.round(n)}/s`;
+}
+
+export function fmtCount(n: number): string {
+  return nf.format(Math.round(n));
+}
+
+export function fmtClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-GB', { hour12: false });
+}
+
+export function fmtAgo(ms: number): string {
+  if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))} s ago`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} min ago`;
+  return `${Math.floor(ms / 3_600_000)} h ago`;
+}
+
+/** Ban badge text. Minute granularity, so screen readers hear it change at most once a minute. */
+export function banText(ban: { until_ms: number | null }, now: number): string {
+  if (ban.until_ms === null) return 'Banned · Permanent';
+  const left = ban.until_ms - now;
+  if (left <= 0) return 'Ban expired';
+  const min = Math.floor(left / 60_000);
+  if (min < 1) return 'Banned · < 1 min left';
+  if (min < 60) return `Banned · ${min} min left`;
+  return `Banned · ${Math.floor(min / 60)} h ${min % 60} min left`;
+}
