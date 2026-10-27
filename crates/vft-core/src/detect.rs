@@ -91,9 +91,16 @@ impl FieldDetector for ApiSafetyDetector {
         "api-safety"
     }
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
-        let name = ctx.field.name.to_lowercase();
-        let looks_numeric_field =
-            name == "id" || name.ends_with("_id") || name == "page" || name == "count";
+        let lname = ctx.field.name.to_lowercase();
+        // Body leaves carry their parameter in the last name segment
+        // (`form:id` for a multipart part, `json:/user/id`); other locations
+        // use the whole name.
+        let name = if ctx.field.loc == Location::Body {
+            lname.rsplit([':', '/']).next().unwrap_or(&lname)
+        } else {
+            lname.as_str()
+        };
+        let looks_numeric_field = name == "id" || name.ends_with("_id") || name == "page" || name == "count";
         if looks_numeric_field
             && !ctx.analysis.reachable.is_empty()
             && !ctx.disabled.is(&sinks::API_TYPE_VIOLATION)
@@ -292,5 +299,24 @@ mod tests {
             assert!(c.construct.is_some(), "{} on {:?} has no construct", c.engine, c.field);
         }
         assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("api.oversized-header")));
+    }
+
+    #[test]
+    fn api_safety_uses_the_last_segment_of_a_body_field_name_only() {
+        let a = graph::Analysis { reachable: vec![sinks::sql::UNION_SELECT.pattern()], latent: vec![], graph_truncated: false };
+        let d = Disabled::default();
+        let n = normalize("x", &Options::default());
+        for (loc, name, hit) in [
+            (Location::Body, "form:id", true),
+            (Location::Body, "json:/user/id", true),
+            (Location::Body, "json:/user_id", true),
+            (Location::Body, "json:/identity", false),
+            (Location::Query, "x:id", false),
+            (Location::Query, "id", true),
+        ] {
+            let f = Field { loc, name: name.into(), raw: "x".into() };
+            let e = ApiSafetyDetector.assess(&ctx_for(&f, &n, &a, &d));
+            assert_eq!(e.value == FourValued::Dangerous, hit, "{loc:?} {name}");
+        }
     }
 }

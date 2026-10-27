@@ -3,6 +3,9 @@
 
 use std::net::IpAddr;
 
+use crate::body::BodyFacts;
+use crate::graph::sinks::Disabled;
+
 /// Where a field came from in the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -66,16 +69,30 @@ impl Request {
         canonical_path(&self.path)
     }
 
+    /// The value of the first header named `name` (ASCII case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+
+    /// All inspectable fields with every body class on (see [`Request::fields_with`]).
+    pub fn fields(&self) -> Vec<Field> {
+        self.fields_with(&Disabled::default()).0
+    }
+
     /// All inspectable fields: query keys and values, headers, cookie names
-    /// and values, and the body as a single field. The path is inspected
-    /// separately (it has path-specific semantics such as traversal and recon).
+    /// and values, and the body classified by [`crate::body::body_fields`]
+    /// (JSON leaves, multipart parts, or one `<body>` field, as a form body
+    /// stays; none for a binary body). A `parse.body-*` id in `off` restores
+    /// `<body>` for its class. The path is inspected separately (it has
+    /// path-specific semantics such as traversal and recon). Also returns what
+    /// body classification found, for the shield's body limits.
     ///
     /// Not inspected: the `Connection` header (hop-by-hop, stripped before
     /// forwarding) and `Content-Length` (validated by the HTTP front end), and
     /// a raw `Cookie` header whose every segment is a well-formed
     /// `token=value` pair (its names and values are inspected as cookie
     /// fields instead).
-    pub fn fields(&self) -> Vec<Field> {
+    pub fn fields_with(&self, off: &Disabled) -> (Vec<Field>, BodyFacts) {
         let mut out = Vec::new();
         for (k, v) in &self.query {
             // The key is forwarded too, so it is attacker payload like the value.
@@ -122,14 +139,9 @@ impl Request {
                 raw: v.clone(),
             });
         }
-        if !self.body.is_empty() {
-            out.push(Field {
-                loc: Location::Body,
-                name: "<body>".into(),
-                raw: String::from_utf8_lossy(&self.body).into_owned(),
-            });
-        }
-        out
+        let (body, facts) = crate::body::body_fields(self.header("content-type"), &self.body, off);
+        out.extend(body);
+        (out, facts)
     }
 }
 
@@ -246,5 +258,19 @@ mod tests {
         ] {
             assert_eq!(canonical_path(raw), want, "raw {raw:?}");
         }
+    }
+
+    #[test]
+    fn the_body_is_classified_by_its_content_type() {
+        let mut req = Request::get("/x");
+        req.method = "POST".into();
+        req.headers.push(("Content-Type".into(), "application/json".into()));
+        req.body = br#"{"a":"1"}"#.to_vec();
+        let names: Vec<String> = req.fields().into_iter().filter(|f| f.loc == Location::Body).map(|f| f.name).collect();
+        assert_eq!(names, vec!["json:/a"]);
+        let off = crate::graph::sinks::Disabled::resolve(&["parse.body-json".into()]);
+        let (f, _) = req.fields_with(&off);
+        assert!(f.iter().any(|f| f.loc == Location::Body && f.name == "<body>"));
+        assert_eq!(req.header("content-type"), Some("application/json"));
     }
 }

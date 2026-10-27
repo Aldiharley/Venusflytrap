@@ -17,6 +17,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod body;
 pub mod chain;
 pub mod config;
 pub mod detect;

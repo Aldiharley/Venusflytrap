@@ -186,4 +186,20 @@ proptest! {
         prop_assert!(!cs.is_empty());
         prop_assert!(cs.iter().all(|c| c.chars().count() <= max));
     }
+
+    #[test]
+    fn body_classification_never_panics(
+        ct in prop_oneof![
+            Just("application/json"),
+            Just("application/x-ndjson"),
+            Just("application/x-www-form-urlencoded"),
+            Just("multipart/form-data; boundary=b"),
+            Just("application/x-protobuf"),
+            Just(""),
+        ],
+        bytes in proptest::collection::vec(any::<u8>(), 0..4096),
+    ) {
+        let (fields, _) = vft_core::body::body_fields(Some(ct), &bytes, &vft_core::graph::sinks::Disabled::default());
+        prop_assert!(fields.len() <= vft_core::body::MAX_BODY_FIELDS);
+    }
 }
