@@ -24,7 +24,7 @@
     return () => clearInterval(t);
   });
 
-  const view = $derived(router.search.get('view') ?? (motion.reduced ? 'table' : 'map'));
+  const view = $derived(router.search.get('view') ?? (motion.osReduced ? 'table' : 'map'));
   const model = $derived(
     buildModel({
       counters: app.counters ?? { rps_by_verdict: [0, 0, 0, 0], dropped_total: 0 },

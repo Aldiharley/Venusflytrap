@@ -14,6 +14,7 @@
   let open = $state<string | null>(null);
   let pinned = $state(false);
   const buttons: HTMLButtonElement[] = [];
+  let sceneEl: HTMLDivElement | undefined;
   const DECOR: DecorId[] = ['edge', 'jA', 'jB'];
   const openNode = $derived(nodes.find((n) => n.id === open) ?? null);
   const plate = propUrl(PLATE.prop);
@@ -38,10 +39,19 @@
     } else if (k === 'Escape') { open = null; pinned = false; }
   }
 
+  /** Set while close() hands focus back to a node, so that node's onfocus does not reopen its card. */
+  let restoring = false;
+
   function close() {
+    const i = nodes.findIndex((n) => n.id === open);
     pinned = false;
     open = null;
-    buttons[active]?.focus();
+    restoring = true;
+    try {
+      buttons[i >= 0 ? i : active]?.focus();
+    } finally {
+      restoring = false; // focus events are synchronous, so the flag cannot outlive this call
+    }
   }
 
   function onfocusout(e: FocusEvent) {
@@ -49,14 +59,20 @@
     const card = document.getElementById('node-card');
     if (!pinned && !(to && card?.contains(to))) open = null;
   }
+
+  // Focus leaving the scene altogether (Tab past the card) closes an unpinned card.
+  function onsceneout(e: FocusEvent) {
+    const to = e.relatedTarget as Node | null;
+    if (!pinned && !(to && sceneEl?.contains(to))) open = null;
+  }
 </script>
 
-<div class="scene" class:stale role="group" aria-label="Traffic topology scene">
+<div class="scene" class:stale role="group" aria-label="Traffic topology scene" bind:this={sceneEl} onfocusout={onsceneout}>
   {#if plate}<img class="plate" src={plate} alt="" style:left={pct(PLATE.x, SCENE.w)} style:top={pct(PLATE.y, SCENE.h)} style:width={pct(PLATE.w, SCENE.w)} />{/if}
 
   <svg class="lines" viewBox="0 0 {SCENE.w} {SCENE.h}" aria-hidden="true">
     {#each flows as f (f.id)}
-      {#if openNode && (f.from === openNode.label || f.to === openNode.label)}<path class="halo" d={f.d} />{/if}
+      {#if openNode && (f.fromId === openNode.id || f.toId === openNode.id)}<path class="halo" d={f.d} />{/if}
       <path class="base v-{f.verdict.toLowerCase()} s{f.step}" d={f.d} />
       {#if f.step > 0}<path class="packet f{f.step}" d={f.d} />{/if}
     {/each}
@@ -68,7 +84,7 @@
   {/each}
 
   {#each flows as f (f.id)}
-    {#if f.step > 0}<span class="rate num" aria-hidden="true" style:left={pct(f.mid[0], SCENE.w)} style:top={pct(f.mid[1], SCENE.h)}>{f.rateText}</span>{/if}
+    {#if f.step > 0}<span class="rate num" aria-hidden="true" style:left={pct(f.mid[0], SCENE.w)} style:top={pct(f.mid[1], SCENE.h)}>{f.rateText}{f.approx ? ' approx.' : ''}</span>{/if}
   {/each}
 
   {#each nodes as n, i (n.id)}
@@ -85,7 +101,7 @@
       style:top={pct(n.box.y, SCENE.h)}
       style:width={pct(n.box.w, SCENE.w)}
       style:height={pct(n.box.w * 0.9, SCENE.h)}
-      onfocus={() => { active = i; if (!pinned) open = n.id; }}
+      onfocus={() => { active = i; if (!pinned && !restoring) open = n.id; }}
       onfocusout={onfocusout}
       onmouseenter={() => { if (!pinned) open = n.id; }}
       onmouseleave={() => { if (!pinned) open = null; }}
@@ -126,7 +142,7 @@
     border-radius: var(--vf-radius-sm); background: var(--vf-surface-raised-glass); font-size: var(--vf-fs-xs);
     color: var(--vf-text-secondary); pointer-events: none;
   }
-  .hatch { position: absolute; inset: 0; background-image: var(--vf-hatch); display: grid; place-items: start center; padding-top: 20%; }
+  .hatch { position: absolute; inset: 0; pointer-events: none; background-image: var(--vf-hatch); display: grid; place-items: start center; padding-top: 20%; }
   .paused { font-weight: 600; }
 
   :global(.base) { fill: none; stroke-linecap: butt; }

@@ -2,6 +2,7 @@ const nf = new Intl.NumberFormat('en-US');
 
 export function fmtRps(n: number): string {
   if (n <= 0) return '0/s';
+  if (n < 0.05) return '< 0.1/s'; // live but tiny must not read as zero
   if (n < 10) return `${n.toFixed(1)}/s`;
   return `${Math.round(n)}/s`;
 }

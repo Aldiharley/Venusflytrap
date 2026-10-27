@@ -3,6 +3,9 @@ import { banText, fmtAgo, fmtCount, fmtRps } from './format';
 
 test('rates', () => {
   expect(fmtRps(0)).toBe('0/s');
+  expect(fmtRps(0.003)).toBe('< 0.1/s');
+  expect(fmtRps(0.049)).toBe('< 0.1/s');
+  expect(fmtRps(0.05)).toBe('0.1/s');
   expect(fmtRps(0.42)).toBe('0.4/s');
   expect(fmtRps(4.06)).toBe('4.1/s');
   expect(fmtRps(38.2)).toBe('38/s');

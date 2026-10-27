@@ -56,6 +56,9 @@ export interface TopoFlow {
   id: string;
   from: string;
   to: string;
+  /** Stable node ids of the ends that are nodes (null for the Internet, junctions and the stub). */
+  fromId: NodeId | null;
+  toId: NodeId | null;
   verdict: Verdict;
   rps: number;
   rateText: string;
@@ -113,31 +116,36 @@ export function buildModel(i: ModelInput): { nodes: TopoNode[]; flows: TopoFlow[
   ];
 
   const flows: TopoFlow[] = [];
-  const add = (from: string, to: string, a: [number, number], b: [number, number], lines: [Verdict, number][], approx: boolean) => {
+  /** A line is [verdict, rps, approx?]; the third item overrides the call's `approx` for that line. */
+  type Line = [Verdict, number, boolean?];
+  const add = (from: string, to: string, fromId: NodeId | null, toId: NodeId | null, a: [number, number], b: [number, number], lines: Line[], approx: boolean) => {
     const shown = lines.filter(([, r]) => r > 0);
     const list = shown.length ? shown : lines.slice(0, 1);
-    list.forEach(([verdict, rps], k) => {
+    list.forEach(([verdict, rps, own], k) => {
       const { d, mid } = seg(a, b, (k - (list.length - 1) / 2) * 4);
-      flows.push({ id: `${from}-${to}-${verdict}`, from, to, verdict, rps, rateText: fmtRps(rps), step: volumeStep(rps), d, mid, approx });
+      flows.push({ id: `${from}-${to}-${verdict}`, from, to, fromId, toId, verdict, rps, rateText: fmtRps(rps), step: volumeStep(rps), d, mid, approx: own ?? approx });
     });
   };
   const A = ANCHOR;
-  add('Internet', 'Clean sources', A.edge, A.clean, [['Allow', allow], ['Monitor', monitor]], false);
-  add('Internet', 'Recon cluster', A.edge, A.recon, [['Allow', i.rates.recon.passed], ['Block', i.rates.recon.blocked]], true);
-  add('Internet', 'Exploitation cluster', A.edge, A.exploit, [['Allow', i.rates.exploit.passed], ['Block', i.rates.exploit.blocked]], true);
-  add('Clean sources', 'Junction', A.clean, A.jA, [['Allow', allow], ['Monitor', monitor]], false);
-  add('Recon cluster', 'Junction', A.recon, A.jA, [['Allow', i.rates.recon.passed], ['Block', i.rates.recon.blocked]], true);
-  add('Exploitation cluster', 'Junction', A.exploit, A.jA, [['Allow', i.rates.exploit.passed], ['Block', i.rates.exploit.blocked]], true);
-  add('Junction', 'Venusflytrap', A.jA, A.tower, [['Allow', allow], ['Monitor', monitor], ['Challenge', challenge], ['Block', block]], false);
-  add('Venusflytrap', 'Upstream', A.tower, A.jB, [['Allow', allow], ['Monitor', monitor]], false);
+  add('Internet', 'Clean sources', null, 'clean', A.edge, A.clean, [['Allow', allow], ['Monitor', monitor]], false);
+  add('Internet', 'Recon cluster', null, 'recon', A.edge, A.recon, [['Allow', i.rates.recon.passed], ['Block', i.rates.recon.blocked]], true);
+  add('Internet', 'Exploitation cluster', null, 'exploit', A.edge, A.exploit, [['Allow', i.rates.exploit.passed], ['Block', i.rates.exploit.blocked]], true);
+  add('Clean sources', 'Junction', 'clean', null, A.clean, A.jA, [['Allow', allow], ['Monitor', monitor]], false);
+  add('Recon cluster', 'Junction', 'recon', null, A.recon, A.jA, [['Allow', i.rates.recon.passed], ['Block', i.rates.recon.blocked]], true);
+  add('Exploitation cluster', 'Junction', 'exploit', null, A.exploit, A.jA, [['Allow', i.rates.exploit.passed], ['Block', i.rates.exploit.blocked]], true);
+  add('Junction', 'Venusflytrap', null, 'tower', A.jA, A.tower, [['Allow', allow], ['Monitor', monitor], ['Challenge', challenge], ['Block', block]], false);
+  add('Venusflytrap', 'Upstream', 'tower', null, A.tower, A.jB, [['Allow', allow], ['Monitor', monitor]], false);
   paths.forEach((p, k) => {
-    add('Upstream', p.prefix, A.jB, A[`route${k}` as NodeId], [['Allow', p.by_verdict[0] / rangeSec], ['Monitor', p.by_verdict[1] / rangeSec]], false);
+    const id = `route${k}` as NodeId;
+    add('Upstream', p.prefix, null, id, A.jB, A[id], [['Allow', p.by_verdict[0] / rangeSec], ['Monitor', p.by_verdict[1] / rangeSec]], false);
   });
   hits.slice(0, MAX_PODS).forEach((h, k) => {
-    add('Venusflytrap', h.path, A.tower, A[`hp${k}` as NodeId], [['Block', hpRates[k]]], false);
+    const id = `hp${k}` as NodeId;
+    add('Venusflytrap', h.path, 'tower', id, A.tower, A[id], [['Block', hpRates[k]]], false);
   });
-  add('Venusflytrap', 'Quarantine', A.tower, A.quarantine, [['Block', i.rates.quarantine]], true);
+  add('Venusflytrap', 'Quarantine', 'tower', 'quarantine', A.tower, A.quarantine, [['Block', i.rates.quarantine]], true);
+  // Challenge comes straight from the counters; only the Block remainder is derived.
   const detected = Math.max(0, block - hpRates.reduce((a, b) => a + b, 0) - i.rates.quarantine);
-  add('Venusflytrap', 'Stopped at shield', A.tower, A.stub, [['Challenge', challenge], ['Block', detected]], true);
+  add('Venusflytrap', 'Stopped at shield', 'tower', null, A.tower, A.stub, [['Challenge', challenge], ['Block', detected, true]], false);
   return { nodes, flows };
 }

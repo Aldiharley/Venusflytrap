@@ -41,7 +41,12 @@ class Motion {
 
   /** True when nothing may animate: the OS setting or the in-app Pause. */
   get reduced(): boolean {
-    return this.paused || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return this.paused || this.osReduced;
+  }
+
+  /** The OS setting alone (not the in-app Pause): screens use it to pick a default view. */
+  get osReduced(): boolean {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 }
 
