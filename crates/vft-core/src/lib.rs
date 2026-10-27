@@ -26,6 +26,7 @@ pub mod intel;
 pub mod judgment;
 pub mod lattice;
 pub mod normalize;
+pub mod options;
 pub mod request;
 pub mod score;
 pub mod shield;
