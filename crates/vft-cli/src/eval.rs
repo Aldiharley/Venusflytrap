@@ -242,6 +242,44 @@ pub struct ServeMetrics {
     pub bans_from_allowed: u64,
 }
 
+/// SP2 acceptance over every scored judgment.
+#[derive(Debug, Default, Serialize)]
+pub struct ExplainCounts {
+    /// `decided_by.option_key` is not in `options::REGISTRY` (must be 0).
+    pub unknown_option_key: u64,
+    /// A non-Allow decided by Detection with no construct (must be 0).
+    pub detection_without_construct: u64,
+    /// |Σ points − score| > 1 (must be 0).
+    pub points_mismatch: u64,
+    /// First 20 violations, as `rel: rule (msg)`.
+    pub examples: Vec<String>,
+}
+
+impl ExplainCounts {
+    fn add(&mut self, rel: &str, j: &vft_core::Judgment) {
+        let hit = |n: &mut u64, rule: &str, ex: &mut Vec<String>| {
+            *n += 1;
+            if ex.len() < 20 {
+                ex.push(format!("{rel}: {rule} ({})", j.decided_by.msg));
+            }
+        };
+        if vft_core::options::lookup(j.decided_by.option_key).is_none() {
+            hit(&mut self.unknown_option_key, "unknown option key", &mut self.examples);
+        }
+        if j.verdict != Verdict::Allow && j.decided_by.kind == vft_core::CauseKind::Detection && j.decided_by.construct.is_none() {
+            hit(&mut self.detection_without_construct, "detection without construct", &mut self.examples);
+        }
+        let sum: f32 = j.contributions.iter().map(|c| c.points).sum();
+        if (sum - f32::from(j.score)).abs() > 1.0 {
+            hit(&mut self.points_mismatch, "points do not add up", &mut self.examples);
+        }
+    }
+
+    pub fn violations(&self) -> u64 {
+        self.unknown_option_key + self.detection_without_construct + self.points_mismatch
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub mode: &'static str,
@@ -257,6 +295,8 @@ pub struct Report {
     pub serve: Option<ServeMetrics>,
     /// Library judgments with verdict Allow whose chain event is not Benign (must be 0).
     pub invariant_violations: u64,
+    pub explain_library: ExplainCounts,
+    pub explain_serve: Option<ExplainCounts>,
     pub latency_us_p50_p95_p99: [u64; 3],
 }
 
@@ -270,7 +310,7 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
     let mut csv_out = match csv {
         Some(p) => {
             let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs")?;
+            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause")?;
             Some(f)
         }
         None => None,
@@ -280,6 +320,7 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
     let (mut collateral_fp, mut bans_from_allowed) = (0u64, 0u64);
     let mut benign_sources: HashSet<SourceKey> = HashSet::new();
     let mut benign_banned: HashSet<SourceKey> = HashSet::new();
+    let (mut explain_lib, mut explain_srv) = (ExplainCounts::default(), ExplainCounts::default());
     let mut read_failures = 0u64;
     let mut failure_examples: Vec<String> = Vec::new();
     let mut lat: Vec<u64> = Vec::with_capacity(samples.len());
@@ -307,6 +348,7 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         let req = adapt::from_parts(&p.parts, &p.body, Some(ip));
         let t = Instant::now();
         let lj = shield.inspect(&req);
+        explain_lib.add(&s.rel, &lj);
         if lj.verdict == Verdict::Allow && event_for(&lj) != Event::Benign {
             invariant_violations += 1;
         }
@@ -319,6 +361,7 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             let d = pipeline.decide(&p.parts, &p.body, Some(ip), i as u64 * step_ms);
             lat.push(t2.elapsed().as_micros() as u64);
             let sj = &d.judgment;
+            explain_srv.add(&s.rel, sj);
             srv.add(attack(sj.verdict), s.label);
             banned = sj.banned();
             let fresh_ban = sj.chain.and_then(|o| o.new_ban).is_some();
@@ -341,7 +384,7 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         }
         if let Some(f) = csv_out.as_mut() {
             let constructs: Vec<&str> = lj.contributions.iter().filter_map(|c| c.construct.as_deref()).collect();
-            writeln!(f, "{},{},{:?},{},{},{},{}", s.rel, s.label, lj.verdict, serve_verdict, lj.score, banned, constructs.join("|"))?;
+            writeln!(f, "{},{},{:?},{},{},{},{},{:?}:{}", s.rel, s.label, lj.verdict, serve_verdict, lj.score, banned, constructs.join("|"), lj.decided_by.kind, lj.decided_by.option_key)?;
         }
     }
     lat.sort_unstable();
@@ -363,6 +406,8 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             bans_from_allowed,
         }),
         invariant_violations,
+        explain_library: explain_lib,
+        explain_serve: serve.then_some(explain_srv),
         latency_us_p50_p95_p99: [pct(0.5), pct(0.95), pct(0.99)],
     })
 }
@@ -634,6 +679,23 @@ pub fn ablate(cfg: &Config, samples: &[Sample], ids: &[&'static str]) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_counts_flag_each_acceptance_rule() {
+        let mut c = ExplainCounts::default();
+        let mut j = vft_core::Judgment::allow();
+        c.add("ok", &j);
+        assert_eq!((c.unknown_option_key, c.detection_without_construct, c.points_mismatch), (0, 0, 0));
+        j.decided_by.option_key = "scoring.nope";
+        c.add("key", &j);
+        j = vft_core::Judgment::allow();
+        j.verdict = Verdict::Block;
+        j.score = 95;
+        j.decided_by.kind = vft_core::CauseKind::Detection;
+        c.add("construct-and-points", &j);
+        assert_eq!((c.unknown_option_key, c.detection_without_construct, c.points_mismatch), (1, 1, 1));
+        assert_eq!(c.examples.len(), 3, "one per violation: key, construct, points");
+    }
 
     #[test]
     fn ablate_reports_what_a_construct_contributes() {

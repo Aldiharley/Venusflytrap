@@ -220,7 +220,11 @@ fn main() -> anyhow::Result<()> {
             }
             let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, out.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
-            if report.invariant_violations > 0 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0) {
+            if report.invariant_violations > 0
+                || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0)
+                || report.explain_library.violations() > 0
+                || report.explain_serve.as_ref().is_some_and(|e| e.violations() > 0)
+            {
                 std::process::exit(3);
             }
         }

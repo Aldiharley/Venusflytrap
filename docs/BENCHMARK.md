@@ -5,6 +5,8 @@ measured on a single Windows 11 machine with the release build, and nothing is t
 the fact. The full history, including per-task deltas and regressions, is in
 [`eval/RESULTS-SP1.md`](../eval/RESULTS-SP1.md).
 
+Status: SP2 (explainable judgments) changes no detection; the numbers below stand. Its decision-gate and explain-counter results are in [`eval/RESULTS-SP2.md`](../eval/RESULTS-SP2.md).
+
 The built-in `venusflytrap bench` command is a synthetic smoke test. It checks that nothing is broken
 and it is not a result; its output goes to `target/bench/` and is not published here.
 
