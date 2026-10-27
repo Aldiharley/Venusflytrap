@@ -668,17 +668,80 @@ impl TcpReport {
 
 const REPLAY_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Connect with zero linger: closing sends RST, so neither end of a replayed
+/// connection enters TIME_WAIT and a full-corpus replay does not exhaust
+/// loopback ports.
+async fn connect(addr: std::net::SocketAddr, limit: std::time::Duration) -> Result<tokio::net::TcpStream, String> {
+    let sock = match tokio::time::timeout(limit, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(format!("connect: {e}")),
+        Err(_) => return Err("connect timeout".into()),
+    };
+    sock.set_zero_linger().map_err(|e| format!("set_zero_linger: {e}"))?;
+    Ok(sock)
+}
+
+/// The Content-Length of a request head (0 when absent); `None` for
+/// `Transfer-Encoding` or a length that does not parse.
+fn content_length(head: &[u8]) -> Option<usize> {
+    let mut len = 0usize;
+    for line in head.split(|&b| b == b'\n').skip(1) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(colon) = line.iter().position(|&b| b == b':') else {
+            continue;
+        };
+        let name = line[..colon].trim_ascii();
+        if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            return None;
+        }
+        if name.eq_ignore_ascii_case(b"content-length") {
+            len = std::str::from_utf8(line[colon + 1..].trim_ascii()).ok()?.parse().ok()?;
+        }
+    }
+    Some(len)
+}
+
+/// The replay's stand-in upstream: answers every request on a connection with
+/// an empty 200 and keeps the connection open, so the proxy's pooled client
+/// reuses it. Reads each request head and its Content-Length body; returns when
+/// the peer closes, on an error, or on a head it cannot frame.
+async fn serve_keepalive(mut s: tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let head_end = loop {
+            if let Some(i) = find(&buf, b"\r\n\r\n") {
+                break i + 4;
+            }
+            match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let Some(body_len) = content_length(&buf[..head_end]) else {
+            return;
+        };
+        while buf.len() < head_end + body_len {
+            match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        buf.drain(..head_end + body_len);
+        if s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Send `raw` to `addr` and return the HTTP status of the reply. Connect, write and read are each bounded by
 /// `limit`. A write failure or timeout (the proxy may answer 413/431 and close
 /// before reading the whole request) still gets a bounded read of whatever the
 /// proxy sent; when no status arrived the result is an error (the write failure if there was one).
 async fn send_and_read(addr: std::net::SocketAddr, raw: &[u8], limit: std::time::Duration) -> Result<u16, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut sock = match tokio::time::timeout(limit, tokio::net::TcpStream::connect(addr)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(format!("connect: {e}")),
-        Err(_) => return Err("connect timeout".into()),
-    };
+    let mut sock = connect(addr, limit).await?;
     let write_err = match tokio::time::timeout(limit, sock.write_all(raw)).await {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(format!("write: {e}")),
@@ -699,7 +762,6 @@ async fn send_and_read(addr: std::net::SocketAddr, raw: &[u8], limit: std::time:
 }
 
 pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<TcpReport> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut cfg = cfg;
     cfg.proxy.trusted_proxies = vec!["127.0.0.1".into()];
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -707,12 +769,8 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
         let up = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let up_addr = up.local_addr()?;
         tokio::spawn(async move {
-            while let Ok((mut s, _)) = up.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 1 << 20];
-                    let _ = s.read(&mut buf).await;
-                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
-                });
+            while let Ok((s, _)) = up.accept().await {
+                tokio::spawn(serve_keepalive(s));
             }
         });
         let state = Arc::new(vft_proxy::ProxyState::new(
@@ -1095,5 +1153,71 @@ Host: x
         let r = run(Config::default(), &[s], false, Sources::Distinct, 100, Outputs::default()).unwrap();
         assert!(r.promotion.is_none());
         assert!(!serde_json::to_string(&r).unwrap().contains("\"promotion\""));
+    }
+
+    #[test]
+    fn content_length_frames_a_request_head() {
+        assert_eq!(content_length(b"POST / HTTP/1.1\r\ncontent-length: 12\r\n\r\n"), Some(12));
+        assert_eq!(content_length(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Some(0));
+        assert_eq!(content_length(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"), None);
+        assert_eq!(content_length(b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn replay_upstream_keeps_connections_alive() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (s, _) = l.accept().await.unwrap();
+                serve_keepalive(s).await;
+            });
+            let want: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            // A body split across writes, then a second request on the same connection.
+            c.write_all(b"POST /a HTTP/1.1\r\nhost: x\r\ncontent-length: 5\r\n\r\nab").await.unwrap();
+            c.write_all(b"cde").await.unwrap();
+            c.write_all(b"GET /b HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+            let mut got = vec![0u8; 2 * want.len()];
+            tokio::time::timeout(std::time::Duration::from_secs(5), c.read_exact(&mut got)).await.unwrap().unwrap();
+            assert_eq!(&got[..want.len()], want);
+            assert_eq!(&got[want.len()..], want);
+            // Still open: a third request is answered too.
+            c.write_all(b"GET /c HTTP/1.1\r\n\r\n").await.unwrap();
+            let mut third = vec![0u8; want.len()];
+            tokio::time::timeout(std::time::Duration::from_secs(5), c.read_exact(&mut third)).await.unwrap().unwrap();
+            assert_eq!(&third[..], want);
+        });
+    }
+
+    #[test]
+    fn replay_client_sockets_close_without_time_wait() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let s = connect(l.local_addr().unwrap(), std::time::Duration::from_secs(5)).await.unwrap();
+            assert_eq!(s.linger().unwrap(), Some(std::time::Duration::ZERO));
+        });
+    }
+
+    #[test]
+    fn tcp_replay_of_many_bodies_has_no_upstream_or_io_mismatch() {
+        let samples: Vec<Sample> = (0..60)
+            .map(|i| Sample {
+                rel: format!("{i:02}.white"),
+                label: 0,
+                raw: format!(
+                    "POST /form HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nname=item{i}&note={}",
+                    "a".repeat(i * 1000)
+                )
+                .into_bytes(),
+                unreadable: None,
+            })
+            .collect();
+        let r = run_tcp(Config::default(), &samples, 100).unwrap();
+        assert_eq!((r.mismatch_upstream_5xx, r.mismatch_io, r.mismatched), (0, 0, 0), "{r:?}");
+        assert_eq!(r.matched_allow, 60, "{r:?}");
     }
 }
