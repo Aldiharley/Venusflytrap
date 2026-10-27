@@ -3,12 +3,13 @@
 //! YAML, in `decided_by`, in the API, in the settings screen and in deep links.
 //! Per-key bounds live here; `Config::validate` adds the cross-field rules.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::config::{ConfigError, ConfigIssue};
+use crate::config::{Config, ConfigError, ConfigIssue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -192,7 +193,9 @@ pub fn check_tree(root: &Value) -> Vec<ConfigIssue> {
 fn walk(prefix: &str, m: &Map<String, Value>, out: &mut Vec<ConfigIssue>) {
     for (k, v) in m {
         let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-        if let Some(d) = lookup(&key) {
+        if k.contains('.') {
+            out.push(ConfigIssue { key, message: "unknown option (use nested sections, not dotted keys)".into() });
+        } else if let Some(d) = lookup(&key) {
             if let Some(message) = check_value(d, v) {
                 out.push(ConfigIssue { key, message });
             }
@@ -218,10 +221,105 @@ pub(crate) fn yaml_tree(s: &str) -> Result<Value, ConfigError> {
     })
 }
 
+/// Where an option's effective value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Default,
+    Base,
+    Override,
+}
+
+/// The effective config and, for every registered key, which layer set it.
+#[derive(Debug)]
+pub struct Layered {
+    pub config: Config,
+    pub sources: BTreeMap<&'static str, Source>,
+}
+
+/// Apply a sparse override map (`scoring.block_at: 85`) on top of the
+/// operator's base YAML. Scalars override, lists replace. Every problem in
+/// either layer is reported per key; nothing is applied unless all is valid.
+pub fn layer(base_yaml: Option<&str>, overrides_yaml: Option<&str>) -> Result<Layered, ConfigError> {
+    let mut tree = match base_yaml {
+        Some(s) => yaml_tree(s)?,
+        None => Value::Null,
+    };
+    let mut issues = check_tree(&tree);
+    if !tree.is_object() {
+        tree = Value::Object(Map::new());
+    }
+    let in_base: Vec<&'static str> = REGISTRY.iter().filter(|d| get_path(&tree, d.key).is_some()).map(|d| d.key).collect();
+
+    let overrides = match overrides_yaml {
+        Some(s) => yaml_tree(s)?,
+        None => Value::Null,
+    };
+    let mut overridden: Vec<&'static str> = Vec::new();
+    match &overrides {
+        Value::Null => {}
+        Value::Object(m) => {
+            for (k, v) in m {
+                match lookup(k) {
+                    None => issues.push(ConfigIssue { key: k.clone(), message: "unknown option (in overrides)".into() }),
+                    Some(d) => match check_value(d, v) {
+                        Some(msg) => issues.push(ConfigIssue { key: k.clone(), message: format!("{msg} (in overrides)") }),
+                        None => {
+                            set_path(&mut tree, d.key, v.clone());
+                            overridden.push(d.key);
+                        }
+                    },
+                }
+            }
+        }
+        _ => issues.push(ConfigIssue {
+            key: "<overrides>".into(),
+            message: "must be a flat mapping of option keys to values".into(),
+        }),
+    }
+    if !issues.is_empty() {
+        return Err(ConfigError::Invalid(issues));
+    }
+    let config = crate::config::from_tree(tree)?;
+    let sources = REGISTRY
+        .iter()
+        .map(|d| {
+            let s = if overridden.contains(&d.key) {
+                Source::Override
+            } else if in_base.contains(&d.key) {
+                Source::Base
+            } else {
+                Source::Default
+            };
+            (d.key, s)
+        })
+        .collect();
+    Ok(Layered { config, sources })
+}
+
+fn get_path<'a>(tree: &'a Value, key: &str) -> Option<&'a Value> {
+    key.split('.').try_fold(tree, |node, part| node.get(part))
+}
+
+fn set_path(tree: &mut Value, key: &str, v: Value) {
+    let mut node = tree;
+    let mut parts = key.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if !node.is_object() {
+            *node = Value::Object(Map::new());
+        }
+        let Value::Object(m) = node else { return };
+        if parts.peek().is_none() {
+            m.insert(part.to_string(), v);
+            return;
+        }
+        node = m.entry(part.to_string()).or_insert_with(|| Value::Object(Map::new()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     fn leaves(prefix: &str, v: &Value, out: &mut Vec<String>) {
         match v {
@@ -282,5 +380,71 @@ mod tests {
         let mut keys: Vec<String> = check_tree(&tree).into_iter().map(|i| i.key).collect();
         keys.sort();
         assert_eq!(keys, vec!["chain", "nonsense", "scoring.blok_at"]);
+    }
+
+    #[test]
+    fn overrides_replace_scalars_and_lists_and_report_sources() {
+        let base = "scoring:
+  block_at: 95
+honeypot:
+  decoy_paths: [/a, /b]
+";
+        let ov = "scoring.challenge_at: 60
+honeypot.decoy_paths: [/c]
+";
+        let l = layer(Some(base), Some(ov)).expect("valid");
+        assert_eq!(l.config.scoring.block_at, 95);
+        assert_eq!(l.config.scoring.challenge_at, 60);
+        assert_eq!(l.config.honeypot.decoy_paths, vec!["/c".to_string()], "lists replace");
+        assert_eq!(l.sources["scoring.block_at"], Source::Base);
+        assert_eq!(l.sources["scoring.challenge_at"], Source::Override);
+        assert_eq!(l.sources["honeypot.decoy_paths"], Source::Override);
+        assert_eq!(l.sources["scoring.monitor_at"], Source::Default);
+        assert_eq!(l.sources.len(), REGISTRY.len());
+    }
+
+    #[test]
+    fn bad_overrides_are_per_key() {
+        let err = |ov: &str| match layer(None, Some(ov)) {
+            Err(ConfigError::Invalid(i)) => i.into_iter().map(|i| i.key).collect::<Vec<_>>(),
+            other => panic!("{ov:?}: expected Invalid, got {other:?}"),
+        };
+        assert_eq!(err("scoring.blok_at: 1
+"), vec!["scoring.blok_at"]);
+        assert_eq!(err("scoring.block_at: banana
+"), vec!["scoring.block_at"]);
+        assert_eq!(err("scoring.monitor_at: 95
+"), vec!["scoring.block_at"], "cross-field rules see the merged config");
+        assert_eq!(err("- not a map
+"), vec!["<overrides>"]);
+    }
+
+    #[test]
+    fn no_layers_is_the_default_config() {
+        let l = layer(None, None).expect("defaults are valid");
+        assert_eq!(l.config.scoring.block_at, Config::default().scoring.block_at);
+        assert!(l.sources.values().all(|s| *s == Source::Default));
+    }
+
+    #[test]
+    fn dotted_keys_in_the_base_are_per_key_issues_not_opaque_errors() {
+        for yaml in ["scoring.block_at: 5
+", "chain:
+  ban_policy.on_honeypot: true
+"] {
+            match Config::from_yaml_str(yaml) {
+                Err(ConfigError::Invalid(issues)) => {
+                    assert_eq!(issues.len(), 1, "{yaml:?}: {issues:?}");
+                    assert!(issues[0].message.contains("not dotted keys"), "{issues:?}");
+                    assert_ne!(issues[0].key, "<config>");
+                }
+                other => panic!("{yaml:?}: expected Invalid, got {other:?}"),
+            }
+        }
+        match Config::from_yaml_str("scoring.block_at: 5
+") {
+            Err(ConfigError::Invalid(i)) => assert_eq!(i[0].key, "scoring.block_at"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 }
