@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick, type Component } from 'svelte';
+  import { onMount, type Component } from 'svelte';
+  import type { Attachment } from 'svelte/attachments';
   import { FixtureSource } from './lib/api/source';
   import ToastStack from './lib/components/ToastStack.svelte';
   import NavRail from './lib/shell/NavRail.svelte';
@@ -28,19 +29,37 @@
   };
 
   let ready = $state(false);
-  onMount(() => {
+  let failed = $state(false);
+  let boot = 0;
+  function load() {
+    const mine = ++boot;
+    failed = false;
+    ready = false;
     const live = !new URLSearchParams(location.search).has('static');
-    app.start(new FixtureSource({ live })).then(() => (ready = true));
-    return () => app.stop();
+    app.start(new FixtureSource({ live })).then(
+      () => { if (mine === boot) ready = true; },
+      () => { if (mine === boot) failed = true; },
+    );
+  }
+  onMount(() => {
+    load();
+    return () => { boot++; app.stop(); };
   });
 
-  // Move focus to the new screen's heading after navigation (UX: focus goes to h1).
+  // After a navigation, focus goes to the new screen's h1 (UX). The screen is lazy, so the
+  // request is parked here and honoured by `focusScreen` once the screen has rendered.
   let first = true;
+  let focusPending = false;
   $effect(() => {
     void router.path;
     if (first) { first = false; return; }
-    tick().then(() => document.querySelector<HTMLElement>('main h1')?.focus());
+    focusPending = true;
   });
+  const focusScreen: Attachment<HTMLElement> = (el) => {
+    if (!focusPending) return;
+    focusPending = false;
+    el.querySelector<HTMLElement>('h1')?.focus();
+  };
   $effect(() => { document.title = `${TITLES[router.route.name]} · Venusflytrap`; });
 </script>
 
@@ -50,9 +69,19 @@
   <NavRail />
   <main id="main" tabindex="-1">
     {#if ready}
-      {#await SCREENS[router.route.name]() then mod}
-        <mod.default title={TITLES[router.route.name]} param={router.route.param} />
-      {/await}
+      {#key router.path}
+        {#await SCREENS[router.route.name]() then mod}
+          <div {@attach focusScreen}>
+            <mod.default title={TITLES[router.route.name]} param={router.route.param} />
+          </div>
+        {/await}
+      {/key}
+    {:else if failed}
+      <h1 tabindex="-1">{TITLES[router.route.name]}</h1>
+      <div class="card failed" role="alert">
+        <p>The console could not load its data from the source.</p>
+        <button class="btn btn-primary" onclick={load}>Retry</button>
+      </div>
     {:else}
       <h1 tabindex="-1">{TITLES[router.route.name]}</h1>
     {/if}
@@ -66,4 +95,6 @@
   .body { display: flex; min-height: calc(100vh - var(--vf-topbar-h)); }
   main { flex: 1; min-width: 0; padding: var(--vf-space-5); }
   main:focus { outline: none; }
+  h1 { margin-bottom: var(--vf-space-5); }
+  .failed { display: grid; justify-items: start; gap: var(--vf-space-3); padding: var(--vf-space-5); }
 </style>

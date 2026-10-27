@@ -9,6 +9,11 @@ test('routes match, including parameters', () => {
   expect(match('/nope')).toEqual({ name: 'notfound', param: null });
 });
 
+test('a malformed percent-escape is not found instead of throwing', () => {
+  expect(match('/requests/%')).toEqual({ name: 'notfound', param: null });
+  expect(match('/sources/%E0%A4%A')).toEqual({ name: 'notfound', param: null });
+});
+
 test('navigate updates path, search and history', () => {
   router.navigate('/chains?stage=Exploitation');
   expect(router.route.name).toBe('chains');

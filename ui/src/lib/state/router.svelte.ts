@@ -18,7 +18,14 @@ const TABLE: [RegExp, RouteName][] = [
 export function match(path: string): Route {
   for (const [re, name] of TABLE) {
     const m = path.match(re);
-    if (m) return { name, param: m[1] === undefined ? null : decodeURIComponent(m[1]) };
+    if (!m) continue;
+    if (m[1] === undefined) return { name, param: null };
+    try {
+      return { name, param: decodeURIComponent(m[1]) };
+    } catch {
+      // A malformed escape (e.g. /requests/%) must not take the whole app down.
+      return { name: 'notfound', param: null };
+    }
   }
   return { name: 'notfound', param: null };
 }

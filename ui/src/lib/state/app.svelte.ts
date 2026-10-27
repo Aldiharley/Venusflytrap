@@ -18,12 +18,17 @@ class AppState {
   now = $state(Date.now());
   stale = $derived(this.live !== 'Connected' || this.now - this.lastFrameAt > STALE_MS);
   private stops: (() => void)[] = [];
+  /** Bumped by stop(); a start() that finds it changed after its await was stopped or superseded. */
+  private gen = 0;
 
   async start(src: DataSource) {
+    this.stop(); // a second start supersedes the first
+    const gen = this.gen;
     this.src = src;
     const [session, status, counters, board] = await Promise.all([
       src.session(), src.status(), src.counters(), src.board(),
     ]);
+    if (gen !== this.gen) return; // stopped or superseded while loading: register nothing
     this.session = session;
     this.status = status;
     this.counters = counters;
@@ -37,6 +42,7 @@ class AppState {
   }
 
   stop() {
+    this.gen++;
     for (const s of this.stops.splice(0)) s();
   }
 
