@@ -13,5 +13,8 @@ Svelte 5 + Vite SPA. In this stage every screen reads deterministic fixtures thr
 The e2e run builds first, serves `vite preview` on port 4173 (with the production CSP) and uses the
 system Microsoft Edge, or Chrome with `PW_CHANNEL=chrome`; no browser download is needed.
 
+Screenshots: the images in `../docs/images` are regenerated with `npm run screenshots` (system Edge; the
+preview from `npm run build && npm run preview` must be running).
+
 Generated art (`assets/props`, `assets/scenes`) is not committed until its licence is
 confirmed; the app builds without it and simply omits the images.
