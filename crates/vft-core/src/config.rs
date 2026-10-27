@@ -3,15 +3,33 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Config schema version. Only 1 exists.
+    pub version: u32,
     pub shield: ShieldConfig,
     pub scoring: ScoringConfig,
     pub chain: ChainConfig,
     pub honeypot: HoneypotConfig,
     pub proxy: ProxyConfig,
     pub limits: LimitsConfig,
+    pub intel: IntelConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            version: 1,
+            shield: ShieldConfig::default(),
+            scoring: ScoringConfig::default(),
+            chain: ChainConfig::default(),
+            honeypot: HoneypotConfig::default(),
+            proxy: ProxyConfig::default(),
+            limits: LimitsConfig::default(),
+            intel: IntelConfig::default(),
+        }
+    }
 }
 
 /// Data-plane settings that the engine itself does not use.
@@ -32,6 +50,17 @@ pub enum DecisionHeaders {
     Off,
     /// Add X-Venusflytrap-* to the forwarded request only (never to the client).
     Upstream,
+}
+
+/// Source lists checked before inspection. Exact addresses; an IPv4-mapped
+/// IPv6 entry is matched as IPv4.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IntelConfig {
+    /// Sources always answered with Block (a hard pin), unless also allow-listed.
+    pub deny_ips: Vec<String>,
+    /// Sources never banned and never deny-pinned. They are still inspected.
+    pub allow_ips: Vec<String>,
 }
 
 /// Request-level limits on the data plane.
@@ -291,10 +320,7 @@ pub enum ConfigError {
 impl Config {
     /// Load and validate a YAML file. A missing file is an error.
     pub fn load(path: &std::path::Path) -> Result<Config, ConfigError> {
-        let s = std::fs::read_to_string(path)?;
-        let cfg: Config = serde_yaml::from_str(&s)?;
-        cfg.validate().map_err(ConfigError::Invalid)?;
-        Ok(cfg)
+        Config::from_yaml_str(&std::fs::read_to_string(path)?)
     }
 
     /// `None` means built-in defaults; `Some(path)` must exist and validate.
@@ -305,23 +331,33 @@ impl Config {
         }
     }
 
-    /// Per-key bounds and cross-field rules. Every issue names its option key.
+    /// Parse and validate YAML. Unknown keys, wrong types and out-of-bounds
+    /// values are reported per key, all at once.
+    pub fn from_yaml_str(s: &str) -> Result<Config, ConfigError> {
+        from_tree(crate::options::yaml_tree(s)?)
+    }
+
+    /// Per-key bounds (from `options::REGISTRY`) and cross-field rules. Every
+    /// issue names its option key.
     pub fn validate(&self) -> Result<(), Vec<ConfigIssue>> {
+        let mut v = match serde_json::to_value(self) {
+            Ok(tree) => crate::options::check_tree(&tree),
+            Err(e) => vec![ConfigIssue { key: "<config>".into(), message: e.to_string() }],
+        };
+        v.extend(self.cross_field_issues());
+        if v.is_empty() {
+            Ok(())
+        } else {
+            Err(v)
+        }
+    }
+
+    fn cross_field_issues(&self) -> Vec<ConfigIssue> {
         let mut v: Vec<ConfigIssue> = Vec::new();
         let mut bad = |key: &str, message: String| v.push(ConfigIssue { key: key.into(), message });
-
         let sh = &self.shield;
-        if sh.max_payload < 1024 {
-            bad("shield.max_payload", format!("must be >= 1024, got {}", sh.max_payload));
-        }
-        if !(1..=32).contains(&sh.decode_cap) {
-            bad("shield.decode_cap", format!("must be in 1..=32, got {}", sh.decode_cap));
-        }
-        if sh.deep_threshold == 0 || sh.deep_threshold > sh.decode_cap {
-            bad("shield.deep_threshold", format!("must be in 1..=decode_cap, got {}", sh.deep_threshold));
-        }
-        if !(1..=1024).contains(&sh.max_graph_windows) {
-            bad("shield.max_graph_windows", format!("must be in 1..=1024, got {}", sh.max_graph_windows));
+        if sh.deep_threshold > sh.decode_cap {
+            bad("shield.deep_threshold", format!("must be <= shield.decode_cap ({}), got {}", sh.decode_cap, sh.deep_threshold));
         }
         if sh.max_inspect_bytes < sh.max_payload {
             bad("shield.max_inspect_bytes", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_inspect_bytes));
@@ -329,31 +365,7 @@ impl Config {
         if sh.max_normalize_work < sh.max_payload {
             bad("shield.max_normalize_work", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_normalize_work));
         }
-        for id in crate::graph::sinks::unknown_ids(&sh.disabled) {
-            bad("shield.disabled", format!("unknown construct id {id:?}"));
-        }
-
         let s = &self.scoring;
-        for (key, w) in [
-            ("scoring.weight_graph", s.weight_graph),
-            ("scoring.weight_signature", s.weight_signature),
-            ("scoring.weight_intent", s.weight_intent),
-            ("scoring.weight_api", s.weight_api),
-            ("scoring.weight_ai", s.weight_ai),
-        ] {
-            if !w.is_finite() || !(0.0..=2.0).contains(&w) {
-                bad(key, format!("must be a finite number in [0, 2], got {w}"));
-            }
-        }
-        if !s.conflict_threshold.is_finite() || !(0.0..=1.0).contains(&s.conflict_threshold) {
-            bad("scoring.conflict_threshold", format!("must be in [0, 1], got {}", s.conflict_threshold));
-        }
-        if !s.corroboration_cap.is_finite() || !(0.0..=50.0).contains(&s.corroboration_cap) {
-            bad("scoring.corroboration_cap", format!("must be in [0, 50], got {}", s.corroboration_cap));
-        }
-        if s.monitor_at == 0 {
-            bad("scoring.monitor_at", "must be >= 1 (0 would flag every request)".into());
-        }
         if !(s.monitor_at < s.challenge_at && s.challenge_at < s.block_at && s.block_at <= 100) {
             bad(
                 "scoring.block_at",
@@ -363,85 +375,25 @@ impl Config {
                 ),
             );
         }
-
-        let c = &self.chain;
-        if c.window_secs == 0 {
-            bad("chain.window_secs", "must be >= 1".into());
-        }
-        if c.max_sources < 640 {
-            bad("chain.max_sources", format!("must be >= 640 (at least 10 per shard), got {}", c.max_sources));
-        }
-        if c.events_per_source == 0 {
-            bad("chain.events_per_source", "must be >= 1".into());
-        }
-        if !(1..=128).contains(&c.ipv6_prefix) {
-            bad("chain.ipv6_prefix", format!("must be in 1..=128, got {}", c.ipv6_prefix));
-        }
-        let b = &c.ban_policy;
-        if b.exploitation_blocks == 0 {
-            bad("chain.ban_policy.exploitation_blocks", "must be >= 1".into());
-        }
-        if b.within_secs == 0 {
-            bad("chain.ban_policy.within_secs", "must be >= 1".into());
-        }
-        if b.ttl_secs == 0 {
-            bad("chain.ban_policy.ttl_secs", "must be >= 1".into());
-        }
+        let b = &self.chain.ban_policy;
         if b.ttl_max_secs < b.ttl_secs {
             bad("chain.ban_policy.ttl_max_secs", format!("must be >= ttl_secs ({}), got {}", b.ttl_secs, b.ttl_max_secs));
         }
-        if b.max_bans < 640 {
-            bad("chain.ban_policy.max_bans", format!("must be >= 640 (at least 10 per shard), got {}", b.max_bans));
-        }
-        // `contains` is false for NaN.
-        if !(0.0..=1.0).contains(&b.min_hostile_share) {
-            bad("chain.ban_policy.min_hostile_share", format!("must be in 0.0..=1.0, got {}", b.min_hostile_share));
-        }
-
-        for p in &self.proxy.trusted_proxies {
-            if p.parse::<std::net::IpAddr>().is_err() {
-                bad("proxy.trusted_proxies", format!("not an IP address: {p:?}"));
-            }
-        }
-
-        let l = &self.limits;
-        if l.max_body < 1024 {
-            bad("limits.max_body", format!("must be >= 1024, got {}", l.max_body));
-        }
-        if !(8..=1000).contains(&l.max_headers) {
-            bad("limits.max_headers", format!("must be in 8..=1000, got {}", l.max_headers));
-        }
-        if l.max_connections == 0 {
-            bad("limits.max_connections", "must be >= 1".into());
-        }
-        for (key, ms) in [
-            ("limits.header_read_timeout_ms", l.header_read_timeout_ms),
-            ("limits.body_read_timeout_ms", l.body_read_timeout_ms),
-            ("limits.upstream_connect_timeout_ms", l.upstream_connect_timeout_ms),
-            ("limits.upstream_response_timeout_ms", l.upstream_response_timeout_ms),
-            ("limits.response_idle_timeout_ms", l.response_idle_timeout_ms),
-            ("limits.max_connection_ms", l.max_connection_ms),
-        ] {
-            if ms == 0 {
-                bad(key, "must be >= 1".into());
-            }
-        }
-
-        for (key, list) in [
-            ("honeypot.decoy_paths", &self.honeypot.decoy_paths),
-            ("honeypot.sensitive_paths", &self.honeypot.sensitive_paths),
-        ] {
-            if let Some(p) = list.iter().find(|p| !p.starts_with('/')) {
-                bad(key, format!("paths must start with '/', got {p:?}"));
-            }
-        }
-
-        if v.is_empty() {
-            Ok(())
-        } else {
-            Err(v)
-        }
+        v
     }
+}
+
+/// Check a config tree per key, deserialize it, then apply the cross-field rules.
+pub(crate) fn from_tree(tree: serde_json::Value) -> Result<Config, ConfigError> {
+    let issues = crate::options::check_tree(&tree);
+    if !issues.is_empty() {
+        return Err(ConfigError::Invalid(issues));
+    }
+    let tree = if tree.is_null() { serde_json::Value::Object(Default::default()) } else { tree };
+    let cfg: Config = serde_json::from_value(tree)
+        .map_err(|e| ConfigError::Invalid(vec![ConfigIssue { key: "<config>".into(), message: e.to_string() }]))?;
+    cfg.validate().map_err(ConfigError::Invalid)?;
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -530,6 +482,13 @@ mod tests {
     }
 
     #[test]
+    fn intel_lists_must_be_ip_addresses() {
+        assert!(issues("intel:\n  deny_ips: [\"1.2.3.4\", \"nope\"]\n").iter().any(|i| i.key == "intel.deny_ips"));
+        assert!(issues("intel:\n  allow_ips: [\"10.0.0.1:80\"]\n").iter().any(|i| i.key == "intel.allow_ips"));
+        assert!(issues("intel:\n  deny_ips: [\"::1\"]\n  allow_ips: [\"192.0.2.1\"]\n").is_empty());
+    }
+
+    #[test]
     fn limits_are_validated() {
         for (yaml, key) in [
             ("limits:\n  max_body: 1000\n", "limits.max_body"),
@@ -558,5 +517,46 @@ mod tests {
     fn missing_explicit_file_is_an_error() {
         let r = Config::load_or_default(Some(std::path::Path::new("Z:/definitely/not/here.yaml")));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn version_defaults_to_one_and_other_versions_are_rejected() {
+        assert_eq!(Config::default().version, 1);
+        assert!(issues("version: 1\n").is_empty());
+        assert!(issues("version: 2\n").iter().any(|i| i.key == "version"));
+        let shipped: Config =
+            serde_yaml::from_str(include_str!("../../../config/shield.yaml")).expect("shipped yaml parses");
+        assert_eq!(shipped.version, 1);
+    }
+
+    #[test]
+    fn m6_bad_inputs_yield_per_key_issues() {
+        for (yaml, key) in [
+            ("scoring:\n  blok_at: 10\n", "scoring.blok_at"),
+            ("scoring:\n  block_at: 0\n", "scoring.block_at"),
+            ("scoring:\n  weight_ai: .nan\n", "scoring.weight_ai"),
+            ("shield:\n  max_payload: 0\n", "shield.max_payload"),
+            ("shield:\n  decode_cap: banana\n", "shield.decode_cap"),
+            ("nonsense: 1\n", "nonsense"),
+        ] {
+            match Config::from_yaml_str(yaml) {
+                Err(ConfigError::Invalid(issues)) => {
+                    assert!(issues.iter().any(|i| i.key == key), "{yaml:?}: {issues:?}")
+                }
+                other => panic!("{yaml:?}: expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_shipped_files_load() {
+        assert!(Config::from_yaml_str("").is_ok());
+        assert!(Config::from_yaml_str(include_str!("../../../config/shield.yaml")).is_ok());
+    }
+
+    #[test]
+    fn cross_field_rules_still_apply() {
+        assert!(issues("shield:\n  decode_cap: 4\n  deep_threshold: 5\n").iter().any(|i| i.key == "shield.deep_threshold"));
+        assert!(issues("scoring:\n  monitor_at: 80\n").iter().any(|i| i.key == "scoring.block_at"));
     }
 }

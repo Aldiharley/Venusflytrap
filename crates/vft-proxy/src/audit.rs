@@ -19,6 +19,7 @@ struct ContribLine<'a> {
     construct: Option<&'a str>,
     field: Option<String>,
     value: String,
+    points: f32,
 }
 
 #[derive(Serialize)]
@@ -35,6 +36,8 @@ struct AuditLine<'a> {
     layers: u8,
     contributions: Vec<ContribLine<'a>>,
     reason: &'a str,
+    cause: String,
+    option_key: &'a str,
 }
 
 pub struct AuditSink {
@@ -133,8 +136,8 @@ impl AuditSink {
             src_ip: req.src_ip.map(|i| i.to_string()),
             verdict: format!("{:?}", j.verdict),
             score: j.score,
-            stage: j.chain_stage.map(|s| format!("{s:?}")),
-            banned: j.banned_source,
+            stage: j.stage().map(|s| format!("{s:?}")),
+            banned: j.banned(),
             layers: j.normalized_layers,
             contributions: j
                 .contributions
@@ -143,9 +146,12 @@ impl AuditSink {
                     construct: c.construct.as_deref(),
                     field: c.field.as_ref().map(|f| format!("{:?}:{}", f.loc, f.name)),
                     value: format!("{:?}", c.value),
+                    points: c.points,
                 })
                 .collect(),
-            reason: &j.reason,
+            reason: &j.decided_by.msg,
+            cause: format!("{:?}", j.decided_by.kind),
+            option_key: j.decided_by.option_key,
         };
         let Ok(json) = serde_json::to_string(&line) else {
             return;
@@ -225,6 +231,8 @@ mod tests {
         assert_eq!(v["ts_ms"], 1_700_000_000_000u64);
         assert_eq!(v["request_id"], 7);
         assert!(v["contributions"].as_array().unwrap().iter().any(|c| c["construct"] == "sqli.union-select"));
+        assert!(v["cause"].is_string() && v["option_key"].is_string(), "{v}");
+        assert!(v["contributions"][0]["points"].is_number(), "{v}");
         let _ = std::fs::remove_file(&p);
     }
 

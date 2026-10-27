@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Attack family a matched pattern belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Family {
     Sqli,
     Xss,
@@ -16,6 +17,8 @@ pub enum Family {
     /// The request hit an inspection limit or carried bytes that could not be
     /// decoded as-is.
     Limit,
+    /// A heuristic anomaly signal that belongs to no attack family.
+    Anomaly,
 }
 
 /// A concrete structural pattern the engine recognized.
@@ -36,6 +39,7 @@ impl Pattern {
 
 /// Kill-chain stage inferred for a source across requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Stage {
     Recon = 0,
     Enumeration = 1,
@@ -45,6 +49,7 @@ pub enum Stage {
 
 /// Final action band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Verdict {
     Allow,
     Monitor,
@@ -66,12 +71,18 @@ impl Verdict {
 
 /// Which field of the request a piece of evidence is about.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FieldRef {
     pub loc: crate::request::Location,
     pub name: String,
 }
 
 impl FieldRef {
+    /// `query:id`, `header:user-agent`, `path:<path>`.
+    pub fn label(&self) -> String {
+        let loc = format!("{:?}", self.loc).to_ascii_lowercase();
+        format!("{loc}:{}", self.name)
+    }
     pub fn of(f: &crate::request::Field) -> Self {
         FieldRef { loc: f.loc, name: f.name.clone() }
     }
@@ -85,43 +96,59 @@ impl FieldRef {
 
 /// One piece of non-`None` evidence about one field, with the construct that
 /// produced it. Decision-grade input for the kill chain and the "why" panel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Contribution {
-    pub engine: String,
+    pub engine: &'static str,
     pub field: Option<FieldRef>,
-    /// Construct name (today's pattern name; stable dotted ids arrive with the
-    /// construct registry).
+    /// Stable dotted construct id (e.g. `sqli.union-select`), the key used by
+    /// `shield.disabled` and the construct registry.
     pub construct: Option<String>,
     pub family: Option<Family>,
     pub value: crate::lattice::FourValued,
     pub weight: f32,
-    /// Points added to the score. Filled in SP2; 0.0 until then.
+    /// Points this contribution added to the score.
     pub points: f32,
 }
 
-/// One detector's contribution, kept for explainability and the audit log.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EngineReport {
-    pub engine: String,
-    pub value: crate::lattice::FourValued,
-    pub weight: f32,
-    pub score_contribution: f32,
-    pub patterns: Vec<Pattern>,
-    pub note: String,
+/// What kind of thing decided a judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum CauseKind {
+    NoEvidence,
+    Detection,
+    Honeypot,
+    IntelDeny,
+    Ban,
+    ChainEscalation,
+    Limit,
+    Allowlisted,
+}
+
+/// The one setting that decided a judgment, with the construct and field behind it.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Cause {
+    pub kind: CauseKind,
+    /// A key of `options::REGISTRY`, e.g. "scoring.block_at".
+    pub option_key: &'static str,
+    pub construct: Option<String>,
+    pub field: Option<FieldRef>,
+    /// One human sentence.
+    pub msg: String,
 }
 
 /// The engine's decision about a single request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Judgment {
     pub verdict: Verdict,
     pub score: u8,
-    pub engines: Vec<EngineReport>,
-    pub matched: Vec<Pattern>,
     pub contributions: Vec<Contribution>,
-    pub chain_stage: Option<Stage>,
+    pub decided_by: Cause,
+    /// The chain observation applied by `Shield::finalize`.
+    pub chain: Option<crate::chain::ChainOutcome>,
     pub normalized_layers: u8,
-    pub banned_source: bool,
-    pub reason: String,
 }
 
 impl Judgment {
@@ -129,13 +156,42 @@ impl Judgment {
         Judgment {
             verdict: Verdict::Allow,
             score: 0,
-            engines: Vec::new(),
-            matched: Vec::new(),
             contributions: Vec::new(),
-            chain_stage: None,
+            decided_by: Cause {
+                kind: CauseKind::NoEvidence,
+                option_key: "scoring.monitor_at",
+                construct: None,
+                field: None,
+                msg: "no evidence".into(),
+            },
+            chain: None,
             normalized_layers: 0,
-            banned_source: false,
-            reason: "no evidence".into(),
         }
+    }
+
+    /// The source is banned: by this request (`chain.new_ban`) or already (fast-track).
+    pub fn banned(&self) -> bool {
+        self.decided_by.kind == CauseKind::Ban
+    }
+
+    /// The source's kill-chain stage after this request, when a chain was observed.
+    pub fn stage(&self) -> Option<Stage> {
+        self.chain.and_then(|o| o.stage_after)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_read_cause_and_chain() {
+        let mut j = Judgment::allow();
+        assert!(!j.banned());
+        assert_eq!(j.stage(), None);
+        j.decided_by.kind = CauseKind::Ban;
+        j.chain = Some(crate::chain::ChainOutcome { stage_after: Some(Stage::Recon), ..Default::default() });
+        assert!(j.banned());
+        assert_eq!(j.stage(), Some(Stage::Recon));
     }
 }

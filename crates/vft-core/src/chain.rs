@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ChainConfig;
 use crate::graph::sinks::{self, ConstructInfo};
-use crate::judgment::{Family, Judgment, Stage, Verdict};
+use crate::judgment::{CauseKind, Family, Judgment, Stage, Verdict};
 use crate::lattice::FourValued;
 
 /// What a single decision told us about a source.
@@ -65,7 +65,7 @@ pub fn event_for(j: &Judgment) -> Event {
             .iter()
             .any(|c| c.value == FourValued::Dangerous && c.family == Some(f))
     };
-    if dangerous(Family::Honeypot) {
+    if j.decided_by.kind == CauseKind::Honeypot {
         return Event::Honeypot;
     }
     if j.verdict.rank() >= Verdict::Challenge.rank() {
@@ -87,7 +87,7 @@ pub fn event_for(j: &Judgment) -> Event {
     let scanner = j
         .contributions
         .iter()
-        .any(|c| c.family == Some(Family::Intel) && c.value.is_threat());
+        .any(|c| c.construct.as_deref() == Some(sinks::INTEL_SCANNER_UA.id) && c.value.is_threat());
     if scanner && j.verdict.rank() >= Verdict::Challenge.rank() {
         return Event::Enumeration;
     }
@@ -119,6 +119,7 @@ impl SourceKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum BanCause {
     Honeypot,
     Exfiltration,
@@ -127,6 +128,7 @@ pub enum BanCause {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct BanRecord {
     pub since_ms: u64,
     pub until_ms: u64,
@@ -141,7 +143,8 @@ impl BanRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ChainOutcome {
     pub stage_before: Option<Stage>,
     pub stage_after: Option<Stage>,
@@ -309,22 +312,15 @@ mod tests {
     const MIN: u64 = 60_000;
 
     fn judgment(verdict: Verdict, contributions: Vec<Contribution>) -> Judgment {
-        Judgment {
-            verdict,
-            score: 0,
-            engines: Vec::new(),
-            matched: Vec::new(),
-            contributions,
-            chain_stage: None,
-            normalized_layers: 0,
-            banned_source: false,
-            reason: String::new(),
-        }
+        let mut j = Judgment::allow();
+        j.verdict = verdict;
+        j.contributions = contributions;
+        j
     }
 
     fn scanner_ua() -> Contribution {
         Contribution {
-            engine: "intel".into(),
+            engine: "intel",
             field: None,
             construct: Some("intel.scanner-ua".into()),
             family: Some(Family::Intel),
@@ -346,7 +342,7 @@ mod tests {
     fn recon_stages_only_when_the_request_is_not_allowed() {
         // Final review F1 (principle 2): an allowed request never stages a source.
         let recon = Contribution {
-            engine: "intent".into(),
+            engine: "intent",
             field: None,
             construct: Some("sensitive-path".into()),
             family: Some(Family::Recon),

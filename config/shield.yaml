@@ -2,6 +2,8 @@
 # so running with no --config flag behaves identically to this file. Mirrors the
 # article's shield/scoring/chain/honeypot YAML split.
 
+version: 1                # config schema version
+
 shield:
   max_payload: 65536      # characters inspected per field; content past this is NOT inspected (known fail-open, docs/BENCHMARK.md section 7)
   decode_cap: 14          # max decode layers peeled to a fixpoint
@@ -61,6 +63,10 @@ honeypot:
 proxy:
   trusted_proxies: []       # peers whose X-Forwarded-For is trusted (exact IPs)
   decision_headers: off     # off | upstream (never sent to clients)
+
+intel:
+  deny_ips: []              # sources always blocked (exact IPs), unless also allow-listed
+  allow_ips: []             # sources never banned or deny-pinned; still inspected
 
 limits:
   max_body: 1048576         # bytes; larger bodies get 413 before any upstream connection

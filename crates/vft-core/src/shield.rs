@@ -1,7 +1,7 @@
 //! FR9 — The orchestrator. Wires normalize → graph/taint → detectors → lattice
 //! → score, plus honeypot, intel, and (optionally) the chain tracker.
 
-use crate::chain::{event_for, BanRecord, ChainOutcome, ChainTracker, SourceKey};
+use crate::chain::{event_for, BanCause, BanRecord, ChainOutcome, ChainTracker, SourceKey};
 use crate::config::Config;
 use crate::detect::{
     intent_evidence, AiDetector, AiOracle, ApiSafetyDetector, FieldCtx, FieldDetector,
@@ -10,7 +10,7 @@ use crate::detect::{
 use crate::graph::{self, sinks, sinks::Disabled};
 use crate::honeypot::Honeypot;
 use crate::intel::Intel;
-use crate::judgment::{Contribution, EngineReport, FieldRef, Judgment, Pattern, Verdict};
+use crate::judgment::{Cause, CauseKind, Contribution, FieldRef, Judgment, Verdict};
 use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{decode, fold, fold_unless_cut, Decoded, Normalized, Options};
 use crate::request::Request;
@@ -39,7 +39,13 @@ impl Shield {
             disabled: disabled.clone(),
         };
         let honeypot = Honeypot::new(&cfg.honeypot);
-        let intel = Intel::with_defaults();
+        let mut intel = Intel::with_defaults();
+        for ip in cfg.intel.deny_ips.iter().filter_map(|s| s.parse().ok()) {
+            intel.add_deny_ip(canonical(ip));
+        }
+        for ip in cfg.intel.allow_ips.iter().filter_map(|s| s.parse().ok()) {
+            intel.add_allow_ip(canonical(ip));
+        }
         Shield {
             cfg,
             norm_opts,
@@ -104,6 +110,7 @@ impl Shield {
         let mut budget = self.cfg.shield.max_inspect_bytes;
         let mut work = NormalizeWork { used: 0, cap: self.cfg.shield.max_normalize_work, exhausted: false };
         let mut payload_truncated = false;
+        let mut budget_hit = false;
         'fields: for field in req.fields() {
             let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
             let mut prev_end = 0usize;
@@ -112,6 +119,7 @@ impl Shield {
                 // bytes it adds beyond the previous chunk's end.
                 let added = range.end.saturating_sub(prev_end);
                 if added > budget {
+                    budget_hit = true;
                     payload_truncated = true;
                     break 'fields;
                 }
@@ -206,27 +214,66 @@ impl Shield {
         }
 
         // Honeypot.
-        let mut honeypot_or_deny = denied;
+        let deny_pin = denied && !self.disabled.is(&sinks::INTEL_DENY_LISTED);
+        if deny_pin {
+            rec.record(
+                "intel",
+                1.0,
+                None,
+                Evidence::new(
+                    FourValued::Dangerous,
+                    1.0,
+                    vec![sinks::INTEL_DENY_LISTED.pattern()],
+                    "source is on intel.deny_ips",
+                ),
+            );
+        }
+        let mut honeypot_or_deny = deny_pin;
         let honeypot_hit = if self.disabled.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
+        let honeypot_seen = honeypot_hit.is_some();
         if let Some(e) = honeypot_hit {
             honeypot_or_deny = true;
             rec.record("honeypot", 1.0, Some(FieldRef::path()), e);
         }
         let hard_block = honeypot_or_deny || limit_block;
+        let pins = Pins {
+            honeypot: honeypot_seen,
+            deny: deny_pin,
+            limit: limit_block.then_some(if budget_hit {
+                "shield.max_inspect_bytes"
+            } else if work.exhausted {
+                "shield.max_normalize_work"
+            } else {
+                "shield.max_payload"
+            }),
+        };
+        let allowlisted = req.src_ip.is_some_and(|ip| self.intel.is_allowed(&canonical(ip)));
 
-        let (score, verdict, conflict) = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
-        let reason = build_reason(&rec.matched, conflict, false, honeypot_or_deny, limit_block);
+        let arb = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
+        let (score, verdict) = (arb.score, arb.verdict);
+        for (i, p) in arb.points.iter().enumerate() {
+            if let Some(ci) = rec.first_contrib[i] {
+                rec.contributions[ci].points += p;
+            }
+        }
+        if hard_block {
+            // The deciding pin carries the whole score, in decided_by order.
+            let pin = [sinks::HONEYPOT_DECOY_HIT.id, sinks::INTEL_DENY_LISTED.id, sinks::LIMIT_PAYLOAD_TRUNCATED.id]
+                .into_iter()
+                .find_map(|id| rec.contributions.iter().position(|c| c.construct.as_deref() == Some(id)));
+            if let Some(ci) = pin {
+                rec.contributions[ci].points = 100.0;
+            }
+        }
+        let decided_by = cause_for(&rec.contributions, verdict, score, &self.cfg.scoring, &pins, allowlisted);
 
         let j = Judgment {
             verdict,
             score,
-            engines: rec.engines,
-            matched: rec.matched,
             contributions: rec.contributions,
-            chain_stage: None,
+            decided_by,
+            chain: None,
             normalized_layers: max_layers,
-            banned_source: false,
-            reason,
         };
         (j, work.used)
     }
@@ -282,25 +329,42 @@ impl Shield {
 
     /// Apply a chain outcome to a judgment. Never lowers the verdict.
     pub fn finalize(&self, mut j: Judgment, o: &ChainOutcome) -> Judgment {
-        j.chain_stage = o.stage_after;
+        j.chain = Some(*o);
+        let sc = &self.cfg.scoring;
         if o.advanced && o.stage_after.is_some() {
-            let bumped = j.score.saturating_add(self.cfg.scoring.chain_stage_bonus).min(100);
-            let v = crate::score::band(bumped, &self.cfg.scoring);
-            if v.rank() > j.verdict.rank() {
+            let bumped = j.score.saturating_add(sc.chain_stage_bonus).min(100);
+            let v = crate::score::band(bumped, sc);
+            let raised = v.rank() > j.verdict.rank();
+            if raised {
                 j.verdict = v;
             }
+            let before = j.score;
             j.score = j.score.max(bumped);
+            if j.score > before {
+                j.contributions.push(chain_contribution("chain.stage-advance", f32::from(j.score - before)));
+            }
+            if let (true, Some((key, threshold))) = (raised, band_key(v, sc)) {
+                j.decided_by = Cause {
+                    kind: CauseKind::ChainEscalation,
+                    option_key: "scoring.chain_stage_bonus",
+                    construct: j.decided_by.construct.clone(),
+                    field: j.decided_by.field.clone(),
+                    msg: format!(
+                        "kill-chain stage advance (+{} scoring.chain_stage_bonus) raised the score to {} >= {key} {threshold}; before: {}",
+                        sc.chain_stage_bonus, j.score, j.decided_by.msg
+                    ),
+                };
+            }
         }
         if let Some(b) = o.new_ban {
-            j.banned_source = true;
             j.verdict = Verdict::Block;
+            let before = j.score;
             j.score = 100;
-            j.reason = format!(
-                "{} (source banned: {:?}, {} s)",
-                j.reason,
-                b.cause,
-                (b.until_ms - b.since_ms) / 1000
-            );
+            if before < 100 {
+                j.contributions.push(chain_contribution("chain.ban", f32::from(100 - before)));
+            }
+            let msg = format!("{}; source banned ({:?}) for {} s", j.decided_by.msg, b.cause, (b.until_ms - b.since_ms) / 1000);
+            j.decided_by = ban_cause(&b, msg);
         }
         j
     }
@@ -315,21 +379,18 @@ impl Shield {
         Judgment {
             verdict: Verdict::Block,
             score: 100,
-            engines: Vec::new(),
-            matched: Vec::new(),
             contributions: vec![Contribution {
-                engine: "chain".into(),
+                engine: "chain",
                 field: None,
                 construct: Some("chain.ban".into()),
                 family: None,
                 value: FourValued::Dangerous,
                 weight: 1.0,
-                points: 0.0,
+                points: 100.0,
             }],
-            chain_stage: None,
+            decided_by: ban_cause(ban, format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms)),
+            chain: None,
             normalized_layers: 0,
-            banned_source: true,
-            reason: format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms),
         }
     }
 
@@ -358,25 +419,151 @@ fn canonical(ip: std::net::IpAddr) -> std::net::IpAddr {
     SourceKey::new(ip, 128).ip()
 }
 
+/// Hard pins found during inspection.
+struct Pins {
+    honeypot: bool,
+    deny: bool,
+    limit: Option<&'static str>,
+}
+
+/// The option key and threshold of the band a verdict sits in (`None` for Allow).
+fn band_key(v: Verdict, cfg: &crate::config::ScoringConfig) -> Option<(&'static str, u8)> {
+    match v {
+        Verdict::Block => Some(("scoring.block_at", cfg.block_at)),
+        Verdict::Challenge => Some(("scoring.challenge_at", cfg.challenge_at)),
+        Verdict::Monitor => Some(("scoring.monitor_at", cfg.monitor_at)),
+        Verdict::Allow => None,
+    }
+}
+
+/// The contribution that added the most points (the first one on a tie).
+fn top_contribution(cs: &[Contribution]) -> Option<&Contribution> {
+    let mut best: Option<&Contribution> = None;
+    for c in cs {
+        if best.map_or(c.points > 0.0, |b| c.points > b.points) {
+            best = Some(c);
+        }
+    }
+    best
+}
+
+/// Spec 5.2: honeypot, intel deny, fail-closed limit, band, no evidence
+/// (bans are applied later, by `finalize` and `banned_judgment`).
+fn cause_for(
+    contributions: &[Contribution],
+    verdict: Verdict,
+    score: u8,
+    cfg: &crate::config::ScoringConfig,
+    pins: &Pins,
+    allowlisted: bool,
+) -> Cause {
+    if pins.honeypot {
+        let field = contributions
+            .iter()
+            .find(|c| c.construct.as_deref() == Some(sinks::HONEYPOT_DECOY_HIT.id))
+            .and_then(|c| c.field.clone());
+        return Cause {
+            kind: CauseKind::Honeypot,
+            option_key: "honeypot.decoy_paths",
+            construct: Some(sinks::HONEYPOT_DECOY_HIT.id.into()),
+            field,
+            msg: "hard-block: request hit a honeypot decoy path".into(),
+        };
+    }
+    if pins.deny {
+        return Cause {
+            kind: CauseKind::IntelDeny,
+            option_key: "intel.deny_ips",
+            construct: Some(sinks::INTEL_DENY_LISTED.id.into()),
+            field: None,
+            msg: "hard-block: source is on intel.deny_ips".into(),
+        };
+    }
+    if let Some(key) = pins.limit {
+        return Cause {
+            kind: CauseKind::Limit,
+            option_key: key,
+            construct: Some(sinks::LIMIT_PAYLOAD_TRUNCATED.id.into()),
+            field: None,
+            msg: format!("hard-block: limit.payload-truncated (request not fully inspected; {key})"),
+        };
+    }
+    let Some((key, threshold)) = band_key(verdict, cfg) else {
+        return if allowlisted {
+            Cause {
+                kind: CauseKind::Allowlisted,
+                option_key: "intel.allow_ips",
+                construct: None,
+                field: None,
+                msg: format!("source is on intel.allow_ips; score {score} < scoring.monitor_at {}", cfg.monitor_at),
+            }
+        } else {
+            Cause {
+                kind: CauseKind::NoEvidence,
+                option_key: "scoring.monitor_at",
+                construct: None,
+                field: None,
+                msg: format!("score {score} < scoring.monitor_at {}", cfg.monitor_at),
+            }
+        };
+    };
+    let top = top_contribution(contributions);
+    let construct = top.and_then(|c| c.construct.clone());
+    let field = top.and_then(|c| c.field.clone());
+    let what = match (&construct, &field) {
+        (Some(c), Some(f)) => format!("{c} in {}", f.label()),
+        (Some(c), None) => c.clone(),
+        (None, _) => "evidence".into(),
+    };
+    Cause {
+        kind: CauseKind::Detection,
+        option_key: key,
+        construct,
+        field,
+        msg: format!("score {score} >= {key} {threshold}: {what}"),
+    }
+}
+
+/// The cause of a ban, keyed by the option that triggered it (D4).
+fn ban_cause(b: &BanRecord, msg: String) -> Cause {
+    let option_key = match b.cause {
+        BanCause::Honeypot => "chain.ban_policy.on_honeypot",
+        BanCause::Exfiltration => "chain.ban_policy.on_exfiltration_block",
+        BanCause::RepeatedExploitation => "chain.ban_policy.exploitation_blocks",
+        BanCause::Manual => "chain.ban_policy.ttl_secs",
+    };
+    Cause { kind: CauseKind::Ban, option_key, construct: Some("chain.ban".into()), field: None, msg }
+}
+
+/// A chain decision recorded as a contribution so the points still add up.
+/// `chain.*` ids are deliberately not in the construct registry.
+fn chain_contribution(id: &str, points: f32) -> Contribution {
+    Contribution {
+        engine: "chain",
+        field: None,
+        construct: Some(id.into()),
+        family: None,
+        value: FourValued::Dangerous,
+        weight: 1.0,
+        points,
+    }
+}
+
 #[derive(Default)]
 struct Recorder {
-    engines: Vec<EngineReport>,
     scored: Vec<Scored>,
-    matched: Vec<Pattern>,
+    /// Index into `contributions` of each `scored` item's first contribution.
+    first_contrib: Vec<Option<usize>>,
     contributions: Vec<Contribution>,
 }
 
 impl Recorder {
-    fn record(&mut self, name: &str, engine_weight: f32, field: Option<FieldRef>, e: Evidence) {
-        for p in &e.patterns {
-            if !self.matched.contains(p) {
-                self.matched.push(p.clone());
-            }
-        }
+    fn record(&mut self, name: &'static str, engine_weight: f32, field: Option<FieldRef>, e: Evidence) {
+        let first = (e.value != FourValued::None).then_some(self.contributions.len());
         if e.value != FourValued::None {
             if e.patterns.is_empty() {
                 self.contributions.push(Contribution {
-                    engine: name.to_string(),
+                    engine: name,
                     field: field.clone(),
                     construct: None,
                     family: None,
@@ -387,7 +574,7 @@ impl Recorder {
             }
             for p in &e.patterns {
                 self.contributions.push(Contribution {
-                    engine: name.to_string(),
+                    engine: name,
                     field: field.clone(),
                     construct: Some(p.name.clone()),
                     family: Some(p.family),
@@ -397,44 +584,8 @@ impl Recorder {
                 });
             }
         }
-        self.engines.push(EngineReport {
-            engine: name.to_string(),
-            value: e.value,
-            weight: e.weight,
-            score_contribution: 0.0, // filled lazily; kept for format compatibility
-            patterns: e.patterns.clone(),
-            note: e.note.clone(),
-        });
         self.scored.push(Scored { engine: name.to_string(), engine_weight, field, evidence: e });
-    }
-}
-
-/// A hard block names its causes: a honeypot hit or deny-listed source
-/// (`honeypot_or_deny`), and/or `limit.payload-truncated` (`limit`).
-fn build_reason(matched: &[Pattern], conflict: bool, banned: bool, honeypot_or_deny: bool, limit: bool) -> String {
-    const HARD: &str = "hard-block: honeypot or deny-list";
-    const LIMIT: &str = "limit.payload-truncated (request not fully inspected)";
-    if banned {
-        return "source previously advanced the attack chain or tripped a honeypot".into();
-    }
-    match (honeypot_or_deny, limit) {
-        (true, true) => return format!("{HARD}; {LIMIT}"),
-        (true, false) => return HARD.into(),
-        (false, true) => return format!("hard-block: {LIMIT}"),
-        (false, false) => {}
-    }
-    if matched.is_empty() {
-        return "no evidence".into();
-    }
-    let names: Vec<String> = matched
-        .iter()
-        .map(|p| format!("{:?}:{}", p.family, p.name))
-        .collect();
-    let base = names.join(", ");
-    if conflict {
-        format!("{base} (arbitrated: conflicting evidence)")
-    } else {
-        base
+        self.first_contrib.push(first);
     }
 }
 
@@ -546,8 +697,8 @@ fn inspect_decoded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::{BanCause, ChainTracker};
-    use crate::judgment::{Family, FieldRef, Stage};
+    use crate::chain::{BanCause, ChainOutcome, ChainTracker};
+    use crate::judgment::{CauseKind, Family, FieldRef, Stage};
     use crate::lattice::FourValued;
     use crate::request::Location;
     use std::net::{IpAddr, Ipv4Addr};
@@ -604,7 +755,7 @@ mod tests {
         req.query.push(("id".into(), "1 union select password from users".into()));
         req.headers.push(("Accept-Language".into(), "en".into()));
         let j = shield().inspect(&req);
-        assert_eq!(j.verdict, Verdict::Block, "score {} {}", j.score, j.reason);
+        assert_eq!(j.verdict, Verdict::Block, "score {} {}", j.score, j.decided_by.msg);
     }
 
     #[test]
@@ -632,7 +783,7 @@ mod tests {
         let mut req = Request::get("/items");
         req.query.push(("id".into(), "1 union select password from users".into()));
         let j = shield().inspect(&req);
-        assert_eq!(j.verdict, Verdict::Block, "score {} reason {}", j.score, j.reason);
+        assert_eq!(j.verdict, Verdict::Block, "score {} reason {}", j.score, j.decided_by.msg);
     }
 
     #[test]
@@ -686,7 +837,7 @@ mod tests {
         let mut req = Request::get("/search");
         req.query.push(("q".into(), "best coffee in brisbane".into()));
         let j = shield().inspect(&req);
-        assert_eq!(j.verdict, Verdict::Allow, "fp: {} {}", j.score, j.reason);
+        assert_eq!(j.verdict, Verdict::Allow, "fp: {} {}", j.score, j.decided_by.msg);
     }
 
     #[test]
@@ -720,9 +871,9 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1));
         for i in 0..5 {
             let j = s.inspect_stateful(&browser("/index.html", ip), &mut chain, i * 1000);
-            assert_eq!(j.verdict, Verdict::Allow, "request {i}: {}", j.reason);
-            assert!(!j.banned_source);
-            assert_eq!(j.chain_stage, None);
+            assert_eq!(j.verdict, Verdict::Allow, "request {i}: {}", j.decided_by.msg);
+            assert!(!j.banned());
+            assert_eq!(j.stage(), None);
         }
     }
 
@@ -736,14 +887,14 @@ mod tests {
         xss.query.push(("q".into(), "<script>alert(1)</script>".into()));
         let j1 = s.inspect_stateful(&xss, &mut chain, 0);
         assert_eq!(j1.verdict, Verdict::Block);
-        assert!(!j1.banned_source);
+        assert!(!j1.banned());
         let _ = s.inspect_stateful(&xss, &mut chain, 1_000);
         let j3 = s.inspect_stateful(&xss, &mut chain, 2_000);
-        assert!(j3.banned_source, "third exploitation block within 10 min bans");
+        assert!(j3.banned(), "third exploitation block within 10 min bans");
         let benign = browser("/index.html", ip);
         let j4 = s.inspect_stateful(&benign, &mut chain, 3_000);
         assert_eq!(j4.verdict, Verdict::Block);
-        assert!(j4.banned_source);
+        assert!(j4.banned());
     }
 
     #[test]
@@ -756,20 +907,46 @@ mod tests {
         let mut hp = Request::get("/.git/config");
         hp.src_ip = Some(mapped);
         let j1 = s.inspect_stateful(&hp, &mut chain, 0);
-        assert!(!j1.banned_source, "allow-listed honeypot hit must not ban");
+        assert!(!j1.banned(), "allow-listed honeypot hit must not ban");
         assert_eq!(chain.ban_count(), 0);
         let j2 = s.inspect_stateful(&browser("/index.html", mapped), &mut chain, 1_000);
-        assert!(!j2.banned_source);
-        assert_eq!(j2.verdict, Verdict::Allow, "{}", j2.reason);
+        assert!(!j2.banned());
+        assert_eq!(j2.verdict, Verdict::Allow, "{}", j2.decided_by.msg);
         // Even a ban forced onto the allow-listed address does not fast-track it.
         chain.ban(SourceKey::new(v4, 64), BanCause::Manual, 2_000);
         let j3 = s.inspect_stateful(&browser("/index.html", v4), &mut chain, 3_000);
-        assert!(!j3.banned_source);
-        assert_eq!(j3.verdict, Verdict::Allow, "{}", j3.reason);
+        assert!(!j3.banned());
+        assert_eq!(j3.verdict, Verdict::Allow, "{}", j3.decided_by.msg);
         // A non-allow-listed neighbour is unaffected by the allow-list and bans normally.
         let other: IpAddr = "192.0.2.8".parse().unwrap();
         hp.src_ip = Some(other);
-        assert!(s.inspect_stateful(&hp, &mut chain, 4_000).banned_source);
+        assert!(s.inspect_stateful(&hp, &mut chain, 4_000).banned());
+    }
+
+    #[test]
+    fn deny_and_allow_lists_come_from_config() {
+        let mut cfg = Config::default();
+        cfg.intel.deny_ips = vec!["192.0.2.9".into(), "192.0.2.10".into()];
+        cfg.intel.allow_ips = vec!["192.0.2.10".into()];
+        let s = Shield::new(cfg);
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("::ffff:192.0.2.9".parse().unwrap());
+        let j = s.inspect(&r);
+        assert_eq!(j.verdict, Verdict::Block);
+        assert!(has_construct(&j, "intel.deny-listed"));
+        assert_eq!(crate::chain::event_for(&j), crate::chain::Event::Benign, "a deny pin is not a kill-chain event");
+        r.src_ip = Some("192.0.2.10".parse().unwrap());
+        assert_eq!(s.inspect(&r).verdict, Verdict::Allow, "the allow-list suppresses the deny pin");
+    }
+
+    #[test]
+    fn disabling_the_deny_construct_removes_the_pin() {
+        let mut cfg = Config::default();
+        cfg.intel.deny_ips = vec!["192.0.2.9".into()];
+        cfg.shield.disabled = vec!["intel.deny-listed".into()];
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("192.0.2.9".parse().unwrap());
+        assert_eq!(Shield::new(cfg).inspect(&r).verdict, Verdict::Allow);
     }
 
     #[test]
@@ -790,7 +967,7 @@ mod tests {
         recon.src_ip = Some(ip);
         let j1 = s.inspect_stateful(&recon, &mut chain, 0);
         let j2 = s.inspect_stateful(&recon, &mut chain, 1_000);
-        assert_eq!(j1.chain_stage, Some(Stage::Recon));
+        assert_eq!(j1.stage(), Some(Stage::Recon));
         assert!(j2.score < j1.score, "no bonus without an advance (M2): {} vs {}", j2.score, j1.score);
     }
 
@@ -806,7 +983,7 @@ mod tests {
             "verdict {:?} score {} reason {}",
             j.verdict,
             j.score,
-            j.reason
+            j.decided_by.msg
         );
     }
 
@@ -1034,7 +1211,7 @@ mod tests {
         let req = Request::get(format!("/{}/../../../../etc/passwd", "a".repeat(70_000)));
         let j = Shield::new(Config::default()).inspect(&req);
         assert!(!has_limit(&j));
-        assert!(path_taint(&j), "{}", j.reason);
+        assert!(path_taint(&j), "{}", j.decided_by.msg);
     }
 
     fn fdfa_body(bytes: usize) -> Request {
@@ -1054,7 +1231,7 @@ mod tests {
         let (j, work) = Shield::new(cfg).inspect_counting(&fdfa_body(1 << 20));
         assert!(has_limit(&j));
         assert_eq!(j.verdict, Verdict::Block);
-        assert_eq!(j.reason, LIMIT_REASON);
+        assert_eq!(j.decided_by.kind, CauseKind::Limit);
         assert!(work <= cap, "work {work} > cap {cap}");
         // The first 64 KiB chunk alone is inspected losslessly within the cap.
         assert!(work > 65_536 * 18, "work {work}");
@@ -1112,7 +1289,7 @@ mod tests {
         assert!(has_limit(&j));
         assert!(!has_construct(&j, "sqli.union-select")); // field b was not inspected
         assert_eq!(j.verdict, Verdict::Block);
-        assert_eq!(j.reason, LIMIT_REASON);
+        assert_eq!(j.decided_by.kind, CauseKind::Limit);
     }
 
     /// Whole-field base64 of an attack followed by `n` U+FDFA: the decoded text
@@ -1150,7 +1327,7 @@ mod tests {
             for (loc, req) in [("query", query_req(v)), ("header", header), ("body", body)] {
                 let j = shield().inspect(&req);
                 if !has_xss_or_sqli(&j) || j.verdict != Verdict::Block {
-                    missed.push(format!("n {n} {loc}: {:?} {} {}", j.verdict, j.score, j.reason));
+                    missed.push(format!("n {n} {loc}: {:?} {} {}", j.verdict, j.score, j.decided_by.msg));
                 }
             }
         }
@@ -1186,32 +1363,102 @@ mod tests {
         }
     }
 
-    const LIMIT_REASON: &str = "hard-block: limit.payload-truncated (request not fully inspected)";
-
     #[test]
     fn a_limit_block_names_its_cause() {
         let mut cfg = Config::default();
         cfg.shield.max_inspect_bytes = 100_000;
         let j = Shield::new(cfg).inspect(&query_req("a".repeat(200_000)));
         assert_eq!(j.verdict, Verdict::Block);
-        assert_eq!(j.reason, LIMIT_REASON);
+        assert_eq!(j.decided_by.kind, CauseKind::Limit);
     }
 
     #[test]
-    fn honeypot_and_deny_list_reasons_are_unchanged() {
-        let j = shield().inspect(&Request::get("/.git/config"));
-        assert_eq!(j.reason, "hard-block: honeypot or deny-list");
+    fn honeypot_outranks_deny_and_limit() {
+        assert_eq!(shield().inspect(&Request::get("/.git/config")).decided_by.kind, CauseKind::Honeypot);
         let mut s = shield();
         s.intel_mut().add_deny_ip("192.0.2.9".parse().unwrap());
         let mut r = Request::get("/index.html");
         r.src_ip = Some("192.0.2.9".parse().unwrap());
-        assert_eq!(s.inspect(&r).reason, "hard-block: honeypot or deny-list");
-        // Both causes at once: both are named.
+        assert_eq!(s.inspect(&r).decided_by.kind, CauseKind::IntelDeny);
         let mut cfg = Config::default();
         cfg.shield.max_inspect_bytes = 100_000;
         let mut r = Request::get("/.git/config");
         r.query.push(("q".into(), "a".repeat(200_000)));
         let j = Shield::new(cfg).inspect(&r);
-        assert_eq!(j.reason, "hard-block: honeypot or deny-list; limit.payload-truncated (request not fully inspected)");
+        assert_eq!(j.decided_by.kind, CauseKind::Honeypot);
+        assert!(has_limit(&j), "the limit is still recorded as a contribution");
+    }
+
+    #[test]
+    fn decided_by_follows_the_fixed_order() {
+        let s = shield();
+        let j = s.inspect(&Request::get("/.git/config"));
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::Honeypot, "honeypot.decoy_paths"));
+        let mut q = Request::get("/items");
+        q.query.push(("id".into(), "1 union select password from users".into()));
+        let j = s.inspect(&q);
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::Detection, "scoring.block_at"));
+        assert!(j.decided_by.construct.is_some());
+        assert_eq!(j.decided_by.field.as_ref().map(|f| f.name.as_str()), Some("id"));
+        assert!(j.decided_by.msg.contains("scoring.block_at"), "{}", j.decided_by.msg);
+        let j = s.inspect(&Request::get("/index.html"));
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::NoEvidence, "scoring.monitor_at"));
+    }
+
+    #[test]
+    fn intel_causes_name_their_lists() {
+        let mut cfg = Config::default();
+        cfg.intel.deny_ips = vec!["192.0.2.9".into()];
+        cfg.intel.allow_ips = vec!["192.0.2.10".into()];
+        let s = Shield::new(cfg);
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("192.0.2.9".parse().unwrap());
+        assert_eq!(s.inspect(&r).decided_by.kind, CauseKind::IntelDeny);
+        assert_eq!(s.inspect(&r).decided_by.option_key, "intel.deny_ips");
+        r.src_ip = Some("192.0.2.10".parse().unwrap());
+        let j = s.inspect(&r);
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::Allowlisted, "intel.allow_ips"));
+    }
+
+    #[test]
+    fn limit_cause_names_the_budget_that_stopped_inspection() {
+        let mut cfg = Config::default();
+        cfg.shield.max_inspect_bytes = 100_000;
+        let j = Shield::new(cfg).inspect(&query_req("a".repeat(200_000)));
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::Limit, "shield.max_inspect_bytes"));
+        let (j, _) = Shield::new(Config::default()).inspect_counting(&fdfa_body(1 << 20));
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::Limit, "shield.max_normalize_work"));
+    }
+
+    #[test]
+    fn chain_causes_name_their_option() {
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip: IpAddr = "10.0.0.20".parse().unwrap();
+        let mut hp = Request::get("/.git/config");
+        hp.src_ip = Some(ip);
+        let j1 = s.inspect_stateful(&hp, &mut chain, 0);
+        assert_eq!((j1.decided_by.kind, j1.decided_by.option_key), (CauseKind::Ban, "chain.ban_policy.on_honeypot"));
+        assert!(j1.chain.and_then(|o| o.new_ban).is_some());
+        let sum: f32 = j1.contributions.iter().map(|c| c.points).sum();
+        assert!((sum - 100.0).abs() <= 1.0, "Σ {sum}");
+        let j2 = s.inspect_stateful(&browser("/index.html", ip), &mut chain, 1_000);
+        assert_eq!(j2.decided_by.kind, CauseKind::Ban);
+        assert!(j2.chain.is_none(), "a fast-track ban observes nothing");
+    }
+
+    #[test]
+    fn a_chain_bonus_that_crosses_a_band_is_the_cause() {
+        let s = shield();
+        let mut j = Judgment::allow();
+        j.score = 30;
+        let o = ChainOutcome { stage_before: None, stage_after: Some(Stage::Recon), advanced: true, new_ban: None };
+        let j = s.finalize(j, &o);
+        assert_eq!(j.verdict, Verdict::Monitor);
+        assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::ChainEscalation, "scoring.chain_stage_bonus"));
+        assert!(j
+            .contributions
+            .iter()
+            .any(|c| c.construct.as_deref() == Some("chain.stage-advance") && (c.points - 15.0).abs() < 1e-3));
     }
 }

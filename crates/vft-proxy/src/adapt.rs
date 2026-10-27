@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(req.non_utf8_headers, vec!["cookie".to_string()]);
         assert!(req.cookies.iter().any(|(k, v)| k == "id" && v.contains("union select")));
         let j = Shield::new(Config::default()).inspect(&req);
-        assert_eq!(j.verdict, Verdict::Block, "{} {}", j.score, j.reason);
+        assert_eq!(j.verdict, Verdict::Block, "{} {}", j.score, j.decided_by.msg);
         assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("limit.header-non-utf8")));
     }
 

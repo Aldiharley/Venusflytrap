@@ -124,8 +124,14 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Parse and validate a config file; exit 1 and list every issue if invalid.
-    Validate { file: PathBuf },
+    /// Parse and validate a config file, optionally with an overrides file on top;
+    /// exit 1 and list every issue if invalid.
+    Validate {
+        file: PathBuf,
+        /// Sparse `key: value` overrides applied on top of FILE (lists replace).
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+    },
 }
 
 fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Config> {
@@ -214,7 +220,11 @@ fn main() -> anyhow::Result<()> {
             }
             let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, out.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
-            if report.invariant_violations > 0 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0) {
+            if report.invariant_violations > 0
+                || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0)
+                || report.explain_library.violations() > 0
+                || report.explain_serve.as_ref().is_some_and(|e| e.violations() > 0)
+            {
                 std::process::exit(3);
             }
         }
@@ -242,13 +252,27 @@ fn main() -> anyhow::Result<()> {
                 writeln!(f, "{}\t{}\t{}\t{}\t{}\t{}\t{}", r.id, r.kind, r.tp, r.fp, r.d_tp, r.d_fp, r.d_tp - r.d_fp)?;
             }
         }
-        Command::Config { action: ConfigCmd::Validate { file } } => match Config::load(&file) {
-            Ok(_) => println!("{}: ok", file.display()),
-            Err(e) => {
-                eprintln!("{}: {e}", file.display());
-                std::process::exit(1);
+        Command::Config { action: ConfigCmd::Validate { file, overrides } } => {
+            let base = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let ov = match overrides.as_ref() {
+                Some(p) => Some(std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?),
+                None => None,
+            };
+            match vft_core::options::layer(Some(&base), ov.as_deref()) {
+                Ok(l) => {
+                    println!("{}: ok", file.display());
+                    for (key, src) in &l.sources {
+                        if *src == vft_core::options::Source::Override {
+                            println!("  {key}: override");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}: {e}", file.display());
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     }
     Ok(())
 }
