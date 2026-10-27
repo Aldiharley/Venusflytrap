@@ -15,7 +15,7 @@ export type BanCause = 'Honeypot' | 'Exfiltration' | 'RepeatedExploitation' | 'M
 export interface FieldRef { loc: Location; name: string }
 export interface Contribution {
   engine: string; field: FieldRef | null; construct: string | null; family: Family | null;
-  value: FourValued; weight: number; points: number;
+  value: FourValued; weight: number; points: number; shadow: boolean;
 }
 export interface Cause {
   kind: CauseKind; option_key: string; construct: string | null; field: FieldRef | null; msg: string;

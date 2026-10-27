@@ -63,14 +63,15 @@ pub fn event_for(j: &Judgment) -> Event {
     let dangerous = |f: Family| {
         j.contributions
             .iter()
-            .any(|c| c.value == FourValued::Dangerous && c.family == Some(f))
+            .any(|c| !c.shadow && c.value == FourValued::Dangerous && c.family == Some(f))
     };
     if j.decided_by.kind == CauseKind::Honeypot {
         return Event::Honeypot;
     }
     if j.verdict.rank() >= Verdict::Challenge.rank() {
         let exfil = j.contributions.iter().any(|c| {
-            c.value == FourValued::Dangerous
+            !c.shadow
+                && c.value == FourValued::Dangerous
                 && c.construct.as_deref().is_some_and(|n| EXFIL_CONSTRUCTS.iter().any(|c| c.id == n))
         });
         if exfil {
@@ -87,7 +88,7 @@ pub fn event_for(j: &Judgment) -> Event {
     let scanner = j
         .contributions
         .iter()
-        .any(|c| c.construct.as_deref() == Some(sinks::INTEL_SCANNER_UA.id) && c.value.is_threat());
+        .any(|c| !c.shadow && c.construct.as_deref() == Some(sinks::INTEL_SCANNER_UA.id) && c.value.is_threat());
     if scanner && j.verdict.rank() >= Verdict::Challenge.rank() {
         return Event::Enumeration;
     }
@@ -327,6 +328,7 @@ mod tests {
             value: FourValued::Suspicious,
             weight: 0.8,
             points: 0.0,
+            shadow: false,
         }
     }
 
@@ -349,6 +351,7 @@ mod tests {
             value: FourValued::Dangerous,
             weight: 0.7,
             points: 0.0,
+            shadow: false,
         };
         assert_eq!(event_for(&judgment(Verdict::Allow, vec![recon.clone()])), Event::Benign);
         assert_eq!(event_for(&judgment(Verdict::Monitor, vec![recon.clone()])), Event::Recon);
@@ -511,5 +514,25 @@ mod tests {
         assert_eq!(SourceKey::new(a, 64), SourceKey::new(b, 64));
         let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
         assert_eq!(SourceKey::new(mapped, 64).ip(), "192.0.2.7".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn shadow_contributions_never_stage_a_source() {
+        let sqli = Contribution {
+            engine: "graph-taint",
+            field: None,
+            construct: Some("sqli.union-select".into()),
+            family: Some(Family::Sqli),
+            value: FourValued::Dangerous,
+            weight: 0.95,
+            points: 0.0,
+            shadow: true,
+        };
+        assert_eq!(event_for(&judgment(Verdict::Block, vec![sqli.clone()])), Event::Benign);
+        let mut ua = scanner_ua();
+        ua.shadow = true;
+        assert_eq!(event_for(&judgment(Verdict::Challenge, vec![ua])), Event::Benign);
+        let live = Contribution { shadow: false, ..sqli };
+        assert_eq!(event_for(&judgment(Verdict::Block, vec![live])), Event::Exfiltration);
     }
 }

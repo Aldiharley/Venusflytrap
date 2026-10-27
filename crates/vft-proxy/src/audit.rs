@@ -20,6 +20,7 @@ struct ContribLine<'a> {
     field: Option<String>,
     value: String,
     points: f32,
+    shadow: bool,
 }
 
 #[derive(Serialize)]
@@ -147,6 +148,7 @@ impl AuditSink {
                     field: c.field.as_ref().map(|f| format!("{:?}:{}", f.loc, f.name)),
                     value: format!("{:?}", c.value),
                     points: c.points,
+                    shadow: c.shadow,
                 })
                 .collect(),
             reason: &j.decided_by.msg,
@@ -233,6 +235,7 @@ mod tests {
         assert!(v["contributions"].as_array().unwrap().iter().any(|c| c["construct"] == "sqli.union-select"));
         assert!(v["cause"].is_string() && v["option_key"].is_string(), "{v}");
         assert!(v["contributions"][0]["points"].is_number(), "{v}");
+        assert_eq!(v["contributions"][0]["shadow"], false, "{v}");
         let _ = std::fs::remove_file(&p);
     }
 

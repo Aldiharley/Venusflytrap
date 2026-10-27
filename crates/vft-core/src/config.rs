@@ -129,6 +129,12 @@ pub struct ShieldConfig {
     /// Construct or decoder ids switched off (see `venusflytrap ablate`).
     /// Every id must be registered; unknown ids fail validation.
     pub disabled: Vec<String>,
+    /// Construct ids that are detected and recorded but never score: the request
+    /// is judged as if they were in `disabled`, and each hit is kept as a
+    /// `shadow` contribution with 0 points. While non-empty, every request is
+    /// inspected twice. An id may not also be in `disabled`; decoders cannot be
+    /// shadowed.
+    pub shadow: Vec<String>,
 }
 
 impl Default for ShieldConfig {
@@ -141,6 +147,7 @@ impl Default for ShieldConfig {
             max_inspect_bytes: 4 * 1024 * 1024,
             max_normalize_work: 8 * 1024 * 1024,
             disabled: Vec::new(),
+            shadow: Vec::new(),
         }
     }
 }
@@ -365,6 +372,14 @@ impl Config {
         if sh.max_normalize_work < sh.max_payload {
             bad("shield.max_normalize_work", format!("must be >= shield.max_payload ({}), got {}", sh.max_payload, sh.max_normalize_work));
         }
+        for id in &sh.shadow {
+            if sh.disabled.iter().any(|d| d == id) {
+                bad("shield.shadow", format!("{id:?} is also in shield.disabled; an id is either disabled or shadowed"));
+            }
+            if crate::graph::sinks::lookup(id).is_some_and(|c| c.kind == crate::graph::sinks::ConstructKind::Decoder) {
+                bad("shield.shadow", format!("{id:?} is a decoder; decoders emit no evidence and cannot be shadowed (use shield.disabled)"));
+            }
+        }
         let s = &self.scoring;
         if !(s.monitor_at < s.challenge_at && s.challenge_at < s.block_at && s.block_at <= 100) {
             bad(
@@ -558,5 +573,17 @@ mod tests {
     fn cross_field_rules_still_apply() {
         assert!(issues("shield:\n  decode_cap: 4\n  deep_threshold: 5\n").iter().any(|i| i.key == "shield.deep_threshold"));
         assert!(issues("scoring:\n  monitor_at: 80\n").iter().any(|i| i.key == "scoring.block_at"));
+    }
+
+    #[test]
+    fn shadow_ids_must_be_registered_not_disabled_and_not_decoders() {
+        assert!(issues("shield:\n  shadow: [sqli.union-select]\n").is_empty());
+        assert!(issues("shield:\n  shadow: [nope.nope]\n").iter().any(|i| i.key == "shield.shadow"));
+        assert!(issues("shield:\n  disabled: [sqli.union-select]\n  shadow: [sqli.union-select]\n")
+            .iter()
+            .any(|i| i.key == "shield.shadow" && i.message.contains("shield.disabled")));
+        assert!(issues("shield:\n  shadow: [decode.entity]\n")
+            .iter()
+            .any(|i| i.key == "shield.shadow" && i.message.contains("decoder")));
     }
 }

@@ -16,4 +16,10 @@ construct: string | null, family: Family | null, value: FourValued, weight: numb
 /**
  * Points this contribution added to the score.
  */
-points: number, };
+points: number, 
+/**
+ * A `shield.shadow` construct: it fired, but the request was judged as if
+ * it were disabled. Always 0 points; ignored by the score, the verdict,
+ * `decided_by` and the kill chain.
+ */
+shadow: boolean, };

@@ -151,6 +151,12 @@ impl Disabled {
     pub fn is(&self, c: &ConstructInfo) -> bool {
         self.0.contains(c.id)
     }
+
+    /// Whether `id` is in the set (for ids carried as strings, such as a
+    /// contribution's construct).
+    pub fn has(&self, id: &str) -> bool {
+        self.0.contains(id)
+    }
 }
 
 /// Sink output for one field: reachable and latent patterns, de-duplicated,
