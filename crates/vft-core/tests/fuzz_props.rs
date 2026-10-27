@@ -6,6 +6,33 @@ use proptest::prelude::*;
 use std::time::{Duration, Instant};
 use vft_core::{Config, Request, Shield};
 
+/// The body invariant (body.rs): every byte of a body lies in exactly one
+/// inspected non-JSON field's source range, or (the JSON exception) only in
+/// the source of JSON leaves, which is the whole JSON body or part they came
+/// from. A non-JSON field with one source range holds exactly that range's
+/// text (lossy UTF-8).
+fn partition_holds(body: &[u8], sources: &[(vft_core::Field, Vec<std::ops::Range<usize>>)]) -> Result<(), String> {
+    let (mut text, mut json) = (vec![0u32; body.len()], vec![0u32; body.len()]);
+    for (f, ranges) in sources {
+        let is_json = f.name.starts_with("json");
+        let hits = if is_json { &mut json } else { &mut text };
+        for r in ranges {
+            for h in &mut hits[r.clone()] {
+                *h += 1;
+            }
+        }
+        if let [r] = ranges.as_slice() {
+            if !is_json && !f.name.ends_with("#rest") && f.raw != String::from_utf8_lossy(&body[r.clone()]) {
+                return Err(format!("{} does not hold its source range", f.name));
+            }
+        }
+    }
+    match (0..body.len()).find(|&i| !(text[i] == 1 || (text[i] == 0 && json[i] > 0))) {
+        Some(i) => Err(format!("byte {i} lies in {} non-JSON and {} JSON fields", text[i], json[i])),
+        None => Ok(()),
+    }
+}
+
 fn inspect_value(v: &str) -> std::time::Duration {
     let shield = Shield::new(Config::default());
     let mut req = Request::get("/p");
@@ -216,7 +243,11 @@ proptest! {
                     Just(b"Content-Disposition: form-data; name=\"j\"\r\nContent-Type: application/json".to_vec()),
                     proptest::collection::vec(any::<u8>(), 0..64),
                 ],
-                proptest::collection::vec(any::<u8>(), 0..256),
+                prop_oneof![
+                    Just(br#"{"a":"x","a":["y",{"b c":"z"}]}"#.to_vec()),
+                    Just(br#"["x"]"#.to_vec()),
+                    proptest::collection::vec(any::<u8>(), 0..256),
+                ],
                 any::<bool>(),
             ),
             0..12,
@@ -237,7 +268,33 @@ proptest! {
             body.extend_from_slice(b"\r\n--b--\r\n");
         }
         body.extend_from_slice(&epi);
-        let (fields, _) = vft_core::body::body_fields(Some("multipart/form-data; boundary=b"), &body, &vft_core::graph::sinks::Disabled::default());
-        prop_assert!(fields.len() <= vft_core::body::MAX_BODY_FIELDS);
+        let (sources, _) = vft_core::body::body_sources(Some("multipart/form-data; boundary=b"), &body, &vft_core::graph::sinks::Disabled::default());
+        prop_assert!(sources.len() <= vft_core::body::MAX_BODY_FIELDS);
+        if let Err(e) = partition_holds(&body, &sources) {
+            prop_assert!(false, "{}", e);
+        }
+    }
+
+    /// The same invariant over generic bodies (JSON included).
+    #[test]
+    fn every_body_byte_lies_in_exactly_one_field(
+        ct in prop_oneof![
+            Just("text/plain"),
+            Just("application/octet-stream"),
+            Just("application/x-protobuf"),
+            Just(""),
+            Just("application/x-www-form-urlencoded"),
+            Just("application/xml"),
+            Just("image/png"),
+            Just("multipart/form-data"),
+            Just("multipart/form-data; boundary=b"),
+            Just("application/json"),
+        ],
+        bytes in proptest::collection::vec(any::<u8>(), 0..2048),
+    ) {
+        let (sources, _) = vft_core::body::body_sources(Some(ct), &bytes, &vft_core::graph::sinks::Disabled::default());
+        if let Err(e) = partition_holds(&bytes, &sources) {
+            prop_assert!(false, "{}", e);
+        }
     }
 }

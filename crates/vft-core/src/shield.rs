@@ -1629,7 +1629,7 @@ mod tests {
     #[test]
     fn disabling_the_parse_ids_restores_the_single_body_field() {
         let mut cfg = Config::default();
-        cfg.shield.disabled = ["parse.body-binary", "parse.body-json", "parse.body-multipart"].map(String::from).to_vec();
+        cfg.shield.disabled = ["parse.body-json", "parse.body-multipart"].map(String::from).to_vec();
         let body = serde_json::json!({"a": {"b": body_case()}}).to_string();
         let j = Shield::new(cfg).inspect(&body_req("application/json", body.into_bytes()));
         assert_eq!(j.verdict, Verdict::Block);
@@ -1637,12 +1637,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_in_a_text_body_emits_the_limit_but_binary_does_not() {
+    fn invalid_utf8_emits_the_limit_only_for_a_declared_text_class() {
         let j = shield().inspect(&body_req("text/plain", b"caf\xe9 au lait".to_vec()));
         assert_eq!(fields_of(&j, "limit.body-non-utf8"), vec!["<body>".to_string()]);
-        let j = shield().inspect(&body_req("application/x-protobuf", vec![0x0a, 0x02, 0xff, 0xfe, 0x10, 0x01]));
-        assert!(!has_construct(&j, "limit.body-non-utf8"));
-        assert!(j.contributions.iter().all(|c| c.field.as_ref().is_none_or(|f| f.loc != Location::Body)), "a binary body has no text field");
+        // A binary or untyped body is inspected (one lossy `<body>` field)
+        // but gains no score for its bytes.
+        for ct in ["application/x-protobuf", "application/octet-stream", ""] {
+            let req = body_req(ct, vec![0x0a, 0x02, 0xff, 0xfe, 0x10, 0x01]);
+            assert!(!has_construct(&shield().inspect(&req), "limit.body-non-utf8"), "{ct}");
+            assert!(req.fields().iter().any(|f| f.loc == Location::Body && f.name == "<body>"), "{ct}");
+        }
         let mut cfg = Config::default();
         cfg.shield.disabled = vec!["limit.body-non-utf8".into()];
         assert!(!has_construct(&Shield::new(cfg).inspect(&body_req("text/plain", b"caf\xe9".to_vec())), "limit.body-non-utf8"));

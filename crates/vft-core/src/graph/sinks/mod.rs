@@ -70,7 +70,7 @@ pub static HONEYPOT_DECOY_HIT: ConstructInfo = ConstructInfo { id: "honeypot.dec
 pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-ua", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "User-Agent matches a scanner fingerprint" };
 pub static INTEL_DENY_LISTED: ConstructInfo = ConstructInfo { id: "intel.deny-listed", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "source address is on intel.deny_ips" };
 pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.header-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a header carried bytes that are not UTF-8" };
-pub static LIMIT_BODY_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.body-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a text-class body carried bytes that are not valid UTF-8" };
+pub static LIMIT_BODY_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.body-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a body (or part) declared as a text class (json, text/*, form, xml) carried bytes that are not valid UTF-8" };
 pub static LIMIT_BODY_UNPARSED: ConstructInfo = ConstructInfo { id: "limit.body-unparsed", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a body declared JSON, ndjson or multipart did not parse and was inspected whole (informational, 0 points)" };
 
 // --- Limits ---------------------------------------------------------------------
@@ -84,7 +84,6 @@ pub static DECODE_PERCENT_LOSSY: ConstructInfo = ConstructInfo { id: "decode.per
 pub static DECODE_ENTITY: ConstructInfo = ConstructInfo { id: "decode.entity", family: None, kind: ConstructKind::Decoder, summary: "HTML entities: numeric, plus a fixed set of named ones" };
 pub static DECODE_ESC_HEX: ConstructInfo = ConstructInfo { id: "decode.esc-hex", family: None, kind: ConstructKind::Decoder, summary: "\\xNN and \\uNNNN escapes" };
 pub static DECODE_B64_WHOLE: ConstructInfo = ConstructInfo { id: "decode.b64-whole", family: None, kind: ConstructKind::Decoder, summary: "a field that is base64 as a whole; also tried before '+' becomes a space" };
-pub static PARSE_BODY_BINARY: ConstructInfo = ConstructInfo { id: "parse.body-binary", family: None, kind: ConstructKind::Decoder, summary: "body classification: a body binary by magic bytes, or a declared binary type whose bytes look binary, gets no text field" };
 pub static PARSE_BODY_JSON: ConstructInfo = ConstructInfo { id: "parse.body-json", family: None, kind: ConstructKind::Decoder, summary: "body classification: one json:<pointer> field per JSON string leaf; ndjson line by line" };
 pub static PARSE_BODY_MULTIPART: ConstructInfo = ConstructInfo { id: "parse.body-multipart", family: None, kind: ConstructKind::Decoder, summary: "body classification: multipart parts, one level, each classified by its own Content-Type" };
 
@@ -133,7 +132,6 @@ static REGISTRY: &[&ConstructInfo] = &[
     &DECODE_ENTITY,
     &DECODE_ESC_HEX,
     &DECODE_B64_WHOLE,
-    &PARSE_BODY_BINARY,
     &PARSE_BODY_JSON,
     &PARSE_BODY_MULTIPART,
     &shell::GATE_CMD_POSITION,
