@@ -80,7 +80,7 @@ impl Request {
     }
 
     /// All inspectable fields: query keys and values, headers, cookie names
-    /// and values, and the body classified by [`crate::body::body_fields`]
+    /// and values, and the body classified by [`crate::body::body_fields_encoded`]
     /// (JSON leaves, multipart parts, or one `<body>` field, as a form body
     /// stays; none for a binary body). A `parse.body-*` id in `off` restores
     /// `<body>` for its class. The path is inspected separately (it has
@@ -139,7 +139,7 @@ impl Request {
                 raw: v.clone(),
             });
         }
-        let (body, facts) = crate::body::body_fields(self.header("content-type"), &self.body, off);
+        let (body, facts) = crate::body::body_fields_encoded(self.header("content-type"), self.header("content-encoding"), &self.body, off);
         out.extend(body);
         (out, facts)
     }
@@ -272,5 +272,17 @@ mod tests {
         let (f, _) = req.fields_with(&off);
         assert!(f.iter().any(|f| f.loc == Location::Body && f.name == "<body>"));
         assert_eq!(req.header("content-type"), Some("application/json"));
+    }
+
+    #[test]
+    fn content_encoding_decides_whether_magic_bytes_hide_a_text_body() {
+        let mut req = Request::get("/x");
+        req.method = "POST".into();
+        req.headers.push(("Content-Type".into(), "application/json".into()));
+        req.body = vec![0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0];
+        let body = |r: &Request| r.fields().into_iter().filter(|f| f.loc == Location::Body).map(|f| f.name).collect::<Vec<_>>();
+        assert_eq!(body(&req), vec!["<body>"]);
+        req.headers.push(("Content-Encoding".into(), "gzip".into()));
+        assert!(body(&req).is_empty());
     }
 }

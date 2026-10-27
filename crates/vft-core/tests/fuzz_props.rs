@@ -202,4 +202,42 @@ proptest! {
         let (fields, _) = vft_core::body::body_fields(Some(ct), &bytes, &vft_core::graph::sinks::Disabled::default());
         prop_assert!(fields.len() <= vft_core::body::MAX_BODY_FIELDS);
     }
+
+    /// Bodies that do contain the boundary, so the multipart parser's index
+    /// arithmetic runs: random preamble, parts (a well-formed or random header
+    /// block, with or without the blank line), optional close, random epilogue.
+    #[test]
+    fn multipart_bodies_with_the_boundary_never_panic(
+        pre in proptest::collection::vec(any::<u8>(), 0..64),
+        parts in proptest::collection::vec(
+            (
+                prop_oneof![
+                    Just(b"Content-Disposition: form-data; name=\"x\"".to_vec()),
+                    Just(b"Content-Disposition: form-data; name=\"j\"\r\nContent-Type: application/json".to_vec()),
+                    proptest::collection::vec(any::<u8>(), 0..64),
+                ],
+                proptest::collection::vec(any::<u8>(), 0..256),
+                any::<bool>(),
+            ),
+            0..12,
+        ),
+        close in any::<bool>(),
+        epi in proptest::collection::vec(any::<u8>(), 0..64),
+    ) {
+        let mut body = pre.clone();
+        for (head, content, blank) in &parts {
+            body.extend_from_slice(b"\r\n--b\r\n");
+            body.extend_from_slice(head);
+            if *blank {
+                body.extend_from_slice(b"\r\n\r\n");
+            }
+            body.extend_from_slice(content);
+        }
+        if close {
+            body.extend_from_slice(b"\r\n--b--\r\n");
+        }
+        body.extend_from_slice(&epi);
+        let (fields, _) = vft_core::body::body_fields(Some("multipart/form-data; boundary=b"), &body, &vft_core::graph::sinks::Disabled::default());
+        prop_assert!(fields.len() <= vft_core::body::MAX_BODY_FIELDS);
+    }
 }
