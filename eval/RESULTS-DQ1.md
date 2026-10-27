@@ -118,8 +118,12 @@ Groups are cause, top construct (the contribution with the most points), and fie
 | 1 | `NoEvidence:scoring.monitor_at` | `-` | - | - | `1e/34/d8d5bbd8197013e97808a5214ee4.black` |
 | 1 | `NoEvidence:scoring.monitor_at` | `sqli.fn-benchmark` | - | - | `eb/82/88e894f0866ec16ed2f73e49b038.black` |
 
-Reading: on dev, 148 of 180 misses (82 %) are requests whose top contribution is `cmd.shell-meta` with
-no field recorded, scored below the monitor threshold. The largest false-positive groups are
+Reading: on dev, 148 of 180 misses (82 %) have `cmd.shell-meta` as their top contribution, scored below
+the monitor threshold with no field recorded (`NoEvidence` rows carry no `decided_by.field`). This is
+incidental, not the attack class that was missed: `cmd.shell-meta` fires on the `;` of almost every
+User-Agent header (`docs/BENCHMARK.md`, recall-lift ablation), so for a sub-threshold row `top` names the
+highest background scorer. Classifying these misses by attack family needs the payload, which this file
+does not open. The largest false-positive groups are
 `cmd.chained-command` in the `data` query parameter, and SQL constructs in the `Referer` header
 (`sqli.union-select`, `sqli.boolean-tautology`): 68 of the 118 top-10 FP rows are in those three groups.
 No detection change is made or proposed here.
