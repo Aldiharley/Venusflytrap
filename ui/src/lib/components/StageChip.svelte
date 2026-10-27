@@ -6,7 +6,7 @@
   const cls = $derived(stage === null ? 'none' : stage.toLowerCase());
 </script>
 
-<span class="chip {cls}" aria-label={stage === null ? 'Clean' : `Stage ${n} of 4: ${stage}`}>
+<span class="chip {cls}" role="img" aria-label={stage === null ? 'Clean' : `Stage ${n} of 4: ${stage}`}>
   <span class="badge" aria-hidden="true">{n === 0 ? '–' : n}</span>
   {#if !compact}<span aria-hidden="true">{stage ?? 'Clean'}</span>{/if}
   <span class="pips" aria-hidden="true">

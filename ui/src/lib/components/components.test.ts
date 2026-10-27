@@ -9,6 +9,25 @@ test.each(['Allow', 'Monitor', 'Challenge', 'Block'] as const)('verdict %s has g
   const { container } = render(VerdictChip, { props: { verdict: v } });
   expect(container.textContent).toContain(v);
   expect(container.querySelector('svg')).toBeTruthy();
+  expect(container.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+});
+
+test('each verdict has a distinct glyph', () => {
+  const markup = (['Allow', 'Monitor', 'Challenge', 'Block'] as const).map((v) => {
+    const { container, unmount } = render(VerdictChip, { props: { verdict: v } });
+    const svg = container.querySelector('svg')?.innerHTML ?? '';
+    unmount();
+    return svg;
+  });
+  expect(markup.every((m) => m.length > 0)).toBe(true);
+  expect(new Set(markup).size).toBe(4);
+});
+
+test('stage chip exposes an accessible name', () => {
+  render(StageChip, { props: { stage: 'Exploitation' } });
+  expect(screen.getByRole('img', { name: 'Stage 3 of 4: Exploitation' })).toBeTruthy();
+  render(StageChip, { props: { stage: null } });
+  expect(screen.getByRole('img', { name: 'Clean' })).toBeTruthy();
 });
 
 test('stage chips show number, label and pips; null is Clean', () => {
