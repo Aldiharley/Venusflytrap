@@ -14,6 +14,7 @@ pub struct Config {
     pub honeypot: HoneypotConfig,
     pub proxy: ProxyConfig,
     pub limits: LimitsConfig,
+    pub intel: IntelConfig,
 }
 
 impl Default for Config {
@@ -26,6 +27,7 @@ impl Default for Config {
             honeypot: HoneypotConfig::default(),
             proxy: ProxyConfig::default(),
             limits: LimitsConfig::default(),
+            intel: IntelConfig::default(),
         }
     }
 }
@@ -48,6 +50,17 @@ pub enum DecisionHeaders {
     Off,
     /// Add X-Venusflytrap-* to the forwarded request only (never to the client).
     Upstream,
+}
+
+/// Source lists checked before inspection. Exact addresses; an IPv4-mapped
+/// IPv6 entry is matched as IPv4.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IntelConfig {
+    /// Sources always answered with Block (a hard pin), unless also allow-listed.
+    pub deny_ips: Vec<String>,
+    /// Sources never banned and never deny-pinned. They are still inspected.
+    pub allow_ips: Vec<String>,
 }
 
 /// Request-level limits on the data plane.
@@ -423,6 +436,11 @@ impl Config {
                 bad("proxy.trusted_proxies", format!("not an IP address: {p:?}"));
             }
         }
+        for (key, list) in [("intel.deny_ips", &self.intel.deny_ips), ("intel.allow_ips", &self.intel.allow_ips)] {
+            if let Some(p) = list.iter().find(|p| p.parse::<std::net::IpAddr>().is_err()) {
+                bad(key, format!("not an IP address: {p:?}"));
+            }
+        }
 
         let l = &self.limits;
         if l.max_body < 1024 {
@@ -547,6 +565,13 @@ mod tests {
             .iter()
             .any(|i| i.key == "proxy.trusted_proxies"));
         assert!(issues("proxy:\n  trusted_proxies: [\"10.0.0.1\", \"::1\"]\n").is_empty());
+    }
+
+    #[test]
+    fn intel_lists_must_be_ip_addresses() {
+        assert!(issues("intel:\n  deny_ips: [\"1.2.3.4\", \"nope\"]\n").iter().any(|i| i.key == "intel.deny_ips"));
+        assert!(issues("intel:\n  allow_ips: [\"10.0.0.1:80\"]\n").iter().any(|i| i.key == "intel.allow_ips"));
+        assert!(issues("intel:\n  deny_ips: [\"::1\"]\n  allow_ips: [\"192.0.2.1\"]\n").is_empty());
     }
 
     #[test]

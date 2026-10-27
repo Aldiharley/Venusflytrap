@@ -61,6 +61,7 @@ pub static API_TYPE_VIOLATION: ConstructInfo = ConstructInfo { id: "api.type-vio
 pub static RECON_SENSITIVE_PATH: ConstructInfo = ConstructInfo { id: "recon.sensitive-path-probe", family: Some(Family::Recon), kind: ConstructKind::Signature, summary: "canonical path starts with a configured sensitive path" };
 pub static HONEYPOT_DECOY_HIT: ConstructInfo = ConstructInfo { id: "honeypot.decoy-hit", family: Some(Family::Honeypot), kind: ConstructKind::Signature, summary: "canonical path hits a configured decoy" };
 pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-ua", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "User-Agent matches a scanner fingerprint" };
+pub static INTEL_DENY_LISTED: ConstructInfo = ConstructInfo { id: "intel.deny-listed", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "source address is on intel.deny_ips" };
 pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.header-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a header carried bytes that are not UTF-8" };
 
 // --- Limits ---------------------------------------------------------------------
@@ -108,6 +109,7 @@ static REGISTRY: &[&ConstructInfo] = &[
     &RECON_SENSITIVE_PATH,
     &HONEYPOT_DECOY_HIT,
     &INTEL_SCANNER_UA,
+    &INTEL_DENY_LISTED,
     &LIMIT_HEADER_NON_UTF8,
     &LIMIT_GRAPH_TRUNCATED,
     &LIMIT_PAYLOAD_TRUNCATED,

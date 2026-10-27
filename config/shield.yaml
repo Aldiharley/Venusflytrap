@@ -64,6 +64,10 @@ proxy:
   trusted_proxies: []       # peers whose X-Forwarded-For is trusted (exact IPs)
   decision_headers: off     # off | upstream (never sent to clients)
 
+intel:
+  deny_ips: []              # sources always blocked (exact IPs), unless also allow-listed
+  allow_ips: []             # sources never banned or deny-pinned; still inspected
+
 limits:
   max_body: 1048576         # bytes; larger bodies get 413 before any upstream connection
   max_headers: 100

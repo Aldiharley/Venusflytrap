@@ -87,7 +87,7 @@ pub fn event_for(j: &Judgment) -> Event {
     let scanner = j
         .contributions
         .iter()
-        .any(|c| c.family == Some(Family::Intel) && c.value.is_threat());
+        .any(|c| c.construct.as_deref() == Some(sinks::INTEL_SCANNER_UA.id) && c.value.is_threat());
     if scanner && j.verdict.rank() >= Verdict::Challenge.rank() {
         return Event::Enumeration;
     }

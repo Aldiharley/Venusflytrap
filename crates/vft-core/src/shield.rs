@@ -39,7 +39,13 @@ impl Shield {
             disabled: disabled.clone(),
         };
         let honeypot = Honeypot::new(&cfg.honeypot);
-        let intel = Intel::with_defaults();
+        let mut intel = Intel::with_defaults();
+        for ip in cfg.intel.deny_ips.iter().filter_map(|s| s.parse().ok()) {
+            intel.add_deny_ip(canonical(ip));
+        }
+        for ip in cfg.intel.allow_ips.iter().filter_map(|s| s.parse().ok()) {
+            intel.add_allow_ip(canonical(ip));
+        }
         Shield {
             cfg,
             norm_opts,
@@ -206,7 +212,21 @@ impl Shield {
         }
 
         // Honeypot.
-        let mut honeypot_or_deny = denied;
+        let deny_pin = denied && !self.disabled.is(&sinks::INTEL_DENY_LISTED);
+        if deny_pin {
+            rec.record(
+                "intel",
+                1.0,
+                None,
+                Evidence::new(
+                    FourValued::Dangerous,
+                    1.0,
+                    vec![sinks::INTEL_DENY_LISTED.pattern()],
+                    "source is on intel.deny_ips",
+                ),
+            );
+        }
+        let mut honeypot_or_deny = deny_pin;
         let honeypot_hit = if self.disabled.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
         if let Some(e) = honeypot_hit {
             honeypot_or_deny = true;
@@ -770,6 +790,32 @@ mod tests {
         let other: IpAddr = "192.0.2.8".parse().unwrap();
         hp.src_ip = Some(other);
         assert!(s.inspect_stateful(&hp, &mut chain, 4_000).banned_source);
+    }
+
+    #[test]
+    fn deny_and_allow_lists_come_from_config() {
+        let mut cfg = Config::default();
+        cfg.intel.deny_ips = vec!["192.0.2.9".into(), "192.0.2.10".into()];
+        cfg.intel.allow_ips = vec!["192.0.2.10".into()];
+        let s = Shield::new(cfg);
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("::ffff:192.0.2.9".parse().unwrap());
+        let j = s.inspect(&r);
+        assert_eq!(j.verdict, Verdict::Block);
+        assert!(has_construct(&j, "intel.deny-listed"));
+        assert_eq!(crate::chain::event_for(&j), crate::chain::Event::Benign, "a deny pin is not a kill-chain event");
+        r.src_ip = Some("192.0.2.10".parse().unwrap());
+        assert_eq!(s.inspect(&r).verdict, Verdict::Allow, "the allow-list suppresses the deny pin");
+    }
+
+    #[test]
+    fn disabling_the_deny_construct_removes_the_pin() {
+        let mut cfg = Config::default();
+        cfg.intel.deny_ips = vec!["192.0.2.9".into()];
+        cfg.shield.disabled = vec!["intel.deny-listed".into()];
+        let mut r = Request::get("/index.html");
+        r.src_ip = Some("192.0.2.9".parse().unwrap());
+        assert_eq!(Shield::new(cfg).inspect(&r).verdict, Verdict::Allow);
     }
 
     #[test]
