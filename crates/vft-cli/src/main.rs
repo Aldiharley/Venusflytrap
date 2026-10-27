@@ -100,6 +100,14 @@ enum Command {
         /// Disable a construct or decoder by id (repeatable).
         #[arg(long)]
         disable: Vec<String>,
+        /// Run a construct in shadow (repeatable): detected and recorded as a
+        /// shadow contribution, never scored.
+        #[arg(long)]
+        shadow: Vec<String>,
+        /// Report, per shadow construct, the rows it would gain (would_tp),
+        /// cost (would_fp) or not change (already) if promoted.
+        #[arg(long)]
+        promotion: bool,
     },
     /// Leave-one-out ablation in library mode; writes a TSV.
     Ablate {
@@ -201,16 +209,23 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
-        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable } => {
+        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable, shadow, promotion } => {
             let mut cfg = load_config(cli.config.as_ref())?;
             cfg.shield.disabled.extend(disable);
+            cfg.shield.shadow.extend(shadow);
             cfg.validate().map_err(|e| anyhow::anyhow!(e.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("; ")))?;
+            if promotion && cfg.shield.shadow.is_empty() {
+                anyhow::bail!("--promotion needs construct ids in shield.shadow (config file or --shadow)");
+            }
             let sources: eval::Sources = sources.parse().map_err(anyhow::Error::msg)?;
             let mut samples = eval::load_corpus(&corpus)?;
             if let (Some(m), Some(s)) = (manifest.as_ref(), side.as_deref()) {
                 samples = eval::select_side(samples, &eval::load_manifest(m)?, s)?;
             }
             if mode == EvalMode::Tcp {
+                if promotion {
+                    anyhow::bail!("--promotion needs --mode library or serve");
+                }
                 let r = eval::run_tcp(cfg, &samples, limit)?;
                 println!("{}", serde_json::to_string_pretty(&r)?);
                 if r.mismatched > 0 {
@@ -218,8 +233,14 @@ fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref() })?;
+            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref(), promotion })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+            if let Some(rows) = &report.promotion {
+                eprintln!("construct\twould_tp\twould_fp\talready\tpromote");
+                for r in rows {
+                    eprintln!("{}\t{}\t{}\t{}\t{}", r.construct, r.would_tp, r.would_fp, r.already, r.promote);
+                }
+            }
             if report.invariant_violations > 0
                 || report.serve.as_ref().is_some_and(|s| s.bans_from_allowed > 0)
                 || report.explain_library.violations() > 0

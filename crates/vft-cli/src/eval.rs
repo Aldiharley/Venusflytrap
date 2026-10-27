@@ -3,7 +3,7 @@
 //! proxy serves (`Pipeline::decide`) statefully, with the raw Cookie header,
 //! and reports ban effects. Both modes share one lenient raw-request parser.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -304,6 +304,21 @@ impl ExplainCounts {
     }
 }
 
+/// What promoting one shadow construct would change on the scored samples,
+/// measured against the library verdict with the construct still in shadow.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct PromotionRow {
+    pub construct: String,
+    /// Fires on a malicious row the live verdict misses (Allow/Monitor).
+    pub would_tp: u64,
+    /// Fires on a benign row the live verdict allows (Allow/Monitor).
+    pub would_fp: u64,
+    /// Fires on a row the live verdict already blocks (Block/Challenge).
+    pub already: u64,
+    /// The promotion rule: `would_tp > would_fp`.
+    pub promote: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub mode: &'static str,
@@ -322,6 +337,9 @@ pub struct Report {
     pub explain_library: ExplainCounts,
     pub explain_serve: Option<ExplainCounts>,
     pub latency_us_p50_p95_p99: [u64; 3],
+    /// Per `shield.shadow` id, with `--promotion` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<Vec<PromotionRow>>,
 }
 
 fn attack(v: Verdict) -> bool {
@@ -333,6 +351,8 @@ fn attack(v: Verdict) -> bool {
 pub struct Outputs<'a> {
     /// Per-sample CSV.
     pub csv: Option<&'a Path>,
+    /// Count shadow-construct hits per class into `Report.promotion` (`--promotion`).
+    pub promotion: bool,
 }
 
 /// One CSV cell (RFC 4180): quoted when it holds a comma, a quote or a line break.
@@ -358,12 +378,18 @@ fn top_construct(cs: &[vft_core::Contribution]) -> Option<&str> {
 }
 
 pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, out: Outputs<'_>) -> anyhow::Result<Report> {
+    let mut promo: BTreeMap<String, PromotionRow> = cfg
+        .shield
+        .shadow
+        .iter()
+        .map(|id| (id.clone(), PromotionRow { construct: id.clone(), ..Default::default() }))
+        .collect();
     let shield = Arc::new(Shield::new(cfg));
     let pipeline = Pipeline::new(shield.clone());
     let mut csv_out = match out.csv {
         Some(p) => {
             let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top")?;
+            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow")?;
             Some(f)
         }
         None => None,
@@ -406,6 +432,21 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             invariant_violations += 1;
         }
         lib.add(attack(lj.verdict), s.label);
+        let shadow_hits: BTreeSet<&str> = lj.contributions.iter().filter(|c| c.shadow).filter_map(|c| c.construct.as_deref()).collect();
+        if out.promotion {
+            for id in &shadow_hits {
+                let row = promo
+                    .entry(id.to_string())
+                    .or_insert_with(|| PromotionRow { construct: id.to_string(), ..Default::default() });
+                if attack(lj.verdict) {
+                    row.already += 1;
+                } else if s.label == 1 {
+                    row.would_tp += 1;
+                } else {
+                    row.would_fp += 1;
+                }
+            }
+        }
 
         let mut serve_verdict = String::new();
         let mut banned = false;
@@ -436,11 +477,12 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             lat.push(t.elapsed().as_micros() as u64);
         }
         if let Some(f) = csv_out.as_mut() {
-            let constructs: Vec<&str> = lj.contributions.iter().filter_map(|c| c.construct.as_deref()).collect();
+            let constructs: Vec<&str> = lj.contributions.iter().filter(|c| !c.shadow).filter_map(|c| c.construct.as_deref()).collect();
             let field = lj.decided_by.field.as_ref().map(|r| r.label()).unwrap_or_default();
+            let shadow: Vec<&str> = shadow_hits.iter().copied().collect();
             writeln!(
                 f,
-                "{},{},{:?},{},{},{},{},{:?}:{},{},{}",
+                "{},{},{:?},{},{},{},{},{:?}:{},{},{},{}",
                 s.rel,
                 s.label,
                 lj.verdict,
@@ -451,7 +493,8 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
                 lj.decided_by.kind,
                 lj.decided_by.option_key,
                 csv_cell(&field),
-                top_construct(&lj.contributions).unwrap_or("")
+                top_construct(&lj.contributions).unwrap_or(""),
+                shadow.join("|")
             )?;
         }
     }
@@ -477,6 +520,15 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         explain_library: explain_lib,
         explain_serve: serve.then_some(explain_srv),
         latency_us_p50_p95_p99: [pct(0.5), pct(0.95), pct(0.99)],
+        promotion: out.promotion.then(|| {
+            promo
+                .into_values()
+                .map(|mut r| {
+                    r.promote = r.would_tp > r.would_fp;
+                    r
+                })
+                .collect()
+        }),
     })
 }
 
@@ -993,7 +1045,7 @@ Host: x
         let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
         let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
         let p = std::env::temp_dir().join(format!("vft-eval-csv-{}.csv", std::process::id()));
-        run(Config::default(), &[attack, benign], false, Sources::Distinct, 100, Outputs { csv: Some(&p) }).unwrap();
+        run(Config::default(), &[attack, benign], false, Sources::Distinct, 100, Outputs { csv: Some(&p), ..Default::default() }).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let _ = std::fs::remove_file(&p);
         let mut lines = text.lines();
@@ -1006,5 +1058,42 @@ Host: x
         assert!(!a[9].is_empty() && a[6].split('|').any(|c| c == a[9]), "top {} must be one of {}", a[9], a[6]);
         let b: Vec<&str> = lines.next().unwrap().split(',').collect();
         assert_eq!((b[0], b[2], b[8]), ("b.white", "Allow", ""), "{b:?}");
+    }
+
+    #[test]
+    fn promotion_counts_shadow_hits_by_class_and_the_csv_lists_them() {
+        let mk = |rel: &str, label, raw: &str| Sample { rel: rel.into(), label, raw: raw.as_bytes().to_vec(), unreadable: None };
+        let samples = vec![
+            mk("a.black", 1, "GET /?q=hello HTTP/1.1\r\nHost: x\r\nUser-Agent: sqlmap/1.7\r\n\r\n"),
+            mk("b.white", 0, "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: sqlmap/1.7\r\n\r\n"),
+            mk("c.black", 1, "GET /?id=1%20union%20select%20password%20from%20users HTTP/1.1\r\nHost: x\r\nUser-Agent: sqlmap/1.7\r\n\r\n"),
+            mk("d.white", 0, "GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n"),
+        ];
+        let mut cfg = Config::default();
+        cfg.shield.shadow = vec!["intel.scanner-ua".into()];
+        let p = std::env::temp_dir().join(format!("vft-eval-promo-{}.csv", std::process::id()));
+        let r = run(cfg, &samples, false, Sources::Distinct, 100, Outputs { csv: Some(&p), promotion: true }).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(
+            r.promotion,
+            Some(vec![PromotionRow { construct: "intel.scanner-ua".into(), would_tp: 1, would_fp: 1, already: 1, promote: false }])
+        );
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow"));
+        for line in lines {
+            let cols: Vec<&str> = line.split(',').collect();
+            let want = if cols[0] == "d.white" { "" } else { "intel.scanner-ua" };
+            assert_eq!(cols[10], want, "{line}");
+            assert!(!cols[6].split('|').any(|c| c == "intel.scanner-ua"), "{line}");
+        }
+    }
+
+    #[test]
+    fn reports_without_promotion_omit_the_field() {
+        let s = Sample { rel: "a.white".into(), label: 0, raw: b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let r = run(Config::default(), &[s], false, Sources::Distinct, 100, Outputs::default()).unwrap();
+        assert!(r.promotion.is_none());
+        assert!(!serde_json::to_string(&r).unwrap().contains("\"promotion\""));
     }
 }
