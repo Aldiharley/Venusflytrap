@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ChainConfig;
 use crate::graph::sinks::{self, ConstructInfo};
-use crate::judgment::{Family, Judgment, Stage, Verdict};
+use crate::judgment::{CauseKind, Family, Judgment, Stage, Verdict};
 use crate::lattice::FourValued;
 
 /// What a single decision told us about a source.
@@ -65,7 +65,7 @@ pub fn event_for(j: &Judgment) -> Event {
             .iter()
             .any(|c| c.value == FourValued::Dangerous && c.family == Some(f))
     };
-    if dangerous(Family::Honeypot) {
+    if j.decided_by.kind == CauseKind::Honeypot {
         return Event::Honeypot;
     }
     if j.verdict.rank() >= Verdict::Challenge.rank() {
@@ -141,7 +141,7 @@ impl BanRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct ChainOutcome {
     pub stage_before: Option<Stage>,
     pub stage_after: Option<Stage>,
@@ -309,17 +309,10 @@ mod tests {
     const MIN: u64 = 60_000;
 
     fn judgment(verdict: Verdict, contributions: Vec<Contribution>) -> Judgment {
-        Judgment {
-            verdict,
-            score: 0,
-            engines: Vec::new(),
-            matched: Vec::new(),
-            contributions,
-            chain_stage: None,
-            normalized_layers: 0,
-            banned_source: false,
-            reason: String::new(),
-        }
+        let mut j = Judgment::allow();
+        j.verdict = verdict;
+        j.contributions = contributions;
+        j
     }
 
     fn scanner_ua() -> Contribution {

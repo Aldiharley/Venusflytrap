@@ -74,6 +74,11 @@ pub struct FieldRef {
 }
 
 impl FieldRef {
+    /// `query:id`, `header:user-agent`, `path:<path>`.
+    pub fn label(&self) -> String {
+        let loc = format!("{:?}", self.loc).to_ascii_lowercase();
+        format!("{loc}:{}", self.name)
+    }
     pub fn of(f: &crate::request::Field) -> Self {
         FieldRef { loc: f.loc, name: f.name.clone() }
     }
@@ -112,14 +117,42 @@ pub struct EngineReport {
     pub note: String,
 }
 
+/// What kind of thing decided a judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CauseKind {
+    NoEvidence,
+    Detection,
+    Honeypot,
+    IntelDeny,
+    Ban,
+    ChainEscalation,
+    Limit,
+    Allowlisted,
+}
+
+/// The one setting that decided a judgment, with the construct and field behind it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Cause {
+    pub kind: CauseKind,
+    /// A key of `options::REGISTRY`, e.g. "scoring.block_at".
+    pub option_key: &'static str,
+    pub construct: Option<String>,
+    pub field: Option<FieldRef>,
+    /// One human sentence.
+    pub msg: String,
+}
+
 /// The engine's decision about a single request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Judgment {
     pub verdict: Verdict,
     pub score: u8,
     pub engines: Vec<EngineReport>,
     pub matched: Vec<Pattern>,
     pub contributions: Vec<Contribution>,
+    pub decided_by: Cause,
+    /// The chain observation applied by `Shield::finalize`.
+    pub chain: Option<crate::chain::ChainOutcome>,
     pub chain_stage: Option<Stage>,
     pub normalized_layers: u8,
     pub banned_source: bool,
@@ -134,6 +167,14 @@ impl Judgment {
             engines: Vec::new(),
             matched: Vec::new(),
             contributions: Vec::new(),
+            decided_by: Cause {
+                kind: CauseKind::NoEvidence,
+                option_key: "scoring.monitor_at",
+                construct: None,
+                field: None,
+                msg: "no evidence".into(),
+            },
+            chain: None,
             chain_stage: None,
             normalized_layers: 0,
             banned_source: false,
