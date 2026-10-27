@@ -3,7 +3,7 @@
 //! proxy serves (`Pipeline::decide`) statefully, with the raw Cookie header,
 //! and reports ban effects. Both modes share one lenient raw-request parser.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -208,6 +208,10 @@ pub struct Metrics {
     pub precision: f64,
     pub f1: f64,
     pub fp_rate: f64,
+    /// Wilson 95 % interval of `recall` (TP out of TP + FN).
+    pub recall_ci95: [f64; 2],
+    /// Wilson 95 % interval of `fp_rate` (FP out of FP + TN).
+    pub fp_rate_ci95: [f64; 2],
 }
 
 impl Metrics {
@@ -226,8 +230,28 @@ impl Metrics {
         self.precision = p;
         self.f1 = if r + p > 0.0 { 2.0 * r * p / (r + p) } else { 0.0 };
         self.fp_rate = self.fp as f64 / (self.fp + self.tn).max(1) as f64;
+        let (lo, hi) = wilson(self.tp, self.tp + self.fn_);
+        self.recall_ci95 = [lo, hi];
+        let (lo, hi) = wilson(self.fp, self.fp + self.tn);
+        self.fp_rate_ci95 = [lo, hi];
         self
     }
+}
+
+/// Wilson score interval for `k` successes in `n` trials at z = 1.96 (95 %),
+/// clamped to [0, 1]. `(0, 0)` when `n` is 0.
+fn wilson(k: u64, n: u64) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    const Z: f64 = 1.96;
+    let n = n as f64;
+    let p = k as f64 / n;
+    let z2 = Z * Z;
+    let denom = 1.0 + z2 / n;
+    let center = (p + z2 / (2.0 * n)) / denom;
+    let half = Z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denom;
+    ((center - half).max(0.0), (center + half).min(1.0))
 }
 
 #[derive(Debug, Serialize)]
@@ -280,6 +304,21 @@ impl ExplainCounts {
     }
 }
 
+/// What promoting one shadow construct would change on the scored samples,
+/// measured against the library verdict with the construct still in shadow.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct PromotionRow {
+    pub construct: String,
+    /// Fires on a malicious row the live verdict misses (Allow/Monitor).
+    pub would_tp: u64,
+    /// Fires on a benign row the live verdict allows (Allow/Monitor).
+    pub would_fp: u64,
+    /// Fires on a row the live verdict already blocks (Block/Challenge).
+    pub already: u64,
+    /// The promotion rule: `would_tp > would_fp`.
+    pub promote: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub mode: &'static str,
@@ -298,21 +337,103 @@ pub struct Report {
     pub explain_library: ExplainCounts,
     pub explain_serve: Option<ExplainCounts>,
     pub latency_us_p50_p95_p99: [u64; 3],
+    /// Per `shield.shadow` id, with `--promotion` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<Vec<PromotionRow>>,
 }
 
 fn attack(v: Verdict) -> bool {
     matches!(v, Verdict::Block | Verdict::Challenge)
 }
 
-pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, csv: Option<&Path>) -> anyhow::Result<Report> {
+/// Optional outputs of [`run`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Outputs<'a> {
+    /// Per-sample CSV.
+    pub csv: Option<&'a Path>,
+    /// Count shadow-construct hits per class into `Report.promotion` (`--promotion`).
+    pub promotion: bool,
+    /// JSONL of every scored request as the engine receives it (`--dump-requests`).
+    pub dump: Option<&'a Path>,
+}
+
+/// Latin-1 view of bytes: each byte becomes the char with that code point, so
+/// Python's `s.encode("latin-1")` returns exactly these bytes.
+fn latin1(b: &[u8]) -> String {
+    b.iter().map(|&c| char::from(c)).collect()
+}
+
+/// One `--dump-requests` line, in `eval/parse_corpus.py`'s schema plus `rel`.
+#[derive(Serialize)]
+struct DumpRow<'a> {
+    label: u8,
+    method: &'a str,
+    path: String,
+    query: Vec<[String; 2]>,
+    headers: Vec<[String; 2]>,
+    cookies: Vec<[String; 2]>,
+    body: String,
+    rel: &'a str,
+}
+
+/// The request exactly as `adapt::from_parts` built it. Every string is the
+/// Latin-1 view of its UTF-8 bytes; the raw `Cookie` header goes only into
+/// `cookies`, as in parse_corpus.py.
+fn dump_line(rel: &str, label: u8, req: &vft_core::Request) -> serde_json::Result<String> {
+    let pair = |(k, v): &(String, String)| [latin1(k.as_bytes()), latin1(v.as_bytes())];
+    serde_json::to_string(&DumpRow {
+        label,
+        method: &req.method,
+        path: latin1(req.path.as_bytes()),
+        query: req.query.iter().map(pair).collect(),
+        headers: req.headers.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("cookie")).map(pair).collect(),
+        cookies: req.cookies.iter().map(pair).collect(),
+        body: latin1(&req.body),
+        rel,
+    })
+}
+
+/// One CSV cell (RFC 4180): quoted when it holds a comma, a quote or a line break.
+fn csv_cell(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\"")).into()
+    } else {
+        s.into()
+    }
+}
+
+/// The construct of the contribution that added the most points (the first on
+/// a tie), as the shield's `top_contribution` picks it; `None` when no
+/// contribution has points.
+fn top_construct(cs: &[vft_core::Contribution]) -> Option<&str> {
+    let mut best: Option<&vft_core::Contribution> = None;
+    for c in cs {
+        if best.map_or(c.points > 0.0, |b| c.points > b.points) {
+            best = Some(c);
+        }
+    }
+    best.and_then(|c| c.construct.as_deref())
+}
+
+pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, out: Outputs<'_>) -> anyhow::Result<Report> {
+    let mut promo: BTreeMap<String, PromotionRow> = cfg
+        .shield
+        .shadow
+        .iter()
+        .map(|id| (id.clone(), PromotionRow { construct: id.clone(), ..Default::default() }))
+        .collect();
     let shield = Arc::new(Shield::new(cfg));
     let pipeline = Pipeline::new(shield.clone());
-    let mut csv_out = match csv {
+    let mut csv_out = match out.csv {
         Some(p) => {
             let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause")?;
+            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow")?;
             Some(f)
         }
+        None => None,
+    };
+    let mut dump_out = match out.dump {
+        Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
         None => None,
     };
     let (mut lib, mut srv) = (Metrics::default(), Metrics::default());
@@ -346,6 +467,9 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         skipped_headers += u64::from(p.skipped_headers);
         let ip = sources.ip_for(i, &s.rel);
         let req = adapt::from_parts(&p.parts, &p.body, Some(ip));
+        if let Some(w) = dump_out.as_mut() {
+            writeln!(w, "{}", dump_line(&s.rel, s.label, &req)?)?;
+        }
         let t = Instant::now();
         let lj = shield.inspect(&req);
         explain_lib.add(&s.rel, &lj);
@@ -353,6 +477,21 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             invariant_violations += 1;
         }
         lib.add(attack(lj.verdict), s.label);
+        let shadow_hits: BTreeSet<&str> = lj.contributions.iter().filter(|c| c.shadow).filter_map(|c| c.construct.as_deref()).collect();
+        if out.promotion {
+            for id in &shadow_hits {
+                let row = promo
+                    .entry(id.to_string())
+                    .or_insert_with(|| PromotionRow { construct: id.to_string(), ..Default::default() });
+                if attack(lj.verdict) {
+                    row.already += 1;
+                } else if s.label == 1 {
+                    row.would_tp += 1;
+                } else {
+                    row.would_fp += 1;
+                }
+            }
+        }
 
         let mut serve_verdict = String::new();
         let mut banned = false;
@@ -383,9 +522,29 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             lat.push(t.elapsed().as_micros() as u64);
         }
         if let Some(f) = csv_out.as_mut() {
-            let constructs: Vec<&str> = lj.contributions.iter().filter_map(|c| c.construct.as_deref()).collect();
-            writeln!(f, "{},{},{:?},{},{},{},{},{:?}:{}", s.rel, s.label, lj.verdict, serve_verdict, lj.score, banned, constructs.join("|"), lj.decided_by.kind, lj.decided_by.option_key)?;
+            let constructs: Vec<&str> = lj.contributions.iter().filter(|c| !c.shadow).filter_map(|c| c.construct.as_deref()).collect();
+            let field = lj.decided_by.field.as_ref().map(|r| r.label()).unwrap_or_default();
+            let shadow: Vec<&str> = shadow_hits.iter().copied().collect();
+            writeln!(
+                f,
+                "{},{},{:?},{},{},{},{},{:?}:{},{},{},{}",
+                s.rel,
+                s.label,
+                lj.verdict,
+                serve_verdict,
+                lj.score,
+                banned,
+                constructs.join("|"),
+                lj.decided_by.kind,
+                lj.decided_by.option_key,
+                csv_cell(&field),
+                top_construct(&lj.contributions).unwrap_or(""),
+                shadow.join("|")
+            )?;
         }
+    }
+    if let Some(mut w) = dump_out {
+        w.flush()?;
     }
     lat.sort_unstable();
     let pct = |q: f64| lat.get(((lat.len().max(1) - 1) as f64 * q).round() as usize).copied().unwrap_or(0);
@@ -409,6 +568,15 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
         explain_library: explain_lib,
         explain_serve: serve.then_some(explain_srv),
         latency_us_p50_p95_p99: [pct(0.5), pct(0.95), pct(0.99)],
+        promotion: out.promotion.then(|| {
+            promo
+                .into_values()
+                .map(|mut r| {
+                    r.promote = r.would_tp > r.would_fp;
+                    r
+                })
+                .collect()
+        }),
     })
 }
 
@@ -548,17 +716,80 @@ impl TcpReport {
 
 const REPLAY_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Connect with zero linger: closing sends RST, so neither end of a replayed
+/// connection enters TIME_WAIT and a full-corpus replay does not exhaust
+/// loopback ports.
+async fn connect(addr: std::net::SocketAddr, limit: std::time::Duration) -> Result<tokio::net::TcpStream, String> {
+    let sock = match tokio::time::timeout(limit, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(format!("connect: {e}")),
+        Err(_) => return Err("connect timeout".into()),
+    };
+    sock.set_zero_linger().map_err(|e| format!("set_zero_linger: {e}"))?;
+    Ok(sock)
+}
+
+/// The Content-Length of a request head (0 when absent); `None` for
+/// `Transfer-Encoding` or a length that does not parse.
+fn content_length(head: &[u8]) -> Option<usize> {
+    let mut len = 0usize;
+    for line in head.split(|&b| b == b'\n').skip(1) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(colon) = line.iter().position(|&b| b == b':') else {
+            continue;
+        };
+        let name = line[..colon].trim_ascii();
+        if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            return None;
+        }
+        if name.eq_ignore_ascii_case(b"content-length") {
+            len = std::str::from_utf8(line[colon + 1..].trim_ascii()).ok()?.parse().ok()?;
+        }
+    }
+    Some(len)
+}
+
+/// The replay's stand-in upstream: answers every request on a connection with
+/// an empty 200 and keeps the connection open, so the proxy's pooled client
+/// reuses it. Reads each request head and its Content-Length body; returns when
+/// the peer closes, on an error, or on a head it cannot frame.
+async fn serve_keepalive(mut s: tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let head_end = loop {
+            if let Some(i) = find(&buf, b"\r\n\r\n") {
+                break i + 4;
+            }
+            match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let Some(body_len) = content_length(&buf[..head_end]) else {
+            return;
+        };
+        while buf.len() < head_end + body_len {
+            match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        buf.drain(..head_end + body_len);
+        if s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Send `raw` to `addr` and return the HTTP status of the reply. Connect, write and read are each bounded by
 /// `limit`. A write failure or timeout (the proxy may answer 413/431 and close
 /// before reading the whole request) still gets a bounded read of whatever the
 /// proxy sent; when no status arrived the result is an error (the write failure if there was one).
 async fn send_and_read(addr: std::net::SocketAddr, raw: &[u8], limit: std::time::Duration) -> Result<u16, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut sock = match tokio::time::timeout(limit, tokio::net::TcpStream::connect(addr)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(format!("connect: {e}")),
-        Err(_) => return Err("connect timeout".into()),
-    };
+    let mut sock = connect(addr, limit).await?;
     let write_err = match tokio::time::timeout(limit, sock.write_all(raw)).await {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(format!("write: {e}")),
@@ -579,7 +810,6 @@ async fn send_and_read(addr: std::net::SocketAddr, raw: &[u8], limit: std::time:
 }
 
 pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<TcpReport> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut cfg = cfg;
     cfg.proxy.trusted_proxies = vec!["127.0.0.1".into()];
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -587,12 +817,8 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
         let up = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let up_addr = up.local_addr()?;
         tokio::spawn(async move {
-            while let Ok((mut s, _)) = up.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 1 << 20];
-                    let _ = s.read(&mut buf).await;
-                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
-                });
+            while let Ok((s, _)) = up.accept().await {
+                tokio::spawn(serve_keepalive(s));
             }
         });
         let state = Arc::new(vft_proxy::ProxyState::new(
@@ -653,7 +879,7 @@ pub struct AblationRow {
 pub fn ablate(cfg: &Config, samples: &[Sample], ids: &[&'static str]) -> anyhow::Result<Vec<AblationRow>> {
     let lib = |c: Config| -> anyhow::Result<Metrics> {
         let sources: Sources = "distinct".parse().map_err(anyhow::Error::msg)?;
-        Ok(run(c, samples, false, sources, 100, None)?.library)
+        Ok(run(c, samples, false, sources, 100, Outputs::default())?.library)
     };
     let base = lib(cfg.clone())?;
     let mut rows = Vec::new();
@@ -883,5 +1109,190 @@ Host: x
         assert!(select_side(vec![sample("a.white", 1)], &m, "dev").is_err());
         assert!(select_side(vec![sample("a.white", 0)], &m, "test").is_err());
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn wilson_matches_known_intervals() {
+        let close = |(lo, hi): (f64, f64), (a, b): (f64, f64)| (lo - a).abs() < 1e-4 && (hi - b).abs() < 1e-4;
+        assert_eq!(wilson(0, 0), (0.0, 0.0));
+        assert!(close(wilson(0, 10), (0.0, 0.2775)), "{:?}", wilson(0, 10));
+        assert!(close(wilson(5, 10), (0.2366, 0.7634)), "{:?}", wilson(5, 10));
+        assert!(close(wilson(10, 10), (0.7225, 1.0)), "{:?}", wilson(10, 10));
+    }
+
+    #[test]
+    fn metrics_carry_wilson_intervals_after_the_existing_fields() {
+        let mut m = Metrics::default();
+        for i in 0..10 {
+            m.add(i < 5, 1); // 5 TP, 5 FN
+        }
+        for _ in 0..10 {
+            m.add(false, 0); // 10 TN
+        }
+        let m = m.finish();
+        assert!((m.recall_ci95[0] - 0.2366).abs() < 1e-4 && (m.recall_ci95[1] - 0.7634).abs() < 1e-4, "{:?}", m.recall_ci95);
+        assert!(m.fp_rate_ci95[0].abs() < 1e-12 && (m.fp_rate_ci95[1] - 0.2775).abs() < 1e-4, "{:?}", m.fp_rate_ci95);
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.starts_with("{\"tp\":5,\"fp\":0,\"tn\":10,\"fn\":5,\"recall\":0.5,"), "{s}");
+        let at = |k: &str| s.find(k).unwrap_or_else(|| panic!("{k} missing in {s}"));
+        assert!(at("\"fp_rate\":") < at("\"recall_ci95\":") && at("\"recall_ci95\":") < at("\"fp_rate_ci95\":"), "{s}");
+    }
+
+    #[test]
+    fn csv_cells_are_quoted_only_when_needed() {
+        assert_eq!(csv_cell("query:id"), "query:id");
+        assert_eq!(csv_cell("query:a,b"), "\"query:a,b\"");
+        assert_eq!(csv_cell("x\"y"), "\"x\"\"y\"");
+        assert_eq!(csv_cell("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn csv_names_the_deciding_field_and_top_construct() {
+        let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let p = std::env::temp_dir().join(format!("vft-eval-csv-{}.csv", std::process::id()));
+        run(Config::default(), &[attack, benign], false, Sources::Distinct, 100, Outputs { csv: Some(&p), ..Default::default() }).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        let mut lines = text.lines();
+        let header = lines.next().unwrap();
+        assert!(header.starts_with("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top"), "{header}");
+        let a: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(a[0], "a.black");
+        assert!(matches!(a[2], "Block" | "Challenge"), "{a:?}");
+        assert_eq!(a[8], "query:q", "{a:?}");
+        assert!(!a[9].is_empty() && a[6].split('|').any(|c| c == a[9]), "top {} must be one of {}", a[9], a[6]);
+        let b: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!((b[0], b[2], b[8]), ("b.white", "Allow", ""), "{b:?}");
+    }
+
+    #[test]
+    fn promotion_counts_shadow_hits_by_class_and_the_csv_lists_them() {
+        let mk = |rel: &str, label, raw: &str| Sample { rel: rel.into(), label, raw: raw.as_bytes().to_vec(), unreadable: None };
+        let samples = vec![
+            mk("a.black", 1, "GET /?q=hello HTTP/1.1\r\nHost: x\r\nUser-Agent: sqlmap/1.7\r\n\r\n"),
+            mk("b.white", 0, "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: sqlmap/1.7\r\n\r\n"),
+            mk("c.black", 1, "GET /?id=1%20union%20select%20password%20from%20users HTTP/1.1\r\nHost: x\r\nUser-Agent: sqlmap/1.7\r\n\r\n"),
+            mk("d.white", 0, "GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n"),
+        ];
+        let mut cfg = Config::default();
+        cfg.shield.shadow = vec!["intel.scanner-ua".into()];
+        let p = std::env::temp_dir().join(format!("vft-eval-promo-{}.csv", std::process::id()));
+        let r = run(cfg, &samples, false, Sources::Distinct, 100, Outputs { csv: Some(&p), promotion: true, dump: None }).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(
+            r.promotion,
+            Some(vec![PromotionRow { construct: "intel.scanner-ua".into(), would_tp: 1, would_fp: 1, already: 1, promote: false }])
+        );
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow"));
+        for line in lines {
+            let cols: Vec<&str> = line.split(',').collect();
+            let want = if cols[0] == "d.white" { "" } else { "intel.scanner-ua" };
+            assert_eq!(cols[10], want, "{line}");
+            assert!(!cols[6].split('|').any(|c| c == "intel.scanner-ua"), "{line}");
+        }
+    }
+
+    #[test]
+    fn reports_without_promotion_omit_the_field() {
+        let s = Sample { rel: "a.white".into(), label: 0, raw: b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
+        let r = run(Config::default(), &[s], false, Sources::Distinct, 100, Outputs::default()).unwrap();
+        assert!(r.promotion.is_none());
+        assert!(!serde_json::to_string(&r).unwrap().contains("\"promotion\""));
+    }
+
+    #[test]
+    fn content_length_frames_a_request_head() {
+        assert_eq!(content_length(b"POST / HTTP/1.1\r\ncontent-length: 12\r\n\r\n"), Some(12));
+        assert_eq!(content_length(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Some(0));
+        assert_eq!(content_length(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"), None);
+        assert_eq!(content_length(b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn replay_upstream_keeps_connections_alive() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (s, _) = l.accept().await.unwrap();
+                serve_keepalive(s).await;
+            });
+            let want: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            // A body split across writes, then a second request on the same connection.
+            c.write_all(b"POST /a HTTP/1.1\r\nhost: x\r\ncontent-length: 5\r\n\r\nab").await.unwrap();
+            c.write_all(b"cde").await.unwrap();
+            c.write_all(b"GET /b HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+            let mut got = vec![0u8; 2 * want.len()];
+            tokio::time::timeout(std::time::Duration::from_secs(5), c.read_exact(&mut got)).await.unwrap().unwrap();
+            assert_eq!(&got[..want.len()], want);
+            assert_eq!(&got[want.len()..], want);
+            // Still open: a third request is answered too.
+            c.write_all(b"GET /c HTTP/1.1\r\n\r\n").await.unwrap();
+            let mut third = vec![0u8; want.len()];
+            tokio::time::timeout(std::time::Duration::from_secs(5), c.read_exact(&mut third)).await.unwrap().unwrap();
+            assert_eq!(&third[..], want);
+        });
+    }
+
+    #[test]
+    fn replay_client_sockets_close_without_time_wait() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let s = connect(l.local_addr().unwrap(), std::time::Duration::from_secs(5)).await.unwrap();
+            assert_eq!(s.linger().unwrap(), Some(std::time::Duration::ZERO));
+        });
+    }
+
+    #[test]
+    fn tcp_replay_of_many_bodies_has_no_upstream_or_io_mismatch() {
+        let samples: Vec<Sample> = (0..60)
+            .map(|i| Sample {
+                rel: format!("{i:02}.white"),
+                label: 0,
+                raw: format!(
+                    "POST /form HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nname=item{i}&note={}",
+                    "a".repeat(i * 1000)
+                )
+                .into_bytes(),
+                unreadable: None,
+            })
+            .collect();
+        let r = run_tcp(Config::default(), &samples, 100).unwrap();
+        assert_eq!((r.mismatch_upstream_5xx, r.mismatch_io, r.mismatched), (0, 0, 0), "{r:?}");
+        assert_eq!(r.matched_allow, 60, "{r:?}");
+    }
+
+    #[test]
+    fn latin1_maps_each_byte_to_one_char() {
+        assert_eq!(latin1(b"a=1"), "a=1");
+        assert_eq!(latin1("\u{e9}".as_bytes()), "\u{c3}\u{a9}");
+        assert_eq!(latin1(&[0xe9]), "\u{e9}");
+    }
+
+    #[test]
+    fn dump_requests_writes_parse_corpus_rows_for_scored_samples_only() {
+        let mut raw = b"POST /f?a=1 HTTP/1.1\r\nHost: x\r\nCookie: s=1; t=2\r\n\r\nname=".to_vec();
+        raw.push(0xe9);
+        let samples = vec![
+            Sample { rel: "d/a.white".into(), label: 0, raw, unreadable: None },
+            Sample { rel: "d/b.black".into(), label: 1, raw: b"\r\n\r\n".to_vec(), unreadable: None },
+            Sample { rel: "d/c.black".into(), label: 1, raw: Vec::new(), unreadable: Some("denied".into()) },
+        ];
+        let p = std::env::temp_dir().join(format!("vft-eval-dump-{}.jsonl", std::process::id()));
+        let r = run(Config::default(), &samples, false, Sources::Distinct, 100, Outputs { dump: Some(&p), ..Default::default() }).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!((r.parse_failures, r.read_failures), (1, 1));
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            vec!["{\"label\":0,\"method\":\"POST\",\"path\":\"/f\",\"query\":[[\"a\",\"1\"]],\"headers\":[[\"host\",\"x\"]],\"cookies\":[[\"s\",\"1\"],[\"t\",\"2\"]],\"body\":\"name=\u{e9}\",\"rel\":\"d/a.white\"}"]
+        );
     }
 }

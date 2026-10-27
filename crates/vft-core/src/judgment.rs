@@ -109,6 +109,10 @@ pub struct Contribution {
     pub weight: f32,
     /// Points this contribution added to the score.
     pub points: f32,
+    /// A `shield.shadow` construct: it fired, but the request was judged as if
+    /// it were disabled. Always 0 points; ignored by the score, the verdict,
+    /// `decided_by` and the kill chain.
+    pub shadow: bool,
 }
 
 /// What kind of thing decided a judgment.

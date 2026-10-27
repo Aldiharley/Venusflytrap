@@ -22,7 +22,13 @@ pub struct Shield {
     honeypot: Honeypot,
     intel: Intel,
     oracle: Box<dyn AiOracle>,
+    /// Constructs off when judging: `shield.disabled` plus `shield.shadow`.
     disabled: Disabled,
+    /// `shield.disabled` alone, set only when `shield.shadow` is non-empty: the
+    /// second pass that finds which shadow constructs fired.
+    observe: Option<Disabled>,
+    /// `shield.shadow`.
+    shadow: Disabled,
 }
 
 impl Shield {
@@ -31,7 +37,10 @@ impl Shield {
     }
 
     pub fn with_oracle(cfg: Config, oracle: Box<dyn AiOracle>) -> Self {
-        let disabled = Disabled::resolve(&cfg.shield.disabled);
+        let off: Vec<String> = cfg.shield.disabled.iter().chain(&cfg.shield.shadow).cloned().collect();
+        let disabled = Disabled::resolve(&off);
+        let shadow = Disabled::resolve(&cfg.shield.shadow);
+        let observe = (!cfg.shield.shadow.is_empty()).then(|| Disabled::resolve(&cfg.shield.disabled));
         let norm_opts = Options {
             max_payload: cfg.shield.max_payload,
             decode_cap: cfg.shield.decode_cap,
@@ -53,6 +62,8 @@ impl Shield {
             intel,
             oracle,
             disabled,
+            observe,
+            shadow,
         }
     }
 
@@ -73,7 +84,28 @@ impl Shield {
     }
 
     /// [`Shield::inspect`], plus the normalization work it spent (folded chars).
+    ///
+    /// With `shield.shadow` set, the request is judged with the shadow ids off
+    /// (exactly as if they were in `shield.disabled`), then inspected again with
+    /// only `shield.disabled` off; the shadow ids that fired in that pass are
+    /// appended as `shadow` contributions with 0 points. They never reach the
+    /// score, the verdict, `decided_by` or the chain.
     fn inspect_counting(&self, req: &Request) -> (Judgment, usize) {
+        let (mut j, work) = self.inspect_view(req, &self.disabled);
+        if let Some(full) = &self.observe {
+            let (seen, _) = self.inspect_view(req, full);
+            j.contributions.extend(
+                seen.contributions
+                    .into_iter()
+                    .filter(|c| c.construct.as_deref().is_some_and(|id| self.shadow.has(id)))
+                    .map(|c| Contribution { points: 0.0, shadow: true, ..c }),
+            );
+        }
+        (j, work)
+    }
+
+    /// One inspection with the constructs in `off` switched off.
+    fn inspect_view(&self, req: &Request, off: &Disabled) -> (Judgment, usize) {
         // Intel allow-list short-circuit (still inspect, but never hard-block on
         // intel; allow-list only suppresses the intel deny pin).
         // Lists are keyed by the canonical address (IPv4-mapped IPv6 -> IPv4),
@@ -98,7 +130,7 @@ impl Shield {
         let ai = AiDetector {
             oracle: self.oracle.as_ref(),
         };
-        let gopts = graph::GraphOpts { disabled: &self.disabled, max_windows: self.cfg.shield.max_graph_windows };
+        let gopts = graph::GraphOpts { disabled: off, max_windows: self.cfg.shield.max_graph_windows };
 
         // Long fields are inspected in overlapping chunks under a per-request
         // byte budget. A chunk is decoded whole; if its fold is cut, the decoded
@@ -136,7 +168,7 @@ impl Shield {
                 }
             }
         }
-        if let Some(first) = req.non_utf8_headers.first().filter(|_| !self.disabled.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
+        if let Some(first) = req.non_utf8_headers.first().filter(|_| !off.is(&sinks::LIMIT_HEADER_NON_UTF8)) {
             rec.record(
                 "adapter",
                 self.cfg.scoring.weight_api,
@@ -157,7 +189,7 @@ impl Shield {
             let (lost, layers) = inspect_pieces(&req.path[range], &self.norm_opts, &mut work, &mut |n| {
                 let analysis = graph::analyze_with(&n.text, &gopts);
                 if analysis.graph_truncated {
-                    self.record_graph_truncated(&mut rec, FieldRef::path());
+                    self.record_graph_truncated(&mut rec, FieldRef::path(), off);
                 }
                 if !analysis.reachable.is_empty() {
                     let e = Evidence::new(
@@ -183,7 +215,7 @@ impl Shield {
 
         // Real loss (budget exhausted, or splitting bottomed out on a cut piece)
         // is a hard Block: text we could not inspect is not assumed benign.
-        let limit_block = payload_truncated && !self.disabled.is(&sinks::LIMIT_PAYLOAD_TRUNCATED);
+        let limit_block = payload_truncated && !off.is(&sinks::LIMIT_PAYLOAD_TRUNCATED);
         if limit_block {
             rec.record(
                 "limit",
@@ -199,11 +231,11 @@ impl Shield {
         }
 
         // Request-level intent (recon of sensitive paths).
-        let intent = intent_evidence(req, &self.cfg, &self.disabled);
+        let intent = intent_evidence(req, &self.cfg, off);
         rec.record("intent", self.cfg.scoring.weight_intent, Some(FieldRef::path()), intent);
 
         // Intel UA fingerprint.
-        if !self.disabled.is(&sinks::INTEL_SCANNER_UA) {
+        if !off.is(&sinks::INTEL_SCANNER_UA) {
             let ua_e = self.intel.ua_evidence(req.user_agent());
             rec.record(
                 "intel",
@@ -214,7 +246,7 @@ impl Shield {
         }
 
         // Honeypot.
-        let deny_pin = denied && !self.disabled.is(&sinks::INTEL_DENY_LISTED);
+        let deny_pin = denied && !off.is(&sinks::INTEL_DENY_LISTED);
         if deny_pin {
             rec.record(
                 "intel",
@@ -229,7 +261,7 @@ impl Shield {
             );
         }
         let mut honeypot_or_deny = deny_pin;
-        let honeypot_hit = if self.disabled.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
+        let honeypot_hit = if off.is(&sinks::HONEYPOT_DECOY_HIT) { None } else { self.honeypot.check(req) };
         let honeypot_seen = honeypot_hit.is_some();
         if let Some(e) = honeypot_hit {
             honeypot_or_deny = true;
@@ -292,13 +324,13 @@ impl Shield {
         let fref = FieldRef::of(field);
         let analysis = graph::analyze_with(&n.text, gopts);
         if analysis.graph_truncated {
-            self.record_graph_truncated(rec, fref.clone());
+            self.record_graph_truncated(rec, fref.clone(), gopts.disabled);
         }
         let ctx = FieldCtx {
             field,
             norm: n,
             analysis: &analysis,
-            disabled: &self.disabled,
+            disabled: gopts.disabled,
         };
         for (det, w) in field_detectors {
             let e = det.assess(&ctx);
@@ -310,8 +342,8 @@ impl Shield {
 
     /// A field needed more token windows than `shield.max_graph_windows`: it was
     /// not fully inspected, so fail closed with a Suspicious limit.
-    fn record_graph_truncated(&self, rec: &mut Recorder, field: FieldRef) {
-        if self.disabled.is(&sinks::LIMIT_GRAPH_TRUNCATED) {
+    fn record_graph_truncated(&self, rec: &mut Recorder, field: FieldRef, off: &Disabled) {
+        if off.is(&sinks::LIMIT_GRAPH_TRUNCATED) {
             return;
         }
         rec.record(
@@ -387,6 +419,7 @@ impl Shield {
                 value: FourValued::Dangerous,
                 weight: 1.0,
                 points: 100.0,
+                shadow: false,
             }],
             decided_by: ban_cause(ban, format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms)),
             chain: None,
@@ -439,7 +472,7 @@ fn band_key(v: Verdict, cfg: &crate::config::ScoringConfig) -> Option<(&'static 
 /// The contribution that added the most points (the first one on a tie).
 fn top_contribution(cs: &[Contribution]) -> Option<&Contribution> {
     let mut best: Option<&Contribution> = None;
-    for c in cs {
+    for c in cs.iter().filter(|c| !c.shadow) {
         if best.map_or(c.points > 0.0, |b| c.points > b.points) {
             best = Some(c);
         }
@@ -546,6 +579,7 @@ fn chain_contribution(id: &str, points: f32) -> Contribution {
         value: FourValued::Dangerous,
         weight: 1.0,
         points,
+        shadow: false,
     }
 }
 
@@ -570,6 +604,7 @@ impl Recorder {
                     value: e.value,
                     weight: e.weight,
                     points: 0.0,
+                    shadow: false,
                 });
             }
             for p in &e.patterns {
@@ -581,6 +616,7 @@ impl Recorder {
                     value: e.value,
                     weight: e.weight,
                     points: 0.0,
+                    shadow: false,
                 });
             }
         }
@@ -1460,5 +1496,63 @@ mod tests {
             .contributions
             .iter()
             .any(|c| c.construct.as_deref() == Some("chain.stage-advance") && (c.points - 15.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn a_shadowed_construct_is_recorded_but_decides_nothing() {
+        let mut sqli = Request::get("/items");
+        sqli.query.push(("id".into(), "1 union select password from users".into()));
+        let mut scanner = browser("/index.html", "10.0.0.30".parse().unwrap());
+        scanner.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("user-agent"));
+        scanner.headers.push(("User-Agent".into(), "sqlmap/1.7".into()));
+        let mut denied = Request::get("/index.html");
+        denied.src_ip = Some("192.0.2.9".parse().unwrap());
+        let cases = vec![
+            ("sqli.union-select", sqli),
+            ("honeypot.decoy-hit", Request::get("/.git/config")),
+            ("intel.scanner-ua", scanner),
+            ("intel.deny-listed", denied),
+        ];
+        let scored = |j: &Judgment| -> Vec<(Option<String>, u32)> {
+            j.contributions.iter().filter(|c| !c.shadow).map(|c| (c.construct.clone(), c.points.to_bits())).collect()
+        };
+        for (id, req) in cases {
+            let mut live = Config::default();
+            live.intel.deny_ips = vec!["192.0.2.9".into()];
+            let mut shadow = live.clone();
+            shadow.shield.shadow = vec![id.into()];
+            let mut off = live.clone();
+            off.shield.disabled = vec![id.into()];
+            assert!(has_construct(&Shield::new(live).inspect(&req), id), "{id} must fire on its request");
+            let s = Shield::new(shadow).inspect(&req);
+            let d = Shield::new(off).inspect(&req);
+            assert_eq!((s.score, s.verdict), (d.score, d.verdict), "{id}");
+            assert_eq!(
+                (s.decided_by.kind, s.decided_by.option_key, &s.decided_by.construct, &s.decided_by.field, &s.decided_by.msg),
+                (d.decided_by.kind, d.decided_by.option_key, &d.decided_by.construct, &d.decided_by.field, &d.decided_by.msg),
+                "{id}"
+            );
+            assert_eq!(crate::chain::event_for(&s), crate::chain::event_for(&d), "{id}");
+            assert_eq!(scored(&s), scored(&d), "{id}: the scored contributions are the disabled run's");
+            let hits: Vec<&Contribution> = s.contributions.iter().filter(|c| c.shadow).collect();
+            assert!(!hits.is_empty(), "{id} is kept as a shadow contribution");
+            assert!(hits.iter().all(|c| c.construct.as_deref() == Some(id) && c.points == 0.0), "{id}: {hits:?}");
+            assert!(d.contributions.iter().all(|c| !c.shadow), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_shadowed_honeypot_hit_never_bans() {
+        let mut cfg = Config::default();
+        cfg.shield.shadow = vec!["honeypot.decoy-hit".into()];
+        let s = Shield::new(cfg);
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let mut hp = Request::get("/.git/config");
+        hp.src_ip = Some("10.0.0.40".parse().unwrap());
+        let j = s.inspect_stateful(&hp, &mut chain, 0);
+        assert!(!j.banned(), "{}", j.decided_by.msg);
+        assert_ne!(j.decided_by.kind, CauseKind::Honeypot);
+        assert!(j.contributions.iter().any(|c| c.shadow && c.construct.as_deref() == Some("honeypot.decoy-hit")));
+        assert_eq!(chain.ban_count(), 0);
     }
 }

@@ -1,0 +1,12 @@
+rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top
+d/fp1.white,0,Block,,95,false,sqli.union-select,Detection:scoring.block_at,query:ID,sqli.union-select
+d/fp2.white,0,Block,,95,false,sqli.union-select,Detection:scoring.block_at,query:id,sqli.union-select
+d/fp3.white,0,Block,,95,false,sqli.union-select,Detection:scoring.block_at,query:Id,sqli.union-select
+d/fp4.white,0,Challenge,,75,false,cmd.shell-meta,Detection:scoring.challenge_at,"query:a,b",cmd.shell-meta
+d/tn1.white,0,Allow,,0,false,,NoEvidence:scoring.monitor_at,,
+d/m1.black,1,Allow,,0,false,,NoEvidence:scoring.monitor_at,,
+d/m2.black,1,Allow,,0,false,,NoEvidence:scoring.monitor_at,,
+d/m3.black,1,Monitor,,45,false,xss.html-tag,Detection:scoring.monitor_at,cookie:session,xss.html-tag
+d/tp1.black,1,Block,,95,false,sqli.union-select,Detection:scoring.block_at,query:id,sqli.union-select
+h/fp9.white,0,Block,,95,false,sqli.union-select,Detection:scoring.block_at,query:id,sqli.union-select
+h/m9.black,1,Allow,,0,false,,NoEvidence:scoring.monitor_at,,
