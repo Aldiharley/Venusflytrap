@@ -450,6 +450,11 @@ fn part(i: usize, p: &[u8], off: &Disabled, out: &mut Out) -> usize {
     if let Some(f) = filename {
         out.push(format!("form-file:{}", clip(&name)), f);
     }
+    // RFC 7578: a part without Content-Type is text/plain, so the "absent
+    // type" binary rule applies to a whole body only.
+    if ct.trim().is_empty() {
+        ct = "text/plain".into();
+    }
     let content = &p[at..];
     if !content.is_empty() {
         classify(&ct, compressing(ce.as_deref()), content, off, &Scope::part(&name), out);
@@ -554,6 +559,15 @@ mod tests {
         let mp = b"--XyZ\r\nContent-Disposition: form-data; name=\"t\"\r\nContent-Type: text/plain\r\n\r\n\x89PNG\r\n\x1a\nMARKER-PART\r\n--XyZ--\r\n";
         let p = pairs("multipart/form-data; boundary=XyZ", mp);
         assert!(p.iter().any(|(n, r)| n == "form:t" && r.contains("MARKER-PART")), "{p:?}");
+    }
+
+    #[test]
+    fn an_untyped_part_is_text_whatever_its_prefix() {
+        // RFC 7578: a part without Content-Type is text/plain, so magic bytes
+        // do not hide it (only a whole body without a type is "absent").
+        let mp = b"--XyZ\r\nContent-Disposition: form-data; name=\"u\"\r\n\r\n\x1f\x8b\x08\x00MARKER-UNTYPED\r\n--XyZ--\r\n";
+        let p = pairs("multipart/form-data; boundary=XyZ", mp);
+        assert!(p.iter().any(|(n, r)| n == "form:u" && r.contains("MARKER-UNTYPED")), "{p:?}");
     }
 
     #[test]
