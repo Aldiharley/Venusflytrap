@@ -9,8 +9,8 @@ import type { FourValued } from "./FourValued";
  */
 export type Contribution = { engine: string, field: FieldRef | null, 
 /**
- * Construct name (today's pattern name; stable dotted ids arrive with the
- * construct registry).
+ * Stable dotted construct id (e.g. `sqli.union-select`), the key used by
+ * `shield.disabled` and the construct registry.
  */
 construct: string | null, family: Family | null, value: FourValued, weight: number, 
 /**

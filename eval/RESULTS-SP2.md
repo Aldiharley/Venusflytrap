@@ -6,7 +6,7 @@ TypeScript types. This file records the acceptance run on the blazehttp corpus. 
 copied from the run output; nothing is estimated.
 
 - **Baseline:** main `b2f82ff` (captured with `eval/decision_gate.sh capture`).
-- **Measured tree:** branch `sp2-explainable-judgments` at `6d4915e` plus the Task 10 eval counters.
+- **Measured tree:** branch `sp2-explainable-judgments` at `db156ee`.
 - **Machine and corpus:** the same Windows 11 host and blazehttp commit `afc88a94` as
   [`RESULTS-SP1.md`](RESULTS-SP1.md).
 
@@ -22,10 +22,13 @@ reported `decision diffs: 0` each time.
 | `pooled:100` | 288 | 278 | 32,941 | 368 | 0.4390 | 0.0084 | 0 |
 
 TP, FP, TN, FN, recall and FP rate are the same in the baseline and in the new run, and in the library
-run (`--mode library`).
+run (`--mode library`). The `distinct` and `pooled:100` rows are identical because they measured the
+same values, not because one row was copied for both; each comes from its own JSON report.
 
-Scored samples: **33,875**, `read_failures` 0, `parse_failures` 0 in the new run. The baseline run
-counted 33,877 samples with `read_failures` 2. On this host the two files named in
+Scored samples: **33,875**, `read_failures` 0, `parse_failures` 0 in the new run. The `distinct`
+baseline counted 33,877 samples with `read_failures` 2; the `pooled:100` baseline counted 33,876
+samples with `read_failures` 1 (most likely one of the two files was already gone from the directory
+when that baseline ran; the antivirus on this host deletes corpus files). On this host the two files named in
 [`BENCHMARK.md`](../docs/BENCHMARK.md) section 1 are now absent from the corpus directory (they are not
 reported as unreadable), so the new run does not list them at all. Unreadable files are never written
 to the CSV, so both runs score the same 33,875 rows and the gate row sets match.

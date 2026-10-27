@@ -101,8 +101,8 @@ impl FieldRef {
 pub struct Contribution {
     pub engine: &'static str,
     pub field: Option<FieldRef>,
-    /// Construct name (today's pattern name; stable dotted ids arrive with the
-    /// construct registry).
+    /// Stable dotted construct id (e.g. `sqli.union-select`), the key used by
+    /// `shield.disabled` and the construct registry.
     pub construct: Option<String>,
     pub family: Option<Family>,
     pub value: crate::lattice::FourValued,
