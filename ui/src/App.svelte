@@ -12,7 +12,7 @@
   const placeholder: Screen = () => import('./screens/Placeholder.svelte');
   const SCREENS: Record<RouteName, Screen> = {
     dashboard: () => import('./screens/Dashboard.svelte'),
-    topology: placeholder,
+    topology: () => import('./screens/Topology.svelte'),
     chains: placeholder,
     monitor: placeholder,
     honeypot: placeholder,
