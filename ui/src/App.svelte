@@ -11,7 +11,7 @@
   type Screen = () => Promise<{ default: Component<any> }>;
   const placeholder: Screen = () => import('./screens/Placeholder.svelte');
   const SCREENS: Record<RouteName, Screen> = {
-    dashboard: placeholder,
+    dashboard: () => import('./screens/Dashboard.svelte'),
     topology: placeholder,
     chains: placeholder,
     monitor: placeholder,

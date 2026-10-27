@@ -14,7 +14,7 @@ test('a failed start shows an error with Retry, and Retry loads the screen', asy
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain('could not load');
   await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-  expect(await screen.findByText(/arrives with console plan SP6b/)).toBeTruthy();
+  expect(await screen.findByRole('region', { name: 'Requests over time' })).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(spy).toHaveBeenCalledTimes(2);
   spy.mockRestore();
