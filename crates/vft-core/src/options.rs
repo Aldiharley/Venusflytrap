@@ -79,8 +79,8 @@ pub static REGISTRY: &[OptionDescriptor] = &[
     opt("shield.max_graph_windows", Int { min: 1, max: 1024 }, "shield", "Token windows analyzed per field; past it the field is reported as `limit.graph-truncated`.", Expert, Live),
     opt("shield.max_inspect_bytes", Int { min: 1024, max: MAX }, "shield", "Bytes of one request inspected; past it the request hard-blocks as `limit.payload-truncated`. Must be at least `shield.max_payload`.", Expert, Live),
     opt("shield.max_normalize_work", Int { min: 1024, max: MAX }, "shield", "Folded characters all normalizations of one request may produce; reaching it hard-blocks as `limit.payload-truncated`. Must be at least `shield.max_payload`.", Expert, Live),
-    opt("shield.disabled", ConstructIds, "shield", "Construct, decoder or limit ids switched off. Unknown ids are rejected.", Advanced, Live),
-    opt("shield.shadow", ConstructIds, "shield", "Construct ids detected and recorded but never scored: requests are judged as if they were in `shield.disabled`, and each hit is kept as a shadow contribution. Every request is inspected twice while the list is non-empty. An id may not also be in `shield.disabled`; decoders cannot be shadowed.", Advanced, Live),
+    opt("shield.disabled", ConstructIds, "shield", "Construct, decoder, gate or limit ids switched off (a gate id such as `gate.cmd-position` restores the rule it narrows). Unknown ids are rejected.", Advanced, Live),
+    opt("shield.shadow", ConstructIds, "shield", "Construct ids detected and recorded but never scored: requests are judged as if they were in `shield.disabled`, and each hit is kept as a shadow contribution. Every request is inspected twice while the list is non-empty. An id may not also be in `shield.disabled`; decoders and gates cannot be shadowed.", Advanced, Live),
     // scoring
     opt("scoring.weight_graph", Float { min: 0.0, max: 2.0 }, "scoring", "Weight of the taint-graph engine.", Advanced, Live),
     opt("scoring.weight_signature", Float { min: 0.0, max: 2.0 }, "scoring", "Weight of literal signatures.", Advanced, Live),

@@ -83,6 +83,15 @@ static SIGNATURES: &[(&str, &ConstructInfo)] = &[
     ("$(cat ", &sinks::SIG_CAT_SUBST),
 ];
 
+/// A name segment without a trailing `#<digits>` duplicate-key suffix
+/// (`id#2` is `id`); any other segment is returned unchanged.
+fn strip_dup_suffix(seg: &str) -> &str {
+    match seg.rsplit_once('#') {
+        Some((head, n)) if !head.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => seg,
+    }
+}
+
 /// API-safety: numeric/identifier fields carrying injection structure, or
 /// absurd field sizes.
 pub struct ApiSafetyDetector;
@@ -91,9 +100,17 @@ impl FieldDetector for ApiSafetyDetector {
         "api-safety"
     }
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
-        let name = ctx.field.name.to_lowercase();
-        let looks_numeric_field =
-            name == "id" || name.ends_with("_id") || name == "page" || name == "count";
+        let lname = ctx.field.name.to_lowercase();
+        // Body leaves carry their parameter in the last name segment
+        // (`json:/user/id`), without the `#<n>` suffix of a repeated key
+        // (`json:/id#2` is `id`); other locations use the whole name.
+        let name = if ctx.field.loc == Location::Body {
+            let last = lname.rsplit([':', '/']).next().unwrap_or(&lname);
+            strip_dup_suffix(last)
+        } else {
+            lname.as_str()
+        };
+        let looks_numeric_field = name == "id" || name.ends_with("_id") || name == "page" || name == "count";
         if looks_numeric_field
             && !ctx.analysis.reachable.is_empty()
             && !ctx.disabled.is(&sinks::API_TYPE_VIOLATION)
@@ -292,5 +309,28 @@ mod tests {
             assert!(c.construct.is_some(), "{} on {:?} has no construct", c.engine, c.field);
         }
         assert!(j.contributions.iter().any(|c| c.construct.as_deref() == Some("api.oversized-header")));
+    }
+
+    #[test]
+    fn api_safety_uses_the_last_segment_of_a_body_field_name_only() {
+        let a = graph::Analysis { reachable: vec![sinks::sql::UNION_SELECT.pattern()], latent: vec![], graph_truncated: false };
+        let d = Disabled::default();
+        let n = normalize("x", &Options::default());
+        for (loc, name, hit) in [
+            (Location::Body, "json:/user/id", true),
+            (Location::Body, "json:/user_id", true),
+            (Location::Body, "json:/identity", false),
+            // The second and later values of a repeated key.
+            (Location::Body, "json:/id#2", true),
+            (Location::Body, "json:/user/account_id#13", true),
+            (Location::Body, "json:/id#x", false),
+            (Location::Body, "json:#rest", false),
+            (Location::Query, "x:id", false),
+            (Location::Query, "id", true),
+        ] {
+            let f = Field { loc, name: name.into(), raw: "x".into() };
+            let e = ApiSafetyDetector.assess(&ctx_for(&f, &n, &a, &d));
+            assert_eq!(e.value == FourValued::Dangerous, hit, "{loc:?} {name}");
+        }
     }
 }

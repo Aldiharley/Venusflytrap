@@ -1,7 +1,10 @@
 //! FR4 — Turn weighted evidence into a 0..=100 score and a verdict band.
 
+use std::collections::hash_map::{Entry, HashMap};
+
 use crate::config::ScoringConfig;
-use crate::judgment::{FieldRef, Verdict};
+use crate::graph::sinks;
+use crate::judgment::{Family, FieldRef, Verdict};
 use crate::lattice::{Evidence, FourValued};
 
 /// Base points each value contributes before engine weighting.
@@ -34,6 +37,36 @@ pub struct Arbitration {
     pub points: Vec<f32>,
 }
 
+/// What a counted item is evidence of, within its origin field.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Family(Family),
+    /// A derived item, keyed by construct id (`api.type-violation` has family Sqli).
+    Derived(String),
+    /// An item with no pattern.
+    Engine(String),
+}
+
+/// `ai.anomaly-score` and `api.type-violation` are computed from the graph
+/// result on their own field: not independent evidence of it (D10).
+fn is_derived(construct: &str) -> bool {
+    construct == sinks::AI_ANOMALY_SCORE.id || construct == sinks::API_TYPE_VIOLATION.id
+}
+
+/// The field an item is about, without a derived `#…` suffix (`id#2` is `id`).
+/// A `#` right after `:` (`json:#rest`) or at the start is part of the name.
+pub fn origin(f: &FieldRef) -> FieldRef {
+    let cut = f.name.char_indices().find(|&(i, c)| c == '#' && i > 0 && !f.name[..i].ends_with(':')).map(|(i, _)| i);
+    FieldRef { loc: f.loc, name: cut.map_or_else(|| f.name.clone(), |i| f.name[..i].to_string()) }
+}
+
+struct Counted {
+    item: usize,
+    raw: f32,
+    origin: Option<FieldRef>,
+    derived: bool,
+}
+
 /// Combine evidence into a score and a verdict. Hard-pin inputs (deny-list,
 /// honeypot, fail-closed limit) are passed via `hard_block`.
 pub fn arbitrate(items: &[Scored], cfg: &ScoringConfig, hard_block: bool) -> Arbitration {
@@ -46,24 +79,50 @@ pub fn arbitrate(items: &[Scored], cfg: &ScoringConfig, hard_block: bool) -> Arb
     // diluting a single strong detection by averaging in silent detectors.
     let is_conflict = field_conflict(items, cfg.conflict_threshold);
 
-    // One contribution per (field, construct): repeating the same weak signal
-    // on one field does not corroborate itself (M1).
-    let mut seen: std::collections::HashSet<(Option<FieldRef>, String)> = Default::default();
-    // (item index, raw points) for each counted threat item.
-    let mut counted: Vec<(usize, f32)> = Vec::new();
+    // One item per (origin field, family), the strongest: chunks and split
+    // halves of a field share its origin, and the graph and signature items of
+    // one family on one field are one piece of evidence (D10).
+    let mut slot: HashMap<(Option<FieldRef>, Key), usize> = HashMap::new();
+    let mut counted: Vec<Counted> = Vec::new();
     for (i, s) in items.iter().enumerate().filter(|(_, s)| s.evidence.value.is_threat()) {
-        let construct = s
-            .evidence
-            .patterns
-            .first()
-            .map_or_else(|| s.engine.clone(), |p| p.name.clone());
-        if !seen.insert((s.field.clone(), construct)) {
-            continue;
+        let raw = value_points(s.evidence.value) * s.evidence.weight * s.engine_weight;
+        let o = s.field.as_ref().map(origin);
+        let (key, derived) = match s.evidence.patterns.first() {
+            Some(p) if is_derived(&p.name) => (Key::Derived(p.name.clone()), true),
+            Some(p) => (Key::Family(p.family), false),
+            None => (Key::Engine(s.engine.clone()), false),
+        };
+        let c = Counted { item: i, raw, origin: o.clone(), derived };
+        match slot.entry((o, key)) {
+            Entry::Occupied(e) => {
+                let n = *e.get();
+                if raw > counted[n].raw {
+                    counted[n] = c;
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(counted.len());
+                counted.push(c);
+            }
         }
-        counted.push((i, value_points(s.evidence.value) * s.evidence.weight * s.engine_weight));
     }
-    let top = counted.iter().map(|c| c.1).fold(0.0f32, f32::max);
-    let rest = counted.iter().map(|c| c.1).sum::<f32>() - top;
+
+    // The first maximal item is the top.
+    let mut top_n: Option<usize> = None;
+    let mut top = 0.0f32;
+    for (n, c) in counted.iter().enumerate() {
+        if c.raw > top {
+            top = c.raw;
+            top_n = Some(n);
+        }
+    }
+    // A derived item and another item on the same origin never corroborate
+    // each other, whichever of the two is the top (D10).
+    let corroborates = |n: usize| -> bool {
+        let Some(t) = top_n else { return false };
+        n != t && !(counted[n].origin == counted[t].origin && (counted[n].derived || counted[t].derived))
+    };
+    let rest: f32 = (0..counted.len()).filter(|&n| corroborates(n)).map(|n| counted[n].raw).sum();
     let corroboration = (rest * 0.1).min(cfg.corroboration_cap);
 
     let mut score = (top + corroboration).min(100.0);
@@ -72,21 +131,19 @@ pub fn arbitrate(items: &[Scored], cfg: &ScoringConfig, hard_block: bool) -> Arb
         score = (score * 0.9).max(band_floor(top, cfg));
     }
 
-    // Points: the first maximal item keeps its raw points, the rest share the
-    // corroboration in proportion; clamping and damping then scale every item
-    // alike, so the points sum to the unrounded score.
+    // Points: the top keeps its raw points, the corroborating items share the
+    // corroboration in proportion, everything else adds 0; clamping and damping
+    // then scale every item alike, so the points sum to the unrounded score.
     let mut points = vec![0.0f32; items.len()];
-    let mut top_n: Option<usize> = None;
-    let mut best = 0.0f32;
-    for (n, c) in counted.iter().enumerate() {
-        if c.1 > best {
-            best = c.1;
-            top_n = Some(n);
-        }
-    }
     let share = if rest > 0.0 { corroboration / rest } else { 0.0 };
-    for (n, &(i, raw)) in counted.iter().enumerate() {
-        points[i] = if Some(n) == top_n { raw } else { raw * share };
+    for (n, c) in counted.iter().enumerate() {
+        points[c.item] = if Some(n) == top_n {
+            c.raw
+        } else if corroborates(n) {
+            c.raw * share
+        } else {
+            0.0
+        };
     }
     let unscaled = top + corroboration;
     if unscaled > 0.0 {
@@ -255,5 +312,93 @@ mod tests {
         let a = arbitrate(&ev, &cfg, false);
         let (s, v) = (a.score, a.verdict);
         assert!(matches!(v, Verdict::Monitor | Verdict::Allow), "score {s} v {v:?}");
+    }
+
+    use crate::judgment::{Family, Pattern};
+    use crate::request::Location;
+
+    fn on(field: &str, v: FourValued, w: f32, engine_weight: f32, family: Family, id: &str) -> Scored {
+        Scored {
+            engine: "t".into(),
+            engine_weight,
+            field: Some(FieldRef { loc: Location::Body, name: field.into() }),
+            evidence: Evidence::new(v, w, vec![Pattern::new(family, id)], "x"),
+        }
+    }
+
+    fn sums_to_score(a: &Arbitration) -> bool {
+        (a.points.iter().sum::<f32>() - f32::from(a.score)).abs() <= 0.5
+    }
+
+    #[test]
+    fn one_family_on_one_field_counts_once_at_its_strongest() {
+        let cfg = ScoringConfig::default();
+        // A latent graph item (27.5) recorded before a signature of the same family (72).
+        let ev = vec![
+            on("json:/q", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword"),
+            on("json:/q", FourValued::Dangerous, 0.8, 0.9, Family::Sqli, "sig.union-all-select"),
+        ];
+        let a = arbitrate(&ev, &cfg, false);
+        assert_eq!(a.score, 72);
+        assert_eq!(a.points[0], 0.0);
+        assert!(sums_to_score(&a));
+    }
+
+    #[test]
+    fn different_families_on_one_field_still_corroborate() {
+        let cfg = ScoringConfig::default();
+        let ev = vec![
+            on("json:/a", FourValued::Dangerous, 0.95, 1.0, Family::Sqli, "sqli.union-select"),
+            on("json:/a", FourValued::Suspicious, 0.5, 1.0, Family::Xss, "xss.html-tag"),
+        ];
+        assert_eq!(arbitrate(&ev, &cfg, false).score, 98); // 95 + 2.75
+    }
+
+    #[test]
+    fn body_leaves_are_separate_origins() {
+        let cfg = ScoringConfig::default();
+        let ev = vec![
+            on("json:/a", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword"),
+            on("json:/b", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword"),
+        ];
+        assert_eq!(arbitrate(&ev, &cfg, false).score, 30); // 27.5 + 2.75
+    }
+
+    #[test]
+    fn a_derived_item_does_not_corroborate_its_own_field() {
+        let cfg = ScoringConfig::default();
+        let graph = on("form:q", FourValued::Dangerous, 0.95, 1.0, Family::Sqli, "sqli.union-select");
+        let ai_same = on("form:q", FourValued::Dangerous, 0.6, 0.5, Family::Anomaly, "ai.anomaly-score");
+        let a = arbitrate(&[graph.clone(), ai_same], &cfg, false);
+        assert_eq!(a.score, 95);
+        assert_eq!(a.points[1], 0.0);
+        assert!(sums_to_score(&a));
+        // On another field it still corroborates: 95 + 3.
+        let ai_other = on("form:other", FourValued::Dangerous, 0.6, 0.5, Family::Anomaly, "ai.anomaly-score");
+        assert_eq!(arbitrate(&[graph, ai_other], &cfg, false).score, 98);
+    }
+
+    #[test]
+    fn a_derived_top_is_not_corroborated_by_its_own_field() {
+        let cfg = ScoringConfig::default();
+        // api.type-violation is Dangerous 0.7 at weight_api 0.6: 42 points. Its family is Sqli,
+        // so it must not collapse into a Sqli graph item either: it is keyed by its id.
+        let api = on("form:id", FourValued::Dangerous, 0.7, 0.6, Family::Sqli, "api.type-violation");
+        let same = on("form:id", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword");
+        let a = arbitrate(&[api.clone(), same], &cfg, false);
+        assert_eq!(a.score, 42, "the derived item is the top and its own field adds nothing");
+        assert!(sums_to_score(&a));
+        let other = on("form:x", FourValued::Suspicious, 0.5, 1.0, Family::CommandInjection, "cmd.shell-meta");
+        assert_eq!(arbitrate(&[api, other], &cfg, false).score, 45); // 42 + 2.75
+    }
+
+    #[test]
+    fn origin_strips_only_a_derived_suffix() {
+        let f = |n: &str| FieldRef { loc: Location::Query, name: n.into() };
+        assert_eq!(origin(&f("id#2")).name, "id");
+        assert_eq!(origin(&f("json:#rest")).name, "json:#rest");
+        assert_eq!(origin(&f("<body>")).name, "<body>");
+        assert_eq!(origin(&f("#x")).name, "#x");
+        assert_eq!(origin(&f("id#2")).loc, Location::Query);
     }
 }

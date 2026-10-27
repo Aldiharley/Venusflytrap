@@ -29,20 +29,25 @@ pub enum ConstructKind {
     Decoder,
     /// An inspection limit that fails closed.
     Limit,
+    /// A rule that narrows when an existing construct fires. It emits no
+    /// evidence and has no family; putting its id in `shield.disabled`
+    /// restores the construct's earlier behaviour, so an A/B needs one build.
+    Gate,
 }
 
 #[derive(Debug)]
 pub struct ConstructInfo {
     pub id: &'static str,
-    /// `None` only for decoders, which belong to no attack family.
+    /// `None` only for decoders and gates, which emit no evidence and belong
+    /// to no attack family.
     pub family: Option<Family>,
     pub kind: ConstructKind,
     pub summary: &'static str,
 }
 
 impl ConstructInfo {
-    /// The pattern this construct emits. Decoders never emit patterns; the
-    /// registry test guarantees every other kind has a family.
+    /// The pattern this construct emits. Decoders and gates never emit
+    /// patterns; the registry test guarantees every other kind has a family.
     pub fn pattern(&self) -> Pattern {
         Pattern::new(self.family.unwrap_or(Family::Limit), self.id)
     }
@@ -65,6 +70,8 @@ pub static HONEYPOT_DECOY_HIT: ConstructInfo = ConstructInfo { id: "honeypot.dec
 pub static INTEL_SCANNER_UA: ConstructInfo = ConstructInfo { id: "intel.scanner-ua", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "User-Agent matches a scanner fingerprint" };
 pub static INTEL_DENY_LISTED: ConstructInfo = ConstructInfo { id: "intel.deny-listed", family: Some(Family::Intel), kind: ConstructKind::Signature, summary: "source address is on intel.deny_ips" };
 pub static LIMIT_HEADER_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.header-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a header carried bytes that are not UTF-8" };
+pub static LIMIT_BODY_NON_UTF8: ConstructInfo = ConstructInfo { id: "limit.body-non-utf8", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a body (or part) declared as a text class (json, text/*, form, xml) carried bytes that are not valid UTF-8" };
+pub static LIMIT_BODY_UNPARSED: ConstructInfo = ConstructInfo { id: "limit.body-unparsed", family: Some(Family::Limit), kind: ConstructKind::Limit, summary: "a body declared JSON or ndjson did not parse and was inspected whole (informational, 0 points)" };
 
 // --- Limits ---------------------------------------------------------------------
 
@@ -77,6 +84,7 @@ pub static DECODE_PERCENT_LOSSY: ConstructInfo = ConstructInfo { id: "decode.per
 pub static DECODE_ENTITY: ConstructInfo = ConstructInfo { id: "decode.entity", family: None, kind: ConstructKind::Decoder, summary: "HTML entities: numeric, plus a fixed set of named ones" };
 pub static DECODE_ESC_HEX: ConstructInfo = ConstructInfo { id: "decode.esc-hex", family: None, kind: ConstructKind::Decoder, summary: "\\xNN and \\uNNNN escapes" };
 pub static DECODE_B64_WHOLE: ConstructInfo = ConstructInfo { id: "decode.b64-whole", family: None, kind: ConstructKind::Decoder, summary: "a field that is base64 as a whole; also tried before '+' becomes a space" };
+pub static PARSE_BODY_JSON: ConstructInfo = ConstructInfo { id: "parse.body-json", family: None, kind: ConstructKind::Decoder, summary: "body classification: one json:<pointer> field per JSON string leaf; ndjson line by line" };
 
 static REGISTRY: &[&ConstructInfo] = &[
     &sql::UNION_SELECT,
@@ -115,12 +123,16 @@ static REGISTRY: &[&ConstructInfo] = &[
     &INTEL_SCANNER_UA,
     &INTEL_DENY_LISTED,
     &LIMIT_HEADER_NON_UTF8,
+    &LIMIT_BODY_NON_UTF8,
+    &LIMIT_BODY_UNPARSED,
     &LIMIT_GRAPH_TRUNCATED,
     &LIMIT_PAYLOAD_TRUNCATED,
     &DECODE_PERCENT_LOSSY,
     &DECODE_ENTITY,
     &DECODE_ESC_HEX,
     &DECODE_B64_WHOLE,
+    &PARSE_BODY_JSON,
+    &shell::GATE_CMD_POSITION,
 ];
 
 /// Every registered construct, decoder and limit.
@@ -180,6 +192,12 @@ impl<'d> Hits<'d> {
         push_unique(&mut self.latent, c, self.disabled);
     }
 
+    /// Whether `c` is in `shield.disabled`. A sink asks this of a gate to
+    /// decide whether to apply it.
+    pub fn off(&self, c: &ConstructInfo) -> bool {
+        self.disabled.is(c)
+    }
+
     /// True if a reachable pattern of `family` has been recorded.
     pub fn reached(&self, family: Family) -> bool {
         self.reachable.iter().any(|p| p.family == family)
@@ -229,8 +247,9 @@ mod tests {
     #[test]
     fn only_decoders_lack_a_family() {
         for c in constructs() {
-            assert_eq!(c.family.is_none(), c.kind == ConstructKind::Decoder, "{}", c.id);
+            assert_eq!(c.family.is_none(), matches!(c.kind, ConstructKind::Decoder | ConstructKind::Gate), "{}", c.id);
         }
+        assert_eq!(lookup("gate.cmd-position").map(|c| c.kind), Some(ConstructKind::Gate));
     }
 
     #[test]
@@ -252,5 +271,15 @@ mod tests {
         assert_eq!(h.latent.len(), 1);
         assert!(h.reached(Family::Sqli));
         assert!(!h.reached(Family::Xss));
+    }
+
+    #[test]
+    fn hits_report_whether_a_construct_is_off() {
+        let d = Disabled::resolve(&["gate.cmd-position".into()]);
+        let h = Hits::new(&d);
+        assert!(h.off(&shell::GATE_CMD_POSITION));
+        assert!(!h.off(&SIG_ONERROR));
+        let none = Disabled::default();
+        assert!(!Hits::new(&none).off(&shell::GATE_CMD_POSITION));
     }
 }

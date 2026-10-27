@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Attack family a matched pattern belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Family {
     Sqli,

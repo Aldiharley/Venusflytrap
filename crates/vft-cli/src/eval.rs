@@ -402,17 +402,17 @@ fn csv_cell(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The construct of the contribution that added the most points (the first on
-/// a tie), as the shield's `top_contribution` picks it; `None` when no
-/// contribution has points.
-fn top_construct(cs: &[vft_core::Contribution]) -> Option<&str> {
+/// The contribution that added the most points (the first on a tie), as the
+/// shield's `top_contribution` picks it; `None` when no contribution has
+/// points. The CSV's `top` is its construct and `top_field` its field.
+fn top_contribution(cs: &[vft_core::Contribution]) -> Option<&vft_core::Contribution> {
     let mut best: Option<&vft_core::Contribution> = None;
     for c in cs {
         if best.map_or(c.points > 0.0, |b| c.points > b.points) {
             best = Some(c);
         }
     }
-    best.and_then(|c| c.construct.as_deref())
+    best
 }
 
 pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, out: Outputs<'_>) -> anyhow::Result<Report> {
@@ -427,7 +427,7 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
     let mut csv_out = match out.csv {
         Some(p) => {
             let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow")?;
+            writeln!(f, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow,top_field")?;
             Some(f)
         }
         None => None,
@@ -525,9 +525,11 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
             let constructs: Vec<&str> = lj.contributions.iter().filter(|c| !c.shadow).filter_map(|c| c.construct.as_deref()).collect();
             let field = lj.decided_by.field.as_ref().map(|r| r.label()).unwrap_or_default();
             let shadow: Vec<&str> = shadow_hits.iter().copied().collect();
+            let top = top_contribution(&lj.contributions);
+            let top_field = top.and_then(|c| c.field.as_ref()).map(|r| r.label()).unwrap_or_default();
             writeln!(
                 f,
-                "{},{},{:?},{},{},{},{},{:?}:{},{},{},{}",
+                "{},{},{:?},{},{},{},{},{:?}:{},{},{},{},{}",
                 s.rel,
                 s.label,
                 lj.verdict,
@@ -538,8 +540,9 @@ pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_
                 lj.decided_by.kind,
                 lj.decided_by.option_key,
                 csv_cell(&field),
-                top_construct(&lj.contributions).unwrap_or(""),
-                shadow.join("|")
+                top.and_then(|c| c.construct.as_deref()).unwrap_or(""),
+                shadow.join("|"),
+                csv_cell(&top_field)
             )?;
         }
     }
@@ -1147,6 +1150,26 @@ Host: x
     }
 
     #[test]
+    fn top_contribution_picks_the_most_points_and_the_first_on_a_tie() {
+        let mk = |id: &str, name: &str, points: f32| vft_core::Contribution {
+            engine: "test",
+            field: Some(vft_core::FieldRef { loc: vft_core::Location::Query, name: name.into() }),
+            construct: Some(id.into()),
+            family: None,
+            value: vft_core::FourValued::Suspicious,
+            weight: 1.0,
+            points,
+            shadow: false,
+        };
+        assert!(top_contribution(&[]).is_none());
+        assert!(top_contribution(&[mk("test.zero", "a", 0.0)]).is_none(), "a contribution with no points is never top");
+        let cs = [mk("test.low", "a", 5.0), mk("test.high", "b", 20.0), mk("test.tie", "c", 20.0)];
+        let top = top_contribution(&cs).unwrap();
+        assert_eq!(top.construct.as_deref(), Some("test.high"));
+        assert_eq!(top.field.as_ref().map(|f| f.label()).as_deref(), Some("query:b"));
+    }
+
+    #[test]
     fn csv_names_the_deciding_field_and_top_construct() {
         let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
         let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
@@ -1156,14 +1179,17 @@ Host: x
         let _ = std::fs::remove_file(&p);
         let mut lines = text.lines();
         let header = lines.next().unwrap();
-        assert!(header.starts_with("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top"), "{header}");
+        assert_eq!(header, "rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow,top_field");
         let a: Vec<&str> = lines.next().unwrap().split(',').collect();
         assert_eq!(a[0], "a.black");
         assert!(matches!(a[2], "Block" | "Challenge"), "{a:?}");
         assert_eq!(a[8], "query:q", "{a:?}");
         assert!(!a[9].is_empty() && a[6].split('|').any(|c| c == a[9]), "top {} must be one of {}", a[9], a[6]);
+        assert_eq!((a.len(), a[11]), (12, "query:q"), "top_field names the top contribution's field: {a:?}");
         let b: Vec<&str> = lines.next().unwrap().split(',').collect();
         assert_eq!((b[0], b[2], b[8]), ("b.white", "Allow", ""), "{b:?}");
+        assert_eq!(b.len(), 12, "{b:?}");
+        assert_eq!(b[9].is_empty(), b[11].is_empty(), "top_field is empty exactly when top is: {b:?}");
     }
 
     #[test]
@@ -1186,7 +1212,7 @@ Host: x
             Some(vec![PromotionRow { construct: "intel.scanner-ua".into(), would_tp: 1, would_fp: 1, already: 1, promote: false }])
         );
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow"));
+        assert_eq!(lines.next(), Some("rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow,top_field"));
         for line in lines {
             let cols: Vec<&str> = line.split(',').collect();
             let want = if cols[0] == "d.white" { "" } else { "intel.scanner-ua" };

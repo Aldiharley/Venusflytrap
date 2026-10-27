@@ -143,7 +143,8 @@ impl Shield {
         let mut work = NormalizeWork { used: 0, cap: self.cfg.shield.max_normalize_work, exhausted: false };
         let mut payload_truncated = false;
         let mut budget_hit = false;
-        'fields: for field in req.fields() {
+        let (fields, body_facts) = req.fields_with(off);
+        'fields: for field in fields {
             let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
             let mut prev_end = 0usize;
             for range in ranges {
@@ -178,6 +179,29 @@ impl Shield {
                     0.6,
                     vec![sinks::LIMIT_HEADER_NON_UTF8.pattern()],
                     format!("non-UTF-8 bytes in header(s): {}", req.non_utf8_headers.join(", ")),
+                ),
+            );
+        }
+        let body_ref = || Some(FieldRef { loc: crate::request::Location::Body, name: "<body>".into() });
+        if body_facts.non_utf8 && !off.is(&sinks::LIMIT_BODY_NON_UTF8) {
+            rec.record(
+                "adapter",
+                self.cfg.scoring.weight_api,
+                body_ref(),
+                Evidence::new(FourValued::Suspicious, 0.6, vec![sinks::LIMIT_BODY_NON_UTF8.pattern()], "non-UTF-8 bytes in a text body"),
+            );
+        }
+        if body_facts.unparsed && !off.is(&sinks::LIMIT_BODY_UNPARSED) {
+            // Informational: engine weight 0, so 0 points; it says why the body stayed whole.
+            rec.record(
+                "adapter",
+                0.0,
+                body_ref(),
+                Evidence::new(
+                    FourValued::Suspicious,
+                    0.0,
+                    vec![sinks::LIMIT_BODY_UNPARSED.pattern()],
+                    "body declared JSON or ndjson did not parse; inspected whole",
                 ),
             );
         }
@@ -1554,5 +1578,91 @@ mod tests {
         assert_ne!(j.decided_by.kind, CauseKind::Honeypot);
         assert!(j.contributions.iter().any(|c| c.shadow && c.construct.as_deref() == Some("honeypot.decoy-hit")));
         assert_eq!(chain.ban_count(), 0);
+    }
+
+    /// The `kind` cases (`accept` / `reject`) of a fixture file, one `kind<TAB>text` per line.
+    fn fixture_lines(src: &'static str, kind: &str) -> Vec<&'static str> {
+        src.lines().filter_map(|l| l.strip_prefix(kind)?.strip_prefix('\t')).collect()
+    }
+
+    fn body_case() -> &'static str {
+        fixture_lines(include_str!("../tests/fixtures/body_cases.txt"), "accept")[0]
+    }
+
+    fn pct(s: &str) -> String {
+        s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+    }
+
+    fn body_req(ct: &str, body: Vec<u8>) -> Request {
+        let mut req = Request::get("/items");
+        req.method = "POST".into();
+        req.headers.push(("Content-Type".into(), ct.into()));
+        req.body = body;
+        req
+    }
+
+    fn fields_of(j: &Judgment, id: &str) -> Vec<String> {
+        j.contributions.iter().filter(|c| c.construct.as_deref() == Some(id)).filter_map(|c| c.field.as_ref().map(|f| f.name.clone())).collect()
+    }
+
+    #[test]
+    fn an_attack_in_a_json_leaf_is_found_under_the_leaf_name() {
+        let body = serde_json::json!({"a": {"b": body_case()}}).to_string();
+        let j = shield().inspect(&body_req("application/json", body.into_bytes()));
+        assert_eq!(j.verdict, Verdict::Block, "{} {}", j.score, j.decided_by.msg);
+        assert!(j.contributions.iter().any(|c| c.field.as_ref().is_some_and(|f| f.loc == Location::Body && f.name == "json:/a/b")), "{:?}", j.contributions);
+    }
+
+    #[test]
+    fn an_id_body_field_gets_api_safety_on_its_last_name_segment() {
+        // Form and multipart splitting are deferred: such a body is one
+        // `<body>` field, so its `id` parameter is not an API-safety name.
+        let j = shield().inspect(&body_req("application/x-www-form-urlencoded", format!("id={}", pct(body_case())).into_bytes()));
+        assert!(fields_of(&j, "api.type-violation").is_empty());
+        let j = shield().inspect(&body_req("application/json", serde_json::json!({"user": {"id": body_case()}}).to_string().into_bytes()));
+        assert_eq!(fields_of(&j, "api.type-violation"), vec!["json:/user/id".to_string()]);
+    }
+
+    #[test]
+    fn disabling_the_parse_ids_restores_the_single_body_field() {
+        let mut cfg = Config::default();
+        cfg.shield.disabled = vec!["parse.body-json".into()];
+        let body = serde_json::json!({"a": {"b": body_case()}}).to_string();
+        let j = Shield::new(cfg).inspect(&body_req("application/json", body.into_bytes()));
+        assert_eq!(j.verdict, Verdict::Block);
+        assert!(j.contributions.iter().filter_map(|c| c.field.as_ref()).filter(|f| f.loc == Location::Body).all(|f| f.name == "<body>"));
+    }
+
+    #[test]
+    fn invalid_utf8_emits_the_limit_only_for_a_declared_text_class() {
+        let j = shield().inspect(&body_req("text/plain", b"caf\xe9 au lait".to_vec()));
+        assert_eq!(fields_of(&j, "limit.body-non-utf8"), vec!["<body>".to_string()]);
+        // A binary or untyped body is inspected (one lossy `<body>` field)
+        // but gains no score for its bytes.
+        for ct in ["application/x-protobuf", "application/octet-stream", ""] {
+            let req = body_req(ct, vec![0x0a, 0x02, 0xff, 0xfe, 0x10, 0x01]);
+            assert!(!has_construct(&shield().inspect(&req), "limit.body-non-utf8"), "{ct}");
+            assert!(req.fields().iter().any(|f| f.loc == Location::Body && f.name == "<body>"), "{ct}");
+        }
+        let mut cfg = Config::default();
+        cfg.shield.disabled = vec!["limit.body-non-utf8".into()];
+        assert!(!has_construct(&Shield::new(cfg).inspect(&body_req("text/plain", b"caf\xe9".to_vec())), "limit.body-non-utf8"));
+    }
+
+    #[test]
+    fn a_multipart_body_is_one_body_field() {
+        let mp = format!("--vftB0undary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n{}\r\n--vftB0undary--\r\n", body_case());
+        let j = shield().inspect(&body_req("multipart/form-data; boundary=vftB0undary", mp.into_bytes()));
+        assert!(fields_of(&j, "api.type-violation").is_empty());
+        assert!(j.contributions.iter().filter_map(|c| c.field.as_ref()).filter(|f| f.loc == Location::Body).all(|f| f.name == "<body>"));
+    }
+
+    #[test]
+    fn an_unparsed_json_body_is_informational_only() {
+        let j = shield().inspect(&body_req("application/json", b"{\"a\":".to_vec()));
+        let c = j.contributions.iter().find(|c| c.construct.as_deref() == Some("limit.body-unparsed")).expect("limit.body-unparsed recorded");
+        assert_eq!(c.points, 0.0);
+        assert_eq!(j.verdict, Verdict::Allow);
+        assert_eq!(j.score, 0);
     }
 }
