@@ -6,6 +6,7 @@ use crate::config::ScoringConfig;
 use crate::graph::sinks;
 use crate::judgment::{Family, FieldRef, Verdict};
 use crate::lattice::{Evidence, FourValued};
+use crate::request::Location;
 
 /// Base points each value contributes before engine weighting.
 fn value_points(v: FourValued) -> f32 {
@@ -60,11 +61,21 @@ pub fn origin(f: &FieldRef) -> FieldRef {
     FieldRef { loc: f.loc, name: cut.map_or_else(|| f.name.clone(), |i| f.name[..i].to_string()) }
 }
 
+/// A latent (Suspicious) item on a JSON body leaf. It is background noise of
+/// the leaf split, not independent evidence of an attack elsewhere: it backs
+/// up only items on its own leaf (DQ3 rule C). Dangerous leaf items, and
+/// latents on any other field, corroborate as before.
+fn leaf_latent(s: &Scored) -> bool {
+    s.evidence.value == FourValued::Suspicious
+        && s.field.as_ref().is_some_and(|f| f.loc == Location::Body && f.name.starts_with("json:"))
+}
+
 struct Counted {
     item: usize,
     raw: f32,
     origin: Option<FieldRef>,
     derived: bool,
+    leaf_latent: bool,
 }
 
 /// Combine evidence into a score and a verdict. Hard-pin inputs (deny-list,
@@ -92,7 +103,7 @@ pub fn arbitrate(items: &[Scored], cfg: &ScoringConfig, hard_block: bool) -> Arb
             Some(p) => (Key::Family(p.family), false),
             None => (Key::Engine(s.engine.clone()), false),
         };
-        let c = Counted { item: i, raw, origin: o.clone(), derived };
+        let c = Counted { item: i, raw, origin: o.clone(), derived, leaf_latent: leaf_latent(s) };
         match slot.entry((o, key)) {
             Entry::Occupied(e) => {
                 let n = *e.get();
@@ -117,10 +128,12 @@ pub fn arbitrate(items: &[Scored], cfg: &ScoringConfig, hard_block: bool) -> Arb
         }
     }
     // A derived item and another item on the same origin never corroborate
-    // each other, whichever of the two is the top (D10).
+    // each other, whichever of the two is the top (D10). A JSON-leaf latent
+    // corroborates only a top on its own leaf (rule C).
     let corroborates = |n: usize| -> bool {
         let Some(t) = top_n else { return false };
-        n != t && !(counted[n].origin == counted[t].origin && (counted[n].derived || counted[t].derived))
+        let same = counted[n].origin == counted[t].origin;
+        n != t && !(same && (counted[n].derived || counted[t].derived)) && (same || !counted[n].leaf_latent)
     };
     let rest: f32 = (0..counted.len()).filter(|&n| corroborates(n)).map(|n| counted[n].raw).sum();
     let corroboration = (rest * 0.1).min(cfg.corroboration_cap);
@@ -354,14 +367,53 @@ mod tests {
         assert_eq!(arbitrate(&ev, &cfg, false).score, 98); // 95 + 2.75
     }
 
+    fn in_header(name: &str, v: FourValued, w: f32, family: Family, id: &str) -> Scored {
+        Scored { field: Some(FieldRef { loc: Location::Header, name: name.into() }), ..on("_", v, w, 1.0, family, id) }
+    }
+
     #[test]
-    fn body_leaves_are_separate_origins() {
+    fn latent_json_leaves_do_not_corroborate_each_other() {
         let cfg = ScoringConfig::default();
         let ev = vec![
             on("json:/a", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword"),
             on("json:/b", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword"),
         ];
-        assert_eq!(arbitrate(&ev, &cfg, false).score, 30); // 27.5 + 2.75
+        let a = arbitrate(&ev, &cfg, false);
+        assert_eq!(a.score, 28); // 27.5: the leaf latent is the top, the other adds nothing
+        assert_eq!(a.points[1], 0.0);
+        assert!(sums_to_score(&a));
+    }
+
+    #[test]
+    fn a_json_leaf_latent_does_not_back_up_a_header_top() {
+        let cfg = ScoringConfig::default();
+        // The split's background noise: a header latent at 27.5 stays below monitor_at.
+        let header = in_header("sec-ch-ua", FourValued::Suspicious, 0.5, Family::CommandInjection, "cmd.shell-meta");
+        let leaf = on("json:/q", FourValued::Suspicious, 0.5, 1.0, Family::CommandInjection, "cmd.shell-meta");
+        let a = arbitrate(&[header, leaf], &cfg, false);
+        assert_eq!(a.score, 28);
+        assert_eq!(a.points[1], 0.0);
+        assert!(sums_to_score(&a));
+    }
+
+    #[test]
+    fn rule_c_keeps_other_corroboration() {
+        let cfg = ScoringConfig::default();
+        let header = in_header("sec-ch-ua", FourValued::Suspicious, 0.5, Family::CommandInjection, "cmd.shell-meta");
+        // A latent on a non-JSON body field still corroborates, as before DQ2a: 27.5 + 2.75.
+        let body = on("<body>", FourValued::Suspicious, 0.5, 1.0, Family::CommandInjection, "cmd.shell-meta");
+        assert_eq!(arbitrate(&[header.clone(), body], &cfg, false).score, 30);
+        // A Dangerous leaf item corroborates a top on another field: 95 + 9.5.
+        let strong = in_header("referer", FourValued::Dangerous, 0.95, Family::Sqli, "sqli.union-select");
+        let leaf_dangerous = on("json:/q", FourValued::Dangerous, 0.95, 1.0, Family::Xss, "xss.script-tag");
+        assert_eq!(arbitrate(&[strong, leaf_dangerous], &cfg, false).score, 100);
+        // A leaf latent still backs up another family on its own leaf: 95 + 2.75.
+        let top = on("json:/q", FourValued::Dangerous, 0.95, 1.0, Family::Sqli, "sqli.union-select");
+        let own = on("json:/q", FourValued::Suspicious, 0.5, 1.0, Family::Xss, "xss.html-tag");
+        assert_eq!(arbitrate(&[top, own], &cfg, false).score, 98);
+        // And a leaf latent can still be the top.
+        let only = on("json:/q", FourValued::Suspicious, 0.5, 1.0, Family::Sqli, "sqli.sql-keyword");
+        assert_eq!(arbitrate(&[only, header], &cfg, false).score, 30); // 27.5 + the header's 2.75
     }
 
     #[test]
