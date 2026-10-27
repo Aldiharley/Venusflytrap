@@ -201,7 +201,7 @@ impl Shield {
                     FourValued::Suspicious,
                     0.0,
                     vec![sinks::LIMIT_BODY_UNPARSED.pattern()],
-                    "body declared JSON, ndjson or multipart did not parse; inspected whole",
+                    "body declared JSON or ndjson did not parse; inspected whole",
                 ),
             );
         }
@@ -1615,11 +1615,8 @@ mod tests {
 
     #[test]
     fn an_id_body_field_gets_api_safety_on_its_last_name_segment() {
-        let mp = format!("--vftB0undary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n{}\r\n--vftB0undary--\r\n", body_case());
-        let j = shield().inspect(&body_req("multipart/form-data; boundary=vftB0undary", mp.into_bytes()));
-        assert_eq!(fields_of(&j, "api.type-violation"), vec!["form:id".to_string()]);
-        // Form splitting is deferred: a form body is one `<body>` field, so
-        // its `id=` parameter is not an API-safety field name.
+        // Form and multipart splitting are deferred: such a body is one
+        // `<body>` field, so its `id` parameter is not an API-safety name.
         let j = shield().inspect(&body_req("application/x-www-form-urlencoded", format!("id={}", pct(body_case())).into_bytes()));
         assert!(fields_of(&j, "api.type-violation").is_empty());
         let j = shield().inspect(&body_req("application/json", serde_json::json!({"user": {"id": body_case()}}).to_string().into_bytes()));
@@ -1629,7 +1626,7 @@ mod tests {
     #[test]
     fn disabling_the_parse_ids_restores_the_single_body_field() {
         let mut cfg = Config::default();
-        cfg.shield.disabled = ["parse.body-json", "parse.body-multipart"].map(String::from).to_vec();
+        cfg.shield.disabled = vec!["parse.body-json".into()];
         let body = serde_json::json!({"a": {"b": body_case()}}).to_string();
         let j = Shield::new(cfg).inspect(&body_req("application/json", body.into_bytes()));
         assert_eq!(j.verdict, Verdict::Block);
@@ -1650,6 +1647,14 @@ mod tests {
         let mut cfg = Config::default();
         cfg.shield.disabled = vec!["limit.body-non-utf8".into()];
         assert!(!has_construct(&Shield::new(cfg).inspect(&body_req("text/plain", b"caf\xe9".to_vec())), "limit.body-non-utf8"));
+    }
+
+    #[test]
+    fn a_multipart_body_is_one_body_field() {
+        let mp = format!("--vftB0undary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n{}\r\n--vftB0undary--\r\n", body_case());
+        let j = shield().inspect(&body_req("multipart/form-data; boundary=vftB0undary", mp.into_bytes()));
+        assert!(fields_of(&j, "api.type-violation").is_empty());
+        assert!(j.contributions.iter().filter_map(|c| c.field.as_ref()).filter(|f| f.loc == Location::Body).all(|f| f.name == "<body>"));
     }
 
     #[test]

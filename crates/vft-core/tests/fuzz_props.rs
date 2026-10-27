@@ -8,9 +8,8 @@ use vft_core::{Config, Request, Shield};
 
 /// The body invariant (body.rs): every byte of a body lies in exactly one
 /// inspected non-JSON field's source range, or (the JSON exception) only in
-/// the source of JSON leaves, which is the whole JSON body or part they came
-/// from. A non-JSON field with one source range holds exactly that range's
-/// text (lossy UTF-8).
+/// the source of JSON leaves, which is the whole JSON body. A non-JSON field
+/// with one source range holds exactly that range's text (lossy UTF-8).
 fn partition_holds(body: &[u8], sources: &[(vft_core::Field, Vec<std::ops::Range<usize>>)]) -> Result<(), String> {
     let (mut text, mut json) = (vec![0u32; body.len()], vec![0u32; body.len()]);
     for (f, ranges) in sources {
@@ -230,52 +229,8 @@ proptest! {
         prop_assert!(fields.len() <= vft_core::body::MAX_BODY_FIELDS);
     }
 
-    /// Bodies that do contain the boundary, so the multipart parser's index
-    /// arithmetic runs: random preamble, parts (a well-formed or random header
-    /// block, with or without the blank line), optional close, random epilogue.
-    #[test]
-    fn multipart_bodies_with_the_boundary_never_panic(
-        pre in proptest::collection::vec(any::<u8>(), 0..64),
-        parts in proptest::collection::vec(
-            (
-                prop_oneof![
-                    Just(b"Content-Disposition: form-data; name=\"x\"".to_vec()),
-                    Just(b"Content-Disposition: form-data; name=\"j\"\r\nContent-Type: application/json".to_vec()),
-                    proptest::collection::vec(any::<u8>(), 0..64),
-                ],
-                prop_oneof![
-                    Just(br#"{"a":"x","a":["y",{"b c":"z"}]}"#.to_vec()),
-                    Just(br#"["x"]"#.to_vec()),
-                    proptest::collection::vec(any::<u8>(), 0..256),
-                ],
-                any::<bool>(),
-            ),
-            0..12,
-        ),
-        close in any::<bool>(),
-        epi in proptest::collection::vec(any::<u8>(), 0..64),
-    ) {
-        let mut body = pre.clone();
-        for (head, content, blank) in &parts {
-            body.extend_from_slice(b"\r\n--b\r\n");
-            body.extend_from_slice(head);
-            if *blank {
-                body.extend_from_slice(b"\r\n\r\n");
-            }
-            body.extend_from_slice(content);
-        }
-        if close {
-            body.extend_from_slice(b"\r\n--b--\r\n");
-        }
-        body.extend_from_slice(&epi);
-        let (sources, _) = vft_core::body::body_sources(Some("multipart/form-data; boundary=b"), &body, &vft_core::graph::sinks::Disabled::default());
-        prop_assert!(sources.len() <= vft_core::body::MAX_BODY_FIELDS);
-        if let Err(e) = partition_holds(&body, &sources) {
-            prop_assert!(false, "{}", e);
-        }
-    }
-
-    /// The same invariant over generic bodies (JSON included).
+    /// The body invariant over generic bodies, JSON included (multipart is
+    /// one `<body>` field until DQ3).
     #[test]
     fn every_body_byte_lies_in_exactly_one_field(
         ct in prop_oneof![
@@ -290,7 +245,12 @@ proptest! {
             Just("multipart/form-data; boundary=b"),
             Just("application/json"),
         ],
-        bytes in proptest::collection::vec(any::<u8>(), 0..2048),
+        bytes in prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..2048),
+            Just(br#"{"a":1}"#.to_vec()),
+            Just(b"[]".to_vec()),
+            Just(br#"{"a":"x","a":["y",{"b c":"z"}]}"#.to_vec()),
+        ],
     ) {
         let (sources, _) = vft_core::body::body_sources(Some(ct), &bytes, &vft_core::graph::sinks::Disabled::default());
         if let Err(e) = partition_holds(&bytes, &sources) {

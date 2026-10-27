@@ -93,8 +93,7 @@ impl FieldDetector for ApiSafetyDetector {
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
         let lname = ctx.field.name.to_lowercase();
         // Body leaves carry their parameter in the last name segment
-        // (`form:id` for a multipart part, `json:/user/id`); other locations
-        // use the whole name.
+        // (`json:/user/id`); other locations use the whole name.
         let name = if ctx.field.loc == Location::Body {
             lname.rsplit([':', '/']).next().unwrap_or(&lname)
         } else {
@@ -307,7 +306,6 @@ mod tests {
         let d = Disabled::default();
         let n = normalize("x", &Options::default());
         for (loc, name, hit) in [
-            (Location::Body, "form:id", true),
             (Location::Body, "json:/user/id", true),
             (Location::Body, "json:/user_id", true),
             (Location::Body, "json:/identity", false),

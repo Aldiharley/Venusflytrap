@@ -81,8 +81,8 @@ impl Request {
 
     /// All inspectable fields: query keys and values, headers, cookie names
     /// and values, and the body classified by [`crate::body::body_fields`]
-    /// (JSON leaves, multipart parts and framing, or one `<body>` field, as a
-    /// form or binary body stays). A `parse.body-*` id in `off` restores
+    /// (JSON leaves, or one `<body>` field, as every other body stays).
+    /// A `parse.body-*` id in `off` restores
     /// `<body>` for its class. The path is inspected separately (it has
     /// path-specific semantics such as traversal and recon). Also returns what
     /// body classification found, for the shield's body limits.
