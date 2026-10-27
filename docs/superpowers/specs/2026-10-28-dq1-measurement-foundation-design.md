@@ -26,6 +26,9 @@ New constructs or parsers (DQ2, DQ3); external baselines (DQ4); new corpora (DQ5
 - Tests: a tiny CSV fixture with known groups.
 
 ### 3.4 Shadow constructs
+
+*As built: the plan's D1 and D2 replace the removal mechanism below. A shadowed id is judged exactly as if it were disabled, and a second pass records its hits. Decoder ids are rejected.*
+
 - New config leaf `shield.shadow: Vec<String>` (registry kind `ConstructIds`, section shield, Advanced, Live): construct ids that are detected and recorded but never score.
 - Engine behaviour (vft-core, pure):
   - A pattern whose construct id is in `shield.shadow` is removed from the evidence before scoring. If an evidence item keeps no patterns and had a threat value, it is not scored at all.
@@ -36,6 +39,9 @@ New constructs or parsers (DQ2, DQ3); external baselines (DQ4); new corpora (DQ5
 - Eval: the CSV gains a `shadow` column (`|`-joined shadow construct ids that fired), and a new `venusflytrap eval --promotion` mode prints, per shadow construct, `would_tp` (fires on a malicious row the live verdict misses), `would_fp` (fires on a benign row the live verdict allows) and `already` (fires on rows already decided the same way). This is the promotion rule of the recall-lift design in numbers: a construct is promoted only when `would_tp > would_fp` on dev.
 
 ### 3.5 Replay harness fix (TCP mode)
+
+*As built: the plan's D5 uses `TcpStream::set_zero_linger()`, because `set_linger` is deprecated in tokio 1.54.1. Measured results are in `eval/RESULTS-DQ1.md`, including one 413 timing race in five full runs.*
+
 - The test upstream in `run_tcp` serves keep-alive (loop: read a request, reply `HTTP/1.1 200 OK`, `Content-Length: 0`, no `Connection: close`) so the proxy's pooled client reuses connections.
 - Client sockets in `send_and_read` set `SO_LINGER` to zero before closing (tokio `set_linger(Some(Duration::ZERO))`), so they do not sit in TIME_WAIT.
 - Acceptance: a full-corpus `eval --mode tcp --limit 40000` on this Windows host reports `mismatch_upstream_5xx = 0` and `mismatch_io = 0`; any remaining mismatches are listed with examples and explained in the results file.

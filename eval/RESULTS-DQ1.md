@@ -45,7 +45,7 @@ Input: `requests.jsonl` from `--dump-requests` of the library run, 33,875 lines 
 `tp + fn + fp + tn` for every row below. These are the same requests the engine scored; the path is in
 the URI form the engine receives (raw `<`, `>` kept, spaces percent-encoded). Commands:
 `py -I -X utf8 eval/baselines.py requests.jsonl baselines.json <libinjection.dll>` (the DLL loaded
-without error), then the Wilson helper from the plan's Task 9 Step 3 for the intervals.
+without error), then the Wilson helper from the plan's Task 9 Step 3 for the intervals (output saved as `baselines-wilson.txt`).
 
 | Engine | TP | FP | TN | FN | Recall [95 % CI] | FP rate [95 % CI] |
 |---|---|---|---|---|---|---|
@@ -53,7 +53,7 @@ without error), then the Wilson helper from the plan's Task 9 Step 3 for the int
 | regex baseline | 127 | 126 | 33,093 | 529 | 19.36 % [16.52, 22.56] | 0.38 % [0.32, 0.45] |
 | Venusflytrap `library` (section 3) | 288 | 278 | 32,941 | 368 | 43.90 % [40.15, 47.72] | 0.84 % [0.74, 0.94] |
 
-Sources: `baselines.json` and the Wilson helper output. The earlier Python-parsed baseline numbers in
+Sources: `baselines.json` and `baselines-wilson.txt`. The earlier Python-parsed baseline numbers in
 `docs/BENCHMARK.md` (libinjection 214 TP / 93 FP, regex 127 TP / 126 FP) stay in the history as those
 runs; this table replaces them as the like-for-like comparison. libinjection moved by one TP (215 vs
 214) and the regex baseline did not move in TP or FP. The libinjection interval [29.29, 36.46] and
@@ -61,15 +61,24 @@ the engine's [40.15, 47.72] do not overlap on recall; the engine's FP rate is hi
 
 ## TCP replay
 
-`venusflytrap eval --mode tcp --limit 40000`, exit 0, run time 91 s, 48 sockets in TIME_WAIT afterwards
-(`netstat -an | grep -c TIME_WAIT`). Source: `tcp-full.json`.
+`venusflytrap eval --mode tcp --limit 40000` was run five times on this branch. Each run saved its JSON report and a status file with exit code, wall time and the `netstat -an | grep -c TIME_WAIT` count taken right after the run. All of them are under `.superpowers/dq1/runs/`.
+
+| Run | Head | Exit | Wall | TIME_WAIT | proxy_rejected | io | upstream_5xx | mismatched | Files |
+|---|---|---|---|---|---|---|---|---|---|
+| Task 7 | `8aef23d` | 0 | 91 s | 32 | 5 | 0 | 0 | 0 | `tcp-full-task7.{json,status}` |
+| Task 9 | `c3ee2fa` | 0 | (not saved) | (not saved) | 5 | 0 | 0 | 0 | `tcp-full.json` |
+| final 1 | `18733a1` | 3 | 88 s | 36 | 4 | **1** | 0 | 1 | `tcp-final.{json,status}` |
+| final 2 | `18733a1` | 0 | 89 s | 33 | 5 | 0 | 0 | 0 | `tcp-final-2.{json,status}` |
+| final 3 | `18733a1` | 0 | 88 s | 40 | 5 | 0 | 0 | 0 | `tcp-final-3.{json,status}` |
+
+In final 1, the one `io` mismatch is `78/70/f847412e4801ad7b16af575916d0.white`, with no parsable status line in the reply. In every other run, that same request is `proxy_rejected` with status 413 (body over the proxy limit). It is a timing race on that single sample. The proxy answers 413 and closes while the client is still writing the oversized body. The zero-linger close then resets the connection, and in this run the reset arrived before the client read the reply. No request was decided differently. `upstream_5xx` was 0 in all five runs, and no other bucket was ever non-zero. The breakdown below is from `tcp-full.json` (Task 9, the measured tree).
 
 | Run | replayed | matched_block | matched_allow | proxy_rejected | not_replayable | block_vs_proxy_allow | allow_vs_proxy_403 | upstream_5xx | io | other | mismatched |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | full corpus (`--limit 40000`, exit 0) | 33,711 | 563 | 33,143 | 5 | 164 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-SP1's full run had `upstream_5xx` 767 and `io` 9 (776 mismatched, exit 3); with the keep-alive upstream
-and zero-linger clients both are 0 and there are no mismatches, so `mismatch_examples` is empty. The 5
+SP1's full run had `upstream_5xx` 767 and `io` 9 (776 mismatched, exit 3). With the keep-alive upstream
+and zero-linger clients, `upstream_5xx` is 0 in every run, and `io` is 0 except for the one 413 race above. The 5
 `proxy_rejected` rows are requests the proxy's HTTP layer refuses before the engine sees them (status in
 the example line), listed as in SP1:
 
@@ -121,7 +130,7 @@ Groups are cause, top construct (the contribution with the most points), and fie
 Reading: on dev, 148 of 180 misses (82 %) have `cmd.shell-meta` as their top contribution, scored below
 the monitor threshold with no field recorded (`NoEvidence` rows carry no `decided_by.field`). This is
 incidental, not the attack class that was missed: `cmd.shell-meta` fires on the `;` of almost every
-User-Agent header (`docs/BENCHMARK.md`, recall-lift ablation), so for a sub-threshold row `top` names the
+User-Agent header (the C1 regression test `browser_is_never_staged_or_banned` in `crates/vft-core/src/shield.rs` covers it; in `library-dev.csv` it appears on all 16,610 benign dev rows), so for a sub-threshold row `top` names the
 highest background scorer. Classifying these misses by attack family needs the payload, which this file
 does not open. The largest false-positive groups are
 `cmd.chained-command` in the `data` query parameter, and SQL constructs in the `Referer` header
