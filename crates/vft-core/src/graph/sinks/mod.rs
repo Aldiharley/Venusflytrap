@@ -29,19 +29,25 @@ pub enum ConstructKind {
     Decoder,
     /// An inspection limit that fails closed.
     Limit,
+    /// A rule that narrows when an existing construct fires. It emits no
+    /// evidence and has no family; putting its id in `shield.disabled`
+    /// restores the construct's earlier behaviour, so an A/B needs one build.
+    Gate,
 }
 
 #[derive(Debug)]
 pub struct ConstructInfo {
     pub id: &'static str,
-    /// `None` only for decoders, which belong to no attack family.
+    /// `None` only for decoders and gates, which emit no evidence and belong
+    /// to no attack family.
     pub family: Option<Family>,
     pub kind: ConstructKind,
     pub summary: &'static str,
 }
 
 impl ConstructInfo {
-    /// The pattern this construct emits. Decoders never emit patterns; the
+    /// The pattern this construct emits. Decoders and gates never emit
+    /// patterns; the registry test guarantees every other kind has a family.
     /// registry test guarantees every other kind has a family.
     pub fn pattern(&self) -> Pattern {
         Pattern::new(self.family.unwrap_or(Family::Limit), self.id)
@@ -121,6 +127,7 @@ static REGISTRY: &[&ConstructInfo] = &[
     &DECODE_ENTITY,
     &DECODE_ESC_HEX,
     &DECODE_B64_WHOLE,
+    &shell::GATE_CMD_POSITION,
 ];
 
 /// Every registered construct, decoder and limit.
@@ -180,6 +187,12 @@ impl<'d> Hits<'d> {
         push_unique(&mut self.latent, c, self.disabled);
     }
 
+    /// Whether `c` is in `shield.disabled`. A sink asks this of a gate to
+    /// decide whether to apply it.
+    pub fn off(&self, c: &ConstructInfo) -> bool {
+        self.disabled.is(c)
+    }
+
     /// True if a reachable pattern of `family` has been recorded.
     pub fn reached(&self, family: Family) -> bool {
         self.reachable.iter().any(|p| p.family == family)
@@ -229,8 +242,9 @@ mod tests {
     #[test]
     fn only_decoders_lack_a_family() {
         for c in constructs() {
-            assert_eq!(c.family.is_none(), c.kind == ConstructKind::Decoder, "{}", c.id);
+            assert_eq!(c.family.is_none(), matches!(c.kind, ConstructKind::Decoder | ConstructKind::Gate), "{}", c.id);
         }
+        assert_eq!(lookup("gate.cmd-position").map(|c| c.kind), Some(ConstructKind::Gate));
     }
 
     #[test]
@@ -252,5 +266,15 @@ mod tests {
         assert_eq!(h.latent.len(), 1);
         assert!(h.reached(Family::Sqli));
         assert!(!h.reached(Family::Xss));
+    }
+
+    #[test]
+    fn hits_report_whether_a_construct_is_off() {
+        let d = Disabled::resolve(&["gate.cmd-position".into()]);
+        let h = Hits::new(&d);
+        assert!(h.off(&shell::GATE_CMD_POSITION));
+        assert!(!h.off(&SIG_ONERROR));
+        let none = Disabled::default();
+        assert!(!Hits::new(&none).off(&shell::GATE_CMD_POSITION));
     }
 }

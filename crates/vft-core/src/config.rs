@@ -132,7 +132,7 @@ pub struct ShieldConfig {
     /// Construct ids that are detected and recorded but never score: the request
     /// is judged as if they were in `disabled`, and each hit is kept as a
     /// `shadow` contribution with 0 points. While non-empty, every request is
-    /// inspected twice. An id may not also be in `disabled`; decoders cannot be
+    /// inspected twice. An id may not also be in `disabled`; decoders and gates cannot be
     /// shadowed.
     pub shadow: Vec<String>,
 }
@@ -376,8 +376,14 @@ impl Config {
             if sh.disabled.iter().any(|d| d == id) {
                 bad("shield.shadow", format!("{id:?} is also in shield.disabled; an id is either disabled or shadowed"));
             }
-            if crate::graph::sinks::lookup(id).is_some_and(|c| c.kind == crate::graph::sinks::ConstructKind::Decoder) {
-                bad("shield.shadow", format!("{id:?} is a decoder; decoders emit no evidence and cannot be shadowed (use shield.disabled)"));
+            match crate::graph::sinks::lookup(id).map(|c| c.kind) {
+                Some(crate::graph::sinks::ConstructKind::Decoder) => {
+                    bad("shield.shadow", format!("{id:?} is a decoder; decoders emit no evidence and cannot be shadowed (use shield.disabled)"));
+                }
+                Some(crate::graph::sinks::ConstructKind::Gate) => {
+                    bad("shield.shadow", format!("{id:?} is a gate; gates emit no evidence and cannot be shadowed (use shield.disabled)"));
+                }
+                _ => {}
             }
         }
         let s = &self.scoring;
@@ -585,5 +591,9 @@ mod tests {
         assert!(issues("shield:\n  shadow: [decode.entity]\n")
             .iter()
             .any(|i| i.key == "shield.shadow" && i.message.contains("decoder")));
+        assert!(issues("shield:\n  shadow: [gate.cmd-position]\n")
+            .iter()
+            .any(|i| i.key == "shield.shadow" && i.message.contains("is a gate")));
+        assert!(issues("shield:\n  disabled: [gate.cmd-position]\n").is_empty(), "a gate can be disabled");
     }
 }
