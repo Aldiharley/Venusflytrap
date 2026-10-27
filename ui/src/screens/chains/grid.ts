@@ -45,9 +45,11 @@ export function moveCell(p: Cell, key: string, mods: { ctrl: boolean }, dims: { 
   }
 }
 
+const CLOCK = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+
 export function stageCellText(s: SourceView, stage: Stage): string {
   const reached = s.stage_path.find((p) => p.stage === stage);
   if (!reached) return '—';
-  const t = new Date(reached.first_ts_ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const t = CLOCK.format(reached.first_ts_ms);
   return `${t} · ${s.stage_counts[STAGES.indexOf(stage)]}`;
 }
