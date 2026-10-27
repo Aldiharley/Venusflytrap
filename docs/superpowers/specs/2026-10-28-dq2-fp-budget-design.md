@@ -43,6 +43,16 @@ The evidence in section 3 shows that a grammatical `;` in User-Agent, Accept or 
 
 ### 4.2 Body classification (finish recall-lift M2b)
 
+> **As shipped in DQ2a.** This note was added after the final review. The design text below it is unchanged and is kept as the record of what was planned.
+>
+> - **No binary class and no body hiding.** No Content-Type, Content-Encoding or magic prefix removes body bytes from inspection. Every body that is not split as JSON is exactly one lossy `<body>` field. The first two rows of the class table and decisions D12 and D13 (§7) are superseded.
+> - **Form and multipart bodies stay one `<body>` field.** Form splitting lost constructs that form only across two values. Multipart splitting needs strict RFC 2046 framing with a fallback to the whole body, so it is deferred to DQ3.
+> - **Only the JSON split ships**, under the one id `parse.body-json`. The ids `parse.body-binary`, `parse.body-form` and `parse.body-multipart` do not exist. A JSON body has at most 256 fields; the rest is joined into `json:#rest` and never dropped. Names are clipped to 64 chars as they are built, so splitting is linear in body size.
+> - **`limit.body-non-utf8` fires for declared text classes only** (json, `text/*`, form, xml).
+> - **Monitor cost.** The JSON split raised dev Monitor by 403 rows, and the D10 de-duplication (§4.4) does not contain it, because each body leaf is its own origin.
+>
+> Measurements and reasons: [`eval/RESULTS-DQ2.md`](../../../eval/RESULTS-DQ2.md) §1, §3, §5, §10 and §13. The rulings are in the Task 3 entries of the DQ2 ledger: fix round 3, "remove body hiding entirely"; re-review 2, "defer multipart splitting to DQ3, body change = JSON only". The ledger is the local, untracked `.superpowers/sdd/2026-10-28-dq2-fp-budget/progress.md`.
+
 **What exists.** No `body.rs`. The whole body becomes one `<body>` field via `String::from_utf8_lossy`. Binary bytes become U+FFFD, and 245 earlier binary FPs were removed only indirectly, by requiring a binary after a backtick (`shell.rs`). `serde_json` is already a vft-core dependency. No decompressor is in `Cargo.lock`. Dev benign bodies by declared type: JSON 1,803; text/plain 1,057 (696 of them are JSON); form 803; protobuf 688 (89 of them gzip by magic); multipart 89; ndjson 25 (22 gzip). Dev malicious bodies are form 44, multipart 13, untyped 11, JSON 6 and XML 3, with **no protobuf or gzip**.
 
 **Change.** New `vft-core/src/body.rs`: `body_fields(content_type: Option<&str>, body: &[u8]) -> Vec<Field>`. `Request::fields()` calls it in place of the single `<body>` push.
@@ -178,6 +188,8 @@ Then per field: chunking → `normalize` (`text` plus `sql_text`) → tokenize �
 | D13 | Declared-binary bodies count as binary only when their bytes look binary | A Content-Type label alone must not hide a payload (parser-discrepancy evasion) |
 | D14 | Changed constructs are measured by A/B through gate ids, not shadow mode | Shadow mode is for new constructs; gates make A/B a config switch on one build |
 | D15 | The per-header grammar matrix (§4.1) is deferred to DQ3 | It decides no dev FP (`cmd.shell-meta` d_fp = 0) and would lower the scores of malicious rows just below `monitor_at`; DQ3 needs it as a guard for header-borne constructs |
+
+**As shipped in DQ2a:** D12 and D13 are superseded. No body is hidden from inspection, so no compressed or declared-binary body loses its text field. See the note at the top of §4.2.
 
 ## 8. Risks and what goes to DQ3
 

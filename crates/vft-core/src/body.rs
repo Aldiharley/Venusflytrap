@@ -17,6 +17,7 @@
 //! identifier keys are not. A JSON body with no string leaf or non-identifier
 //! key (`{"a":1}`, `[]`) is not split: it stays `<body>`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
@@ -68,16 +69,15 @@ pub fn body_sources(content_type: Option<&str>, body: &[u8], off: &Disabled) -> 
     let media = media_type(content_type.unwrap_or(""));
     let whole: Vec<Range<usize>> = std::iter::once(0..body.len()).collect();
     if let Some(leaves) = json_body(&media, body, off, &mut facts) {
-        let mut fields: Vec<Sourced> = leaves.into_iter().map(|f| (f, whole.clone())).collect();
-        cap(&mut fields);
-        return (fields, facts);
+        return (leaves.into_iter().map(|f| (f, whole.clone())).collect(), facts);
     }
     let raw = text_of(body, text_class(&media), &mut facts);
     (vec![(Field { loc: Location::Body, name: "<body>".into(), raw }, whole)], facts)
 }
 
 /// The leaves of a JSON body, when its declared type or its first byte says
-/// JSON, it parses and it has at least one leaf. A form or XML body is never
+/// JSON, it parses and it has at least one leaf. At most [`MAX_BODY_FIELDS`]:
+/// past it the rest is joined into a last `json:#rest` field. A form or XML body is never
 /// split (form splitting is deferred). A declared JSON body that does not
 /// parse sets `unparsed`.
 fn json_body(media: &str, bytes: &[u8], off: &Disabled, facts: &mut BodyFacts) -> Option<Vec<Field>> {
@@ -90,14 +90,14 @@ fn json_body(media: &str, bytes: &[u8], off: &Disabled, facts: &mut BodyFacts) -
     if !(declared || sniffed) {
         return None;
     }
-    let mut leaves = Vec::new();
-    if !json(bytes, ndjson, &mut leaves) {
+    let mut out = Out::default();
+    if !json(bytes, ndjson, &mut out) {
         if declared {
             facts.unparsed = true;
         }
         return None;
     }
-    (!leaves.is_empty()).then_some(leaves)
+    (!out.is_empty()).then(|| out.finish())
 }
 
 /// The lower-cased media type of a Content-Type value, without parameters.
@@ -129,54 +129,146 @@ fn text_of(bytes: &[u8], text_class: bool, facts: &mut BodyFacts) -> String {
 }
 
 /// Parse one JSON document (or ndjson lines, as `/<line>` members) and collect
-/// its leaves. False when it does not parse or nests too deep.
-fn json(bytes: &[u8], ndjson: bool, leaves: &mut Vec<Field>) -> bool {
+/// its leaves into `out`. False when it does not parse or nests too deep; the
+/// caller then discards `out`.
+fn json(bytes: &[u8], ndjson: bool, out: &mut Out) -> bool {
     if ndjson {
         let Ok(text) = std::str::from_utf8(bytes) else { return false };
-        let mut all = Vec::new();
         for (i, line) in text.lines().map(str::trim).filter(|l| !l.is_empty()).enumerate() {
-            if !collect(line.as_bytes(), &format!("/{i}"), 0, true, &mut all) {
+            let ptr = if out.spilled { String::new() } else { child("", &i.to_string(), 1).into_owned() };
+            if !collect(line.as_bytes(), &ptr, 0, true, out) {
                 return false;
             }
         }
-        leaves.extend(all);
         return true;
     }
-    collect(bytes, "", 0, true, leaves)
+    collect(bytes, "", 0, true, out)
 }
 
-/// Collect the leaves of one whole JSON text into `leaves`; nothing is added
-/// when it does not parse, has trailing bytes or nests too deep.
-fn collect(bytes: &[u8], ptr: &str, depth: usize, expand: bool, leaves: &mut Vec<Field>) -> bool {
+/// Collect the leaves of one whole JSON text into `out`. False when it does
+/// not parse, has trailing bytes or nests too deep; `out` may then hold part
+/// of it, so a caller that must keep `out` collects into [`Out::under`].
+fn collect(bytes: &[u8], ptr: &str, depth: usize, expand: bool, out: &mut Out) -> bool {
     let mut de = serde_json::Deserializer::from_slice(bytes);
-    let mut found = Vec::new();
-    let ok = Leaves { ptr: ptr.to_string(), depth, expand, out: &mut found }.deserialize(&mut de).and_then(|()| de.end()).is_ok();
-    if ok {
-        leaves.extend(found);
+    Leaves { ptr: Cow::Borrowed(ptr), depth, expand, out }.deserialize(&mut de).and_then(|()| de.end()).is_ok()
+}
+
+/// The leaves of one body under the field cap, in document order. The first
+/// [`MAX_BODY_FIELDS`] are fields; once a body has more, the last field and
+/// every later value go straight into the `json:#rest` text (one per line).
+/// Past the cap no name and no `Field` is built, and no text is dropped.
+#[derive(Default)]
+struct Out {
+    fields: Vec<Field>,
+    rest: String,
+    /// Values in `rest`.
+    rest_n: usize,
+    /// Past the cap: every value goes to `rest`.
+    spilled: bool,
+}
+
+impl Out {
+    /// A scratch collector for a nested expansion. It is past the cap when
+    /// `self` is, so nothing in it builds a name either.
+    fn under(&self) -> Out {
+        Out { spilled: self.spilled, ..Out::default() }
     }
-    ok
+
+    fn room(&self) -> bool {
+        !self.spilled && self.fields.len() < MAX_BODY_FIELDS
+    }
+
+    /// Add one value; `name` is called only when the value becomes a field.
+    fn push(&mut self, name: impl FnOnce() -> String, raw: &str) {
+        if self.room() {
+            self.fields.push(leaf(name(), raw.to_string()));
+        } else {
+            self.spill();
+            self.append(raw, 1);
+        }
+    }
+
+    /// Enter the past-the-cap state. A full field list gives up its last
+    /// field to `rest`, so that `json:#rest` takes the last slot.
+    fn spill(&mut self) {
+        if !self.spilled {
+            self.spilled = true;
+            if self.fields.len() == MAX_BODY_FIELDS {
+                if let Some(last) = self.fields.pop() {
+                    self.append(&last.raw, 1);
+                }
+            }
+        }
+    }
+
+    /// Append `n` values (already joined one per line) to `rest`.
+    fn append(&mut self, text: &str, n: usize) {
+        if n == 0 {
+            return;
+        }
+        if self.rest_n > 0 {
+            self.rest.push('\n');
+        }
+        self.rest.push_str(text);
+        self.rest_n += n;
+    }
+
+    /// Add a nested expansion's values after the ones already here.
+    fn absorb(&mut self, nested: Out) {
+        for f in nested.fields {
+            if self.room() {
+                self.fields.push(f);
+            } else {
+                self.spill();
+                self.append(&f.raw, 1);
+            }
+        }
+        if nested.rest_n > 0 {
+            self.spill();
+            self.append(&nested.rest, nested.rest_n);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.fields.is_empty() && self.rest_n == 0
+    }
+
+    fn finish(mut self) -> Vec<Field> {
+        if self.rest_n > 0 {
+            self.fields.push(leaf("json:#rest".into(), self.rest));
+        }
+        self.fields
+    }
 }
 
 /// A serde visitor that yields every (pointer, string) entry of a JSON value,
 /// repeated keys included (`serde_json::Value` keeps only the last). The
 /// second and later values of a key get the pointer suffix `#2`, `#3`, ...
+/// `ptr` is clipped to [`MAX_NAME_CHARS`] as it is built (names are labels),
+/// so a long key or a deep path is never copied per value. Past the cap it is
+/// empty.
 struct Leaves<'a> {
-    ptr: String,
+    ptr: Cow<'a, str>,
     depth: usize,
     /// A string leaf that is itself a JSON object or array is expanded once.
     expand: bool,
-    out: &'a mut Vec<Field>,
+    out: &'a mut Out,
 }
 
 impl Leaves<'_> {
     fn string(self, s: &str) {
         if self.expand {
             let t = s.trim_start();
-            if (t.starts_with('{') || t.starts_with('[')) && collect(s.as_bytes(), &self.ptr, self.depth + 1, false, self.out) {
-                return;
+            if t.starts_with('{') || t.starts_with('[') {
+                let mut nested = self.out.under();
+                if collect(s.as_bytes(), &self.ptr, self.depth + 1, false, &mut nested) {
+                    self.out.absorb(nested);
+                    return;
+                }
             }
         }
-        self.out.push(leaf(format!("json:{}", clip(&self.ptr)), s.to_string()));
+        let ptr = &self.ptr;
+        self.out.push(|| format!("json:{}", clip(ptr)), s);
     }
 }
 
@@ -229,22 +321,37 @@ impl<'de> Visitor<'de> for Leaves<'_> {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
         let Leaves { ptr, depth, expand, out } = self;
+        // A pointer already at the name limit is every element's pointer.
+        let at_limit = ptr.chars().count() >= MAX_NAME_CHARS;
         let mut i = 0usize;
-        while seq.next_element_seed(Leaves { ptr: format!("{ptr}/{i}"), depth: depth + 1, expand, out: &mut *out })?.is_some() {
+        loop {
+            let p = if out.spilled {
+                Cow::Borrowed("")
+            } else if at_limit {
+                Cow::Borrowed(&*ptr)
+            } else {
+                child(&ptr, &i.to_string(), 1)
+            };
+            if seq.next_element_seed(Leaves { ptr: p, depth: depth + 1, expand, out: &mut *out })?.is_none() {
+                return Ok(());
+            }
             i += 1;
         }
-        Ok(())
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let Leaves { ptr, depth, expand, out } = self;
         let mut seen: HashMap<String, usize> = HashMap::new();
         while let Some(k) = map.next_key::<String>()? {
-            let n = seen.entry(k.clone()).or_insert(0);
-            *n += 1;
-            let p = if *n == 1 { format!("{ptr}/{}", escape(&k)) } else { format!("{ptr}/{}#{n}", escape(&k)) };
+            let p = if out.spilled {
+                Cow::Borrowed("")
+            } else {
+                let n = seen.entry(k.clone()).or_insert(0);
+                *n += 1;
+                child(&ptr, &k, *n)
+            };
             if !k.chars().all(is_ident) {
-                out.push(leaf(format!("json-key:{}", clip(&p)), k));
+                out.push(|| format!("json-key:{}", clip(&p)), &k);
             }
             map.next_value_seed(Leaves { ptr: p, depth: depth + 1, expand, out: &mut *out })?;
         }
@@ -260,24 +367,49 @@ fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '$' | '@')
 }
 
-/// RFC 6901 reference token escaping.
-fn escape(k: &str) -> String {
-    k.replace('~', "~0").replace('/', "~1")
+/// The child pointer of `ptr` (already clipped): `ptr/token`, with `#dup`
+/// for the second and later values of a repeated key, RFC 6901 escaped
+/// (`~` is `~0`, `/` is `~1`). It is clipped to [`MAX_NAME_CHARS`] while it
+/// is built, so it equals `clip(ptr + "/" + escape(token) + "#dup")` and reads
+/// no more of `token` than fits. A `ptr` at the limit is returned as is.
+fn child<'p>(ptr: &'p str, token: &str, dup: usize) -> Cow<'p, str> {
+    let mut room = MAX_NAME_CHARS.saturating_sub(ptr.chars().count());
+    if room == 0 {
+        return Cow::Borrowed(ptr);
+    }
+    let mut s = String::with_capacity(ptr.len() + 1 + token.len().min(4 * MAX_NAME_CHARS) + 4);
+    s.push_str(ptr);
+    // Push `c` if it fits; true while there is room for more.
+    let mut put = |s: &mut String, c: char| {
+        if room > 0 {
+            s.push(c);
+            room -= 1;
+        }
+        room > 0
+    };
+    let mut open = put(&mut s, '/');
+    for c in token.chars() {
+        if !open {
+            break;
+        }
+        open = match c {
+            '~' => put(&mut s, '~') && put(&mut s, '0'),
+            '/' => put(&mut s, '~') && put(&mut s, '1'),
+            c => put(&mut s, c),
+        };
+    }
+    if open && dup > 1 {
+        for c in format!("#{dup}").chars() {
+            if !put(&mut s, c) {
+                break;
+            }
+        }
+    }
+    Cow::Owned(s)
 }
 
 fn clip(s: &str) -> String {
     s.chars().take(MAX_NAME_CHARS).collect()
-}
-
-/// At most [`MAX_BODY_FIELDS`] leaves: the overflow is joined (one per line)
-/// into a last `json:#rest` field and never dropped.
-fn cap(fields: &mut Vec<Sourced>) {
-    if fields.len() <= MAX_BODY_FIELDS {
-        return;
-    }
-    let rest: Vec<String> = fields.drain(MAX_BODY_FIELDS - 1..).map(|(f, _)| f.raw).collect();
-    let src = fields[0].1.clone();
-    fields.push((Field { loc: Location::Body, name: "json:#rest".into(), raw: rest.join("\n") }, src));
 }
 
 #[cfg(test)]
@@ -475,6 +607,71 @@ mod tests {
             assert!(!s.is_empty());
             assert!(s.iter().all(|(_, r)| r.len() == 1 && r[0] == (0..body.len())), "{ct}");
         }
+    }
+
+    #[test]
+    fn names_of_a_normal_nested_body_are_unchanged() {
+        // The names stored before the linear-splitting fix (final review C1),
+        // in document order.
+        let body = br#"{"user":{"id":"7","tags":["a","b"],"a/b":{"c~d":"x"}},"id":"1","id":"2","a b":"k","s":"[\"n1\",{\"q\":\"n2\"}]","n":5}"#;
+        assert_eq!(
+            names("application/json", body),
+            vec![
+                "json:/user/id",
+                "json:/user/tags/0",
+                "json:/user/tags/1",
+                "json-key:/user/a~1b",
+                "json-key:/user/a~1b/c~0d",
+                "json:/user/a~1b/c~0d",
+                "json:/id",
+                "json:/id#2",
+                "json-key:/a b",
+                "json:/a b",
+                "json:/s/0",
+                "json:/s/1/q",
+            ]
+        );
+    }
+
+    #[test]
+    fn long_pointers_are_clipped_names() {
+        // A name is the first MAX_NAME_CHARS chars of the full pointer,
+        // whatever the key length, the depth or a duplicate suffix.
+        let clipped = |full: String| full.chars().take(MAX_NAME_CHARS).collect::<String>();
+        for klen in [1usize, 30, 62, 63, 64, 65, 100, 5000] {
+            let k = "k".repeat(klen);
+            let body = format!(r#"{{"{k}":"x","{k}":"y","w":{{"{k}":["z",{{"~/":"v"}}]}}}}"#);
+            let expect = vec![
+                format!("json:{}", clipped(format!("/{k}"))),
+                format!("json:{}", clipped(format!("/{k}#2"))),
+                format!("json:{}", clipped(format!("/w/{k}/0"))),
+                format!("json-key:{}", clipped(format!("/w/{k}/1/~0~1"))),
+                format!("json:{}", clipped(format!("/w/{k}/1/~0~1"))),
+            ];
+            assert_eq!(names("application/json", body.as_bytes()), expect, "key of {klen} chars");
+        }
+    }
+
+    #[test]
+    fn the_cap_keeps_exactly_the_first_values_in_order() {
+        let list = |n: usize| format!("[{}]", (0..n).map(|i| format!("\"v{i}\"")).collect::<Vec<_>>().join(","));
+        // At the cap: every value is a field, and there is no rest.
+        let p = pairs("application/json", list(MAX_BODY_FIELDS).as_bytes());
+        assert_eq!(p.len(), MAX_BODY_FIELDS);
+        assert_eq!(p.last().unwrap(), &(format!("json:/{}", MAX_BODY_FIELDS - 1), format!("v{}", MAX_BODY_FIELDS - 1)));
+        // One past it: the last slot is the rest, which holds the last two.
+        let p = pairs("application/json", list(MAX_BODY_FIELDS + 1).as_bytes());
+        assert_eq!(p.len(), MAX_BODY_FIELDS);
+        assert_eq!(p[MAX_BODY_FIELDS - 2].0, format!("json:/{}", MAX_BODY_FIELDS - 2));
+        assert_eq!(p.last().unwrap(), &("json:#rest".to_string(), format!("v{}\nv{}", MAX_BODY_FIELDS - 1, MAX_BODY_FIELDS)));
+        // A nested expansion across the cap, and keys past it, keep order.
+        let mut parts: Vec<String> = (0..MAX_BODY_FIELDS - 2).map(|i| format!("\"v{i}\"")).collect();
+        parts.push(r#""[\"n1\",\"n2\",\"n3\"]""#.into());
+        parts.push(r#"{"a b":"w"}"#.into());
+        let p = pairs("application/json", format!("[{}]", parts.join(",")).as_bytes());
+        assert_eq!(p.len(), MAX_BODY_FIELDS);
+        assert_eq!(p[MAX_BODY_FIELDS - 2], (format!("json:/{}/0", MAX_BODY_FIELDS - 2), "n1".to_string()));
+        assert_eq!(p.last().unwrap(), &("json:#rest".to_string(), "n2\nn3\na b\nw".to_string()));
     }
 
     #[test]

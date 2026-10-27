@@ -83,6 +83,15 @@ static SIGNATURES: &[(&str, &ConstructInfo)] = &[
     ("$(cat ", &sinks::SIG_CAT_SUBST),
 ];
 
+/// A name segment without a trailing `#<digits>` duplicate-key suffix
+/// (`id#2` is `id`); any other segment is returned unchanged.
+fn strip_dup_suffix(seg: &str) -> &str {
+    match seg.rsplit_once('#') {
+        Some((head, n)) if !head.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => seg,
+    }
+}
+
 /// API-safety: numeric/identifier fields carrying injection structure, or
 /// absurd field sizes.
 pub struct ApiSafetyDetector;
@@ -93,9 +102,11 @@ impl FieldDetector for ApiSafetyDetector {
     fn assess(&self, ctx: &FieldCtx) -> Evidence {
         let lname = ctx.field.name.to_lowercase();
         // Body leaves carry their parameter in the last name segment
-        // (`json:/user/id`); other locations use the whole name.
+        // (`json:/user/id`), without the `#<n>` suffix of a repeated key
+        // (`json:/id#2` is `id`); other locations use the whole name.
         let name = if ctx.field.loc == Location::Body {
-            lname.rsplit([':', '/']).next().unwrap_or(&lname)
+            let last = lname.rsplit([':', '/']).next().unwrap_or(&lname);
+            strip_dup_suffix(last)
         } else {
             lname.as_str()
         };
@@ -309,6 +320,11 @@ mod tests {
             (Location::Body, "json:/user/id", true),
             (Location::Body, "json:/user_id", true),
             (Location::Body, "json:/identity", false),
+            // The second and later values of a repeated key.
+            (Location::Body, "json:/id#2", true),
+            (Location::Body, "json:/user/account_id#13", true),
+            (Location::Body, "json:/id#x", false),
+            (Location::Body, "json:#rest", false),
             (Location::Query, "x:id", false),
             (Location::Query, "id", true),
         ] {

@@ -258,3 +258,30 @@ proptest! {
         }
     }
 }
+
+/// Splitting a JSON body is linear in its size (final review C1): a long key
+/// over a long array used to copy the key into every element's pointer. The
+/// bodies are built at run time from repeated neutral characters.
+#[test]
+fn json_body_splitting_is_linear() {
+    let off = vft_core::graph::sinks::Disabled::default();
+    let long_key = "k".repeat(300_000);
+    let numbers = vec!["1"; 200_000].join(",");
+    let strings = vec!["\"a\""; 180_000].join(",");
+    let cases = [
+        ("long key over 200k numbers", format!("{{\"{long_key}\":[{numbers}]}}")),
+        ("long key over 180k strings", format!("{{\"{long_key}\":[{strings}]}}")),
+        ("1 MiB of short strings", format!("[{}]", vec!["\"a\""; (1 << 20) / 4].join(","))),
+        ("long key nested 30 deep", format!("{}\"a\"{}", format!("{{\"{}\":", "k".repeat(30_000)).repeat(30), "}".repeat(30))),
+    ];
+    for (what, body) in cases {
+        assert!(body.len() <= (1 << 20) + 16, "{what}: {} bytes", body.len());
+        let t = Instant::now();
+        let (fields, _) = vft_core::body::body_fields(None, body.as_bytes(), &off);
+        let dur = t.elapsed();
+        assert!(dur < Duration::from_secs(2), "{what}: took {dur:?}");
+        assert!(!fields.is_empty() && fields.len() <= vft_core::body::MAX_BODY_FIELDS, "{what}: {} fields", fields.len());
+        assert!(fields.iter().all(|f| f.name.chars().count() <= 64 + "json-key:".len()), "{what}: a name is not clipped");
+        eprintln!("{what}: {} bytes, {} fields, {dur:?}", body.len(), fields.len());
+    }
+}

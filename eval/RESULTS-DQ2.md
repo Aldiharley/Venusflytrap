@@ -14,6 +14,27 @@ Nothing is estimated and nothing was tuned.
 - **Samples and read failures** (JSON of each run): dev `base-dev.json` 16,939 / 0 and `final-dev.json` 16,939 / 0; held-out `heldout.json` 16,936 / 0; full-corpus library `final-library.json` 33,875 / 0; serve diff 33,875 shared rows in both source models. `parse_failures` and `invariant_violations` are 0 in all four library JSONs.
 - **Absent files (Host facts procedure):** none on dev (`heldout-absent.txt`: manifest 16,939, scored 16,939). Two held-out rows of the manifest (16,938) are absent from the corpus directory and were never scored: `3e/f0/ba59dd0840009f5b678663dbb1bd.black` and `d5/65/2dcdd89317f10d43500014509120.black`. They were already absent in DQ1 (33,875 of the 33,877 manifest rows scored), so every comparison here is over the same rows.
 - **Final checks** (`final-checks.txt`): `cargo test --workspace` all ok (vft-core lib 204 passed), `cargo clippy --all-targets -- -D warnings` clean, `ts_bindings` 1 passed (no regeneration), eval Python tests OK. `ui/node_modules` is absent, so the UI check was not run.
+- **Final fix wave** (after the final review, on top of `2db97cd`): linear JSON body splitting, API safety on repeated keys (`json:/id#2` counts as `id`), and these documents. It changes no decision on the corpus. The dev A/B `final-ab.txt` (A = `bin-before-final.exe`, built at `2db97cd`) is identical on every CSV column of all 16,939 rows. The re-run serve diff `serve-diff-final.txt` is byte-identical to the one taken at `2db97cd`; that earlier file and its `now-serve-*` inputs are kept under `at-2db97cd/`. So every number below still holds for the fixed tree (section 3, last row).
+
+## Monitor cost, stated plainly
+
+DQ2a removes 47 dev false positives, and it also **raises dev Monitor from 820 to 1,270 rows: +450, +55 %**. That is 4.9 % to 7.6 % of the 16,610 benign dev rows; 1 Monitor row is malicious in both runs (`base-dev.csv`, `final-dev.csv`). Monitor is the operator-facing alert band, so this is a real cost of the change. It is not a false positive in the library metrics.
+
+| Cause | Dev Monitor rows | Source |
+|---|---|---|
+| `gate.cmd-position`: benign Block to Monitor | +25 (820 to 845) | `cmdpos-a.csv`, `cmdpos-b.csv` |
+| `limit.body-non-utf8`: benign Allow to Monitor, present in both `body-total` arms | +22 | `body-total-a.csv`; baseline `serve-distinct.csv` and `now-serve-distinct.csv` (dev rows) |
+| JSON split (`parse.body-json`): benign Allow to Monitor 395, Block to Monitor 8 | +403 (867 to 1,270) | `body-total-a.csv`, `body-total-b.csv` |
+| Corroboration de-duplication | +0 (1,261 on both arms at `30c5c79`) | `corroboration-ab.txt` |
+| **Total** | **+450** | 820 + 25 + 22 + 403 = 1,270 |
+
+- **Why the JSON split adds Monitor rows.** Each string leaf is its own origin under D10. So a `cmd.shell-meta` latent on a JSON leaf corroborates a `cmd.shell-meta` top on a header (usually `sec-ch-ua`), and most scores move from 39 to 41 or 43. The corroboration step does not contain this (section 5).
+- **The serve-mode view.** 819 benign rows go from Allow to Monitor, all with `cmd.shell-meta` as the top before and after (section 10). Of these:
+  - 777 rows (395 dev, 382 held-out) come from the JSON split. 763 of them gained 1 to 103 `cmd.shell-meta` items. The other 14 gained other latent items on JSON leaves (`sqli.sql-keyword`, `xss.html-tag`), or the same item on a new origin. All 395 dev rows are Allow in `body-total-a.csv` and Monitor in `body-total-b.csv`.
+  - 42 rows (22 dev, 20 held-out) gained `limit.body-non-utf8` and no `cmd.shell-meta`. They are Monitor in both `body-total` arms, so the JSON split did not cause them.
+- **Two owner decisions for DQ3**, before more field splitting (form, multipart) lands:
+  1. Should latent-only items from body leaves corroborate a top on another origin? One option is to key them under one `<body>` origin.
+  2. Should `limit.body-non-utf8` keep scoring? On dev it is net 0 (`ablate-dev.tsv`) and costs 22 Monitor rows.
 
 ## 1. Header summary
 
@@ -24,6 +45,7 @@ Nothing is estimated and nothing was tuned.
 | Held-out (scored once) | TP 139, FP 88, FN 188 | `heldout.json` |
 | Dev FP exit target (at most 99 rows) | **not met**, 100 rows | section 2 |
 | Merge rule | holds | section 2 |
+| Dev Monitor, main to DQ2a | **820 to 1,270 (+450, +55 %)**, all but 1 benign | "Monitor cost" above |
 | `bench_http` thresholds | both met | section 7 |
 | Library p95 | 280 us (budget 1,000 us) | `final-library.json` |
 | Serve diff | exit 0, no unattributed change | section 10 |
@@ -39,6 +61,8 @@ Dev rows only (`--side dev`).
 | DQ2a final (`final-dev.json`) | 149 | 100 | 16,510 | 180 | 45.29 % [40.00, 50.69] | 0.60 % [0.50, 0.73] |
 
 `base-dev.json` matches the expected main counts (TP 149, FP 147, TN 16,463, FN 180), so the baseline is main.
+
+Dev Monitor (library verdict, from the CSVs): main 820 (`base-dev.csv`), DQ2a final 1,270 (`final-dev.csv`). The rise is broken down in "Monitor cost" above.
 
 Paired comparison (`final-vs-base.txt`, `compare_runs.py --intersect`, 0 rows only in either run; `compare exit 1`, as expected because decisions changed; 637 rows differ in some decision column or score):
 
@@ -64,6 +88,9 @@ Each shipped step is one A/B on the dev rows, run when the step was finished, th
 | `cmdpos` (`gate.cmd-position`) | 2 | +0 | -37 | 0 / 0 / 1 | 37 / 0 / 1.455e-11 | 45.29 % [40.00, 50.69] | 0.66 % [0.55, 0.80] | `cmdpos-ab.txt` (A = `--disable gate.cmd-position`) |
 | `body-total` (JSON split, as shipped; A is today's single `<body>`) | 3 | +0 | -10 | 0 / 0 / 1 | 14 / 4 / 0.03088 | 45.29 % [40.00, 50.69] | 0.60 % [0.50, 0.73] | `body-total-ab.txt` (round 4's; A = `--disable parse.body-json`) |
 | `corroboration` | 4 | +0 | +0 | 0 / 0 / 1 | 0 / 0 / 1 | 45.29 % [40.00, 50.69] | 0.56 % [0.46, 0.69] | `corroboration-ab.txt` (A = `bin-before-corroboration.exe`) |
+| `final` (fix wave: linear JSON splitting, API safety on repeated keys) | review | +0 | +0 | 0 / 0 / 1 | 0 / 0 / 1 | 45.29 % [40.00, 50.69] | 0.60 % [0.50, 0.73] | `final-ab.txt` (A = `bin-before-final.exe`, built at `2db97cd`) |
+
+Dev Monitor per step, from each step's CSVs: `cmdpos` 820 to 845 (+25), `body-total` 867 to 1,270 (+403), `corroboration` 1,261 on both arms, `final` 1,270 on both arms. The `final` arms are identical on every CSV column: the fix wave changes no decision and no score on dev.
 
 The `corroboration` row was measured on the tree of Task 4's commit `30c5c79`, when body classification still had its earlier shape (dev FP 93 on both arms). Its delta is a step delta and does not depend on the body rounds that followed. All three rows have 0 fallen malicious rows and 0 rows only in one arm.
 
@@ -121,7 +148,9 @@ Source: `corroboration-hist.txt` (dev rows; A is the build before Task 4, B is w
 
 Verdicts, both arms: Allow 15,436, Block 238, Challenge 4, Monitor 1,261. Monitor count 1,261 before and after.
 
-As measured, no benign mass moved between score bands or verdicts on dev; the histograms are identical. The step's only measured effect is a 1 to 3 point score reduction on 14 malicious serve rows, with no decision change (Task 4 report). Corroboration buys no false-positive budget on this corpus; it is a guard against the extra latent score that field splitting adds.
+As measured, no benign mass moved between score bands or verdicts on dev; the histograms are identical. The step's only measured effect is a 1 to 3 point score reduction on 14 malicious serve rows, with no decision change (Task 4 report). Corroboration buys no false-positive budget on this corpus.
+
+It also does **not** guard against the extra latent score that field splitting adds, although that was its purpose in spec section 4.4. Under D10 the key is (origin field, family), and each JSON leaf is its own origin. So a latent on a leaf still corroborates a top on a header, and the JSON split added 403 dev Monitor rows with this step in place ("Monitor cost" above). The de-duplication only merges items within one origin, for example `json:/a` and `json:/a#2`.
 
 ## 6. Leave-one-out (dev)
 
@@ -136,7 +165,7 @@ The four DQ2a ids (`parse.body-binary`, `parse.body-form` and `parse.body-multip
 | `limit.body-non-utf8` | Limit | 0 | 0 | 0 |
 | `limit.body-unparsed` | Limit | 0 | 0 | 0 |
 
-`limit.body-unparsed` is worth 0 points, so its zero row is expected. `limit.body-non-utf8` fires on no dev row that changes a decision.
+`limit.body-unparsed` is worth 0 points, so its zero row is expected. `limit.body-non-utf8` changes no false-positive decision (d_tp 0, d_fp 0), but it is not free. It fires on 83 dev rows, all benign (59 Allow, 24 Monitor in `final-dev.csv`). It moves 22 of them from Allow to Monitor; those 22 dev rows are the `limit.body-non-utf8` rows of the serve diff (section 10).
 
 The ten rows with the largest `net` (the tenth place is a four-way tie at 3, all four shown):
 
@@ -197,12 +226,15 @@ Held-out rows that lost a malicious decision in the serve regression check (`NON
 ## 10. Serve regression check
 
 - `serve-diff-final.txt` (`bash eval/decision_gate.sh diff "$VFT_BASELINE"`, status `serve-diff-final.status`): **exit 0**; `bans_from_allowed` 0 and `invariant_violations` 0 in both source models.
-- Both models (distinct and pooled:100) list the same changes: 33,875 shared rows, 921 changed decisions, 318 score-only changes, 0 rows only in old, 0 only in new.
-- Attribution (`serve-attribution.txt`, spec section 6.3 item 1), per source model: `{'body': 37, 'score-only': 819, 'sink': 65}`. That is 921 rows, and there is no `OTHER` line.
+- Both models (distinct and pooled:100) list the same changes: 33,875 shared rows, 921 changed decisions, and 318 rows whose score moved with no decision change (the diff's "score-only changes"), 0 rows only in old, 0 only in new. The re-run after the fix wave gives a byte-identical file (header).
+- Attribution (`serve-attribution.txt`, spec section 6.3 item 1), per source model: `{'body': 37, 'score-only': 819, 'sink': 65}`. That is 921 rows, and there is no `OTHER` line. The attribution script's `score-only` bucket is a different set from the 318 rows above: it holds rows whose decision **did** change while the top construct stayed the same. This document calls it **same-top** from here on. The script's comment says that bucket means "the score moved through corroboration"; for these rows that is not what happened (below).
 - Composition (`serve-breakdown.txt`, verdict columns only): all 921 changed rows are **benign**; no malicious row changed its library or serve verdict.
   - `sink` 65 rows, all benign Block to Allow (19) or Block to Monitor (46): the cmd-position gate.
   - `body` 37 rows, all benign: Block to Allow 19, Block to Monitor 12, Allow to Block 6. The 6 Allow to Block rows are new Blocks on a body field (4 dev, 2 held-out).
-  - `score-only` 819 rows, all benign Allow to Monitor, and all 819 have `cmd.shell-meta` as the top construct both before and after (checked in the baseline and `now-serve-distinct.csv` `top` columns). The mechanism (extra latent score from the split body fields) is the one the Task 3 report found; it was not diagnosed row by row here. A Monitor is not a false positive in the library metrics.
+  - same-top 819 rows, all benign Allow to Monitor, and all 819 have `cmd.shell-meta` as the top construct both before and after (checked in the baseline `serve-distinct.csv` and `now-serve-distinct.csv` `top` columns). They have two causes, counted from the `constructs` columns and the manifest side:
+    - **777 rows (395 dev, 382 held-out): the JSON split.** Extra latent items on JSON leaves (in 763 rows, 1 to 103 more `cmd.shell-meta` items) corroborate the header top, because each leaf is its own origin. All 395 dev rows are Allow in `body-total-a.csv` and Monitor in `body-total-b.csv`.
+    - **42 rows (22 dev, 20 held-out): `limit.body-non-utf8`.** They gained that limit and no `cmd.shell-meta`. They are Monitor in both `body-total` arms, so the JSON split did not cause them.
+  - A Monitor is not a false positive in the library metrics, but it is an alert to the operator ("Monitor cost" above).
 - Conclusion: **no unattributed change.**
 
 ## 11. TCP replay
@@ -249,5 +281,7 @@ Dev FP reached **100 rows against the at most 99 target**, so the exit target is
 - **Form splitting.** A form body is one `<body>` field. Splitting it lost constructs that form across two values (4 malicious dev rows in round 0, `r0-body-form-ab.txt`) and added benign Blocks.
 - **Multipart splitting.** A multipart body is one `<body>` field. Splitting needs strict RFC 2046 framing with fallback to the whole body on any ambiguity (review finding N-1: lenient matching can split one backend value across fields). The round 0 to 3 files in section 3 show what it bought (about 2 dev FP).
 - **The per-header grammar matrix** (spec section 4.1, D15). It decides no dev FP (`cmd.shell-meta` has d_fp 0) and is a guard for header-borne constructs once DQ3 adds them.
+- **Body-leaf corroboration** (final review I1). Decide whether latent-only items from body leaves may corroborate a top on another origin, before form or multipart splitting adds more leaves. Under D10 as specified, each new split multiplies benign Monitor volume ("Monitor cost" above).
+- **`limit.body-non-utf8` scoring** (final review I1). It is net 0 on dev and costs 22 dev Monitor rows; decide whether it keeps scoring.
 - **JSON non-string values and identifier keys** (review minor m-1). Numbers, booleans, null and identifier-only keys are not inspected. They matter once a NoSQL or prototype-pollution detector exists.
 - **Earlier recall work** (`eval/RESULTS-RECALL.md`), and the clusters of section 12 that fall outside DQ2a's sinks (spec section 8): the `Referer` and query-parameter SQL groups, and the 148 `cmd.shell-meta` misses scored below the monitor threshold. Dev recall is unchanged at 45.29 % through this plan.

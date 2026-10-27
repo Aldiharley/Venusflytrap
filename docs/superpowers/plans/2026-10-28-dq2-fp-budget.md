@@ -1319,6 +1319,8 @@ The task report records the following, for the results task's per-step table:
 
 ### Task 3: Body classification (`body.rs`) *(measured: `body`, `body-<class>`, `body-nonutf8`)*
 
+> **As shipped in DQ2a:** only the JSON split (`parse.body-json`) shipped. There is no binary class and no body hiding, form and multipart bodies stay one `<body>` field, and `limit.body-non-utf8` fires for declared text classes only. The steps below are the original plan. See the note at the top of spec §4.2, [`eval/RESULTS-DQ2.md`](../../../eval/RESULTS-DQ2.md) §3 and §13, and the Task 3 rulings in the DQ2 ledger.
+
 **Files:**
 - Create: `crates/vft-core/src/body.rs`
 - Create (generated): `crates/vft-core/tests/fixtures/body_cases.txt`
