@@ -1,0 +1,4 @@
+# Shell scripts run under bash on Windows, WSL and CI; generated console types
+# are compared byte for byte by crates/vft-core/tests/ts_bindings.rs.
+*.sh text eol=lf
+ui/src/gen/** text eol=lf
