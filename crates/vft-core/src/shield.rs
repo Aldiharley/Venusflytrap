@@ -234,7 +234,22 @@ impl Shield {
         }
         let hard_block = honeypot_or_deny || limit_block;
 
-        let (score, verdict, conflict) = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
+        let arb = arbitrate(&rec.scored, &self.cfg.scoring, hard_block);
+        let (score, verdict, conflict) = (arb.score, arb.verdict, arb.conflict);
+        for (i, p) in arb.points.iter().enumerate() {
+            if let Some(ci) = rec.first_contrib[i] {
+                rec.contributions[ci].points += p;
+            }
+        }
+        if hard_block {
+            // The deciding pin carries the whole score, in decided_by order.
+            let pin = [sinks::HONEYPOT_DECOY_HIT.id, sinks::INTEL_DENY_LISTED.id, sinks::LIMIT_PAYLOAD_TRUNCATED.id]
+                .into_iter()
+                .find_map(|id| rec.contributions.iter().position(|c| c.construct.as_deref() == Some(id)));
+            if let Some(ci) = pin {
+                rec.contributions[ci].points = 100.0;
+            }
+        }
         let reason = build_reason(&rec.matched, conflict, false, honeypot_or_deny, limit_block);
 
         let j = Judgment {
@@ -344,7 +359,7 @@ impl Shield {
                 family: None,
                 value: FourValued::Dangerous,
                 weight: 1.0,
-                points: 0.0,
+                points: 100.0,
             }],
             chain_stage: None,
             normalized_layers: 0,
@@ -382,6 +397,8 @@ fn canonical(ip: std::net::IpAddr) -> std::net::IpAddr {
 struct Recorder {
     engines: Vec<EngineReport>,
     scored: Vec<Scored>,
+    /// Index into `contributions` of each `scored` item's first contribution.
+    first_contrib: Vec<Option<usize>>,
     matched: Vec<Pattern>,
     contributions: Vec<Contribution>,
 }
@@ -393,6 +410,7 @@ impl Recorder {
                 self.matched.push(p.clone());
             }
         }
+        let first = (e.value != FourValued::None).then_some(self.contributions.len());
         if e.value != FourValued::None {
             if e.patterns.is_empty() {
                 self.contributions.push(Contribution {
@@ -426,6 +444,7 @@ impl Recorder {
             note: e.note.clone(),
         });
         self.scored.push(Scored { engine: name.to_string(), engine_weight, field, evidence: e });
+        self.first_contrib.push(first);
     }
 }
 
