@@ -13,7 +13,8 @@ pub mod sinks;
 
 pub use tokenize::{tokenize, Token, TokenKind};
 
-use crate::judgment::Pattern;
+use crate::judgment::{Family, Pattern};
+use crate::normalize::Normalized;
 use sinks::{Disabled, Hits, SinkCtx};
 
 /// Caps so adversarial input can never blow up memory/CPU.
@@ -91,6 +92,28 @@ pub fn analyze_with(text: &str, opts: &GraphOpts) -> Analysis {
         latent: hits.latent,
         graph_truncated,
     }
+}
+
+/// Analyze a normalized field. When a comment was stripped, also analyze the
+/// field with comments kept (`n.kept`) and add the constructs formed there,
+/// dropping latents of their families: stripping drops the rest of a line or
+/// field, and those bytes must still reach the sinks (DQ5). Only formed
+/// constructs are taken from the kept view, so it adds no latent noise, and
+/// none of the SQL family: SQL reads comments as comments, so its sinks read
+/// the stripped text only.
+pub fn analyze_field(n: &Normalized, opts: &GraphOpts) -> Analysis {
+    let mut a = analyze_with(&n.text, opts);
+    if let Some(kept) = &n.kept {
+        let b = analyze_with(kept, opts);
+        a.graph_truncated |= b.graph_truncated;
+        for p in b.reachable.into_iter().filter(|p| p.family != Family::Sqli) {
+            if !a.reachable.iter().any(|q| q.name == p.name) {
+                a.latent.retain(|q| q.family != p.family);
+                a.reachable.push(p);
+            }
+        }
+    }
+    a
 }
 
 #[cfg(test)]
@@ -248,5 +271,49 @@ mod tests {
                 a
             );
         }
+    }
+
+    fn field(s: &str, off: &[&str]) -> Analysis {
+        let disabled = Disabled::resolve(&off.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        let opts = crate::normalize::Options { disabled: disabled.clone(), ..Default::default() };
+        let n = crate::normalize::normalize(s, &opts);
+        analyze_field(&n, &GraphOpts { disabled: &disabled, max_windows: 32 })
+    }
+
+    fn reached(a: &Analysis, id: &str) -> bool {
+        a.reachable.iter().any(|p| p.name == id)
+    }
+
+    #[test]
+    fn a_comment_does_not_hide_the_text_after_it() {
+        // A line comment, a `#` comment and an unterminated block comment each
+        // used to drop the rest of the field before any sink saw it.
+        for s in ["x -- ;id", "x #;id", "x /* ;id", "/tmp/*;wget x"] {
+            assert!(reached(&field(s, &[]), "cmd.chained-command"), "{s:?}");
+            assert!(!reached(&field(s, &["decode.keep-comments"]), "cmd.chained-command"), "{s:?} with the view off");
+        }
+    }
+
+    #[test]
+    fn the_kept_view_adds_only_formed_constructs() {
+        // A benign comment changes nothing; the kept view's latents are not taken.
+        let a = field("price -- per unit; see notes", &[]);
+        assert!(a.reachable.is_empty(), "{a:?}");
+        assert_eq!(a.latent.len(), field("price -- per unit; see notes", &["decode.keep-comments"]).latent.len());
+        // No comment: there is no kept view at all.
+        let n = crate::normalize::normalize("plain value", &Default::default());
+        assert!(n.kept.is_none());
+    }
+
+    #[test]
+    fn the_kept_view_takes_no_sql_constructs() {
+        let a = field("x -- ;select 1", &[]);
+        assert!(!a.reachable.iter().any(|p| p.family == Family::Sqli), "{a:?}");
+    }
+
+    #[test]
+    fn the_kept_view_replaces_latents_of_the_family_it_forms() {
+        let a = field("x -- ;id", &[]);
+        assert!(!a.latent.iter().any(|p| p.family == Family::CommandInjection), "{a:?}");
     }
 }

@@ -79,8 +79,9 @@ fn substitution_runs_binary(text: &str, bins: &[&str]) -> bool {
     false
 }
 
-/// True if the first identifier following a shell metacharacter is a known
-/// binary (command position).
+/// True if, after some shell metacharacter, the first identifier is a known
+/// binary (command position). Every separator is tried: a first one followed by
+/// an unknown word (`; echo 1`) does not end the search (DQ5).
 fn binary_after_meta(tokens: &[Token], bins: &[&str]) -> bool {
     let mut armed = false;
     for t in tokens {
@@ -92,7 +93,10 @@ fn binary_after_meta(tokens: &[Token], bins: &[&str]) -> bool {
                 armed = true;
             }
             TokenKind::Ident if armed => {
-                return bins.contains(&t.text.as_str());
+                if bins.contains(&t.text.as_str()) {
+                    return true;
+                }
+                armed = false;
             }
             // any other token in command position resets (e.g. `=`, number)
             _ if armed => {
@@ -154,6 +158,18 @@ mod tests {
     }
 
     const SEPARATORS: &[&str] = &[";", "|", "&", "&&", "||"];
+
+    #[test]
+    fn a_later_separator_is_still_tried() {
+        let on = Disabled::default();
+        for s in ["127.0.0.1; echo 1; ping localhost", "a | note | id", "x&y&&uname"] {
+            let (reach, _) = shell_hits(s, &on);
+            assert!(reach.iter().any(|n| n == "cmd.chained-command"), "{s:?}: {reach:?}");
+        }
+        // Separators with no binary after any of them stay latent.
+        let (reach, latent) = shell_hits("a; b; c | d", &on);
+        assert!(reach.is_empty() && latent.iter().any(|n| n == "cmd.shell-meta"), "{reach:?} {latent:?}");
+    }
 
     #[test]
     fn a_query_parameter_named_like_a_binary_is_not_a_chained_command() {

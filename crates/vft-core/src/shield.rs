@@ -211,7 +211,7 @@ impl Shield {
         // not charged to the byte budget).
         for range in crate::normalize::chunk_ranges(&req.path, self.cfg.shield.max_payload) {
             let (lost, layers) = inspect_pieces(&req.path[range], &self.norm_opts, &mut work, &mut |n| {
-                let analysis = graph::analyze_with(&n.text, &gopts);
+                let analysis = graph::analyze_field(n, &gopts);
                 if analysis.graph_truncated {
                     self.record_graph_truncated(&mut rec, FieldRef::path(), off);
                 }
@@ -346,7 +346,7 @@ impl Shield {
         ai: &AiDetector,
     ) {
         let fref = FieldRef::of(field);
-        let analysis = graph::analyze_with(&n.text, gopts);
+        let analysis = graph::analyze_field(n, gopts);
         if analysis.graph_truncated {
             self.record_graph_truncated(rec, fref.clone(), gopts.disabled);
         }
