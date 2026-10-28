@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 import { makeFixtures } from './fixtures';
 import { FixtureSource } from './source';
 import { STAGES } from './types';
+import { banView } from './views';
 
 const NOW = Date.UTC(2026, 9, 27, 14, 5, 0);
 
@@ -30,6 +31,17 @@ test('dashboard aggregates agree with the board', () => {
   const lens = d.requests_by_verdict.map((a) => a.length);
   expect(new Set(lens).size).toBe(1);
   expect(d.top_paths).toHaveLength(5);
+});
+
+test('board bans and the bans list are views of the engine BanRecords', () => {
+  const f = makeFixtures(NOW);
+  expect(f.banRecords.size).toBe(f.board.filter((s) => s.ban).length);
+  for (const s of f.board) {
+    const rec = f.banRecords.get(s.key);
+    expect(s.ban).toEqual(rec ? banView(rec) : null);
+  }
+  expect(f.bans.map((b) => b.key).sort()).toEqual([...f.banRecords.keys()].sort());
+  expect(f.bans.find((b) => b.manual)?.until_ms).toBeNull(); // the manual ban is permanent
 });
 
 test('a static FixtureSource emits no frames', async () => {

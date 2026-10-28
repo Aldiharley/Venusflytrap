@@ -1,27 +1,35 @@
-// Wire types mirrored from the SP2 plan (vft-core). Replace with re-exports from
-// ui/src/gen once SP2 Task 9 lands.
-export type Verdict = 'Allow' | 'Monitor' | 'Challenge' | 'Block';
-export type Stage = 'Recon' | 'Enumeration' | 'Exploitation' | 'Exfiltration';
-export type FourValued = 'None' | 'Safe' | 'Suspicious' | 'Dangerous';
-export type Location = 'Path' | 'Query' | 'Header' | 'Cookie' | 'Body';
-export type Family =
-  | 'Sqli' | 'Xss' | 'CommandInjection' | 'PathTraversal' | 'Recon' | 'Ssrf'
-  | 'Honeypot' | 'Intel' | 'Limit' | 'Anomaly';
-export type CauseKind =
-  | 'NoEvidence' | 'Detection' | 'Honeypot' | 'IntelDeny' | 'Ban'
-  | 'ChainEscalation' | 'Limit' | 'Allowlisted';
-export type BanCause = 'Honeypot' | 'Exfiltration' | 'RepeatedExploitation' | 'Manual';
+// Wire types: generated from vft-core by ts-rs (cargo test -p vft-core --features ts --test ts_bindings).
+// Never hand-edit ui/src/gen; this file only re-exports it and adds view types.
+export type { Apply } from '../../gen/Apply';
+export type { BanCause } from '../../gen/BanCause';
+export type { BanRecord } from '../../gen/BanRecord';
+export type { Cause } from '../../gen/Cause';
+export type { CauseKind } from '../../gen/CauseKind';
+export type { ChainOutcome } from '../../gen/ChainOutcome';
+export type { Contribution } from '../../gen/Contribution';
+export type { Expertise } from '../../gen/Expertise';
+export type { Family } from '../../gen/Family';
+export type { FieldRef } from '../../gen/FieldRef';
+export type { FourValued } from '../../gen/FourValued';
+export type { Judgment } from '../../gen/Judgment';
+export type { Location } from '../../gen/Location';
+export type { OptionDescriptor } from '../../gen/OptionDescriptor';
+export type { OptionKind } from '../../gen/OptionKind';
+export type { Source as OptionSource } from '../../gen/Source';
+export type { Stage } from '../../gen/Stage';
+export type { Verdict } from '../../gen/Verdict';
 
-export interface FieldRef { loc: Location; name: string }
-export interface Contribution {
-  engine: string; field: FieldRef | null; construct: string | null; family: Family | null;
-  value: FourValued; weight: number; points: number; shadow: boolean;
-}
-export interface Cause {
-  kind: CauseKind; option_key: string; construct: string | null; field: FieldRef | null; msg: string;
-}
+import type { BanCause } from '../../gen/BanCause';
+import type { CauseKind } from '../../gen/CauseKind';
+import type { Family } from '../../gen/Family';
+import type { FieldRef } from '../../gen/FieldRef';
+import type { Judgment } from '../../gen/Judgment';
+import type { Source as OptionSource } from '../../gen/Source';
+import type { Stage } from '../../gen/Stage';
+import type { Verdict } from '../../gen/Verdict';
 
-// View types for SP3-SP5 (UX architecture §14, gaps G1-G10). Provisional.
+// View types for SP3-SP5 (UX architecture §14, gaps G1-G10). Provisional: the admin API
+// that will serve them does not exist yet, so nothing in ui/src/gen covers them.
 export type Perm = 'Viewer' | 'Operator' | 'Admin';
 export type Health = 'Ok' | 'Warn' | 'Degraded' | 'Critical';
 export type LiveState = 'Connected' | 'Reconnecting' | 'Offline';
@@ -50,7 +58,11 @@ export interface Dashboard {                                                 // 
   active_bans: number;
   dropped: number;
 }
-export interface BanView { until_ms: number | null; reason: BanCause; offences: number; manual: boolean } // G8
+/**
+ * A ban as the screens show it (G8), built from the generated `BanRecord` by `banView()`.
+ * `until_ms` is null for a permanent ban; `manual` is a `Manual` cause.
+ */
+export interface BanView { until_ms: number | null; reason: BanCause; offences: number; manual: boolean }
 export interface BanEntry extends BanView { key: string; since_ms: number }
 export interface SourceView {                                                // G5
   key: string;
@@ -71,6 +83,50 @@ export type LiveFrame =
   | { kind: 'counters'; counters: Counters }
   | { kind: 'board'; board: SourceView[] }
   | { kind: 'state'; live: LiveState };
+
+/** Score bands of the config revision that decided a request (G4). */
+export interface Bands { monitor_at: number; challenge_at: number; block_at: number }
+
+/** One row of `POST /api/v1/history/query` (UX §5). SP4 owns the real shape. */
+export interface HistoryRow {
+  id: string;
+  ts_ms: number;
+  verdict: Verdict;
+  score: number;
+  src_key: string;
+  method: string;
+  host: string;
+  /** Path without the query string. */
+  path: string;
+  construct: string | null;
+  stage: Stage | null;
+  /** `decided_by.kind`, the G6 `cause:` field. */
+  cause: CauseKind;
+  /** `decided_by.option_key`. */
+  decided_option: string;
+  config_rev: number;
+  latency_us: number;
+  /** Null when the request was not forwarded. */
+  upstream_status: number | null;
+  /** A 1 % sample of Allows; every non-Allow is stored. */
+  sampled: boolean;
+}
+
+/** `GET /api/v1/requests/{id}` (UX §6). */
+export interface RequestDetail {
+  row: HistoryRow;
+  ip: string;
+  /** Raw query string, without the leading `?`; empty when there was none. */
+  query: string;
+  judgment: Judgment;
+  bands: Bands;
+  /** The deciding option's value and where it came from, at the deciding revision. */
+  setting: { key: string; value: string; source: OptionSource; rev: number };
+  /** The source's most recent requests, newest first (this one included). */
+  timeline: HistoryRow[];
+  /** Raw and decoded field values; null when `history.store_snippets` is off. */
+  fields: { field: FieldRef; raw: string; decoded: string; layers: string[] }[] | null;
+}
 
 export const VERDICTS: readonly Verdict[] = ['Allow', 'Monitor', 'Challenge', 'Block'];
 export const STAGES: readonly Stage[] = ['Recon', 'Enumeration', 'Exploitation', 'Exfiltration'];
