@@ -288,6 +288,10 @@ The CRS runs took 46 to 181 s each (`wall_s` in each JSON), the Venusflytrap rep
   not an interpolation. Venusflytrap was measured at its shipped thresholds only.
 - **No audit-log recomputation.** The paranoia and threshold curves come from separate blocking
   runs. They were not recomputed offline from one detection-only run.
+- **A corpus artefact favours CRS.** Rule 920350 (numeric-IP Host) fires on 84 % of dev attack
+  rows and 0.18 % of dev benign rows, because of how the corpus was recorded. It gives attack rows
+  anomaly points unrelated to the attack, so CRS recall here is inflated by an unmeasured amount.
+  See [`RESULTS-DQ5-fixes.md`](RESULTS-DQ5-fixes.md).
 - **SafeLine** is out of scope until the owner reviews its terms.
 
 ## Other checks run
