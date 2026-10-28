@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import { makeFixtures } from './fixtures';
 import { BANDS, PERIOD_MS, makeHistory, rowId } from './history';
+import { parse } from '../query';
 import type { Judgment, Verdict } from './types';
 
 const NOW = Date.UTC(2026, 9, 28, 14, 5, 0);
@@ -67,6 +68,35 @@ test('decided_by follows the engine rules (shield.rs cause_for / ban_cause)', ()
 
 test('only Allows are sampled, and every Allow is', () => {
   for (const { row } of HOUR) expect(row.sampled).toBe(row.verdict === 'Allow');
+});
+
+const HOUR_Q = { from: NOW - 3_600_000, to: NOW };
+
+test('a query filters the range newest first and pages with a cursor', () => {
+  const all = h.query({ ...HOUR_Q, q: '' }, []);
+  expect(all.total).toBe(360);
+  expect(all.rows).toHaveLength(100);
+  expect(all.rows.every((r, i, a) => i === 0 || a[i - 1].ts_ms > r.ts_ms)).toBe(true);
+  const page2 = h.query({ ...HOUR_Q, q: '', cursor: all.next }, []);
+  expect(page2.rows[0].ts_ms).toBeLessThan(all.rows[99].ts_ms);
+  expect(new Set([...all.rows, ...page2.rows].map((r) => r.id)).size).toBe(200);
+  const blocks = h.query({ ...HOUR_Q, q: 'verdict:block', limit: 1000 }, parse('verdict:block').terms);
+  expect(blocks.rows.length).toBe(blocks.total);
+  expect(blocks.next).toBeNull();
+  expect(blocks.rows.every((r) => r.verdict === 'Block')).toBe(true);
+});
+
+test('group_by counts every match in the range, largest first', () => {
+  const g = h.query({ ...HOUR_Q, q: '', group_by: 'verdict' }, []);
+  expect(g.rows).toEqual([]);
+  expect(g.groups!.reduce((a, x) => a + x.count, 0)).toBe(g.total);
+  expect(g.groups!.every((x, i, a) => i === 0 || a[i - 1].count >= x.count)).toBe(true);
+  const c = h.query({ ...HOUR_Q, q: '', group_by: 'construct' }, []);
+  expect(c.groups!.some((x) => x.value === 'sqli.union-select')).toBe(true);
+});
+
+test('the range is clipped to now and retention', () => {
+  expect(h.query({ from: NOW + 1, to: NOW + 3_600_000, q: '' }, []).total).toBe(0);
 });
 
 test('a detail carries the deciding bands, its timeline and snippets', () => {

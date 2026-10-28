@@ -78,3 +78,11 @@ test('Latest treats an aborted rejection as superseded, not as an error', async 
   const latest = new Latest();
   expect(await latest.run(async () => { throw SourceError.aborted(); })).toBeNull();
 });
+
+test('history rejects a syntax error as a 400 carrying the bad token', async () => {
+  const src = new FixtureSource({ now: () => NOW, live: false });
+  await expect(src.history({ q: 'verdict:block colour:red', from: NOW - 3_600_000, to: NOW }, call()))
+    .rejects.toMatchObject({ kind: 'bad_request', status: 400, detail: { pos: 14, len: 6 } });
+  const page = await src.history({ q: 'verdict:block', from: NOW - 3_600_000, to: NOW }, call());
+  expect(page.rows.length).toBeGreaterThan(0);
+});

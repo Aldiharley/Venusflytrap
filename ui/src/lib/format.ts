@@ -15,6 +15,13 @@ export function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString('en-GB', { hour12: false });
 }
 
+const DAY = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
+
+/** A row timestamp: the clock time, with the day when the range spans more than a day. */
+export function fmtStamp(ms: number, withDate: boolean): string {
+  return withDate ? `${DAY.format(ms)} ${fmtClock(ms)}` : fmtClock(ms);
+}
+
 export function fmtAgo(ms: number): string {
   if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))} s ago`;
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} min ago`;

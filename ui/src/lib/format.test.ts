@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { banText, fmtAgo, fmtCount, fmtRps } from './format';
+import { banText, fmtAgo, fmtClock, fmtCount, fmtRps, fmtStamp } from './format';
 
 test('rates', () => {
   expect(fmtRps(0)).toBe('0/s');
@@ -26,4 +26,10 @@ test('ban text changes once a minute', () => {
   expect(banText({ until_ms: now + 125 * 60_000 }, now)).toBe('Banned · 2 h 5 min left');
   expect(banText({ until_ms: now + 20_000 }, now)).toBe('Banned · < 1 min left');
   expect(banText({ until_ms: now - 1 }, now)).toBe('Ban expired');
+});
+
+test('row stamps add the day only for multi-day ranges', () => {
+  const ms = Date.UTC(2026, 9, 28, 14, 5, 12);
+  expect(fmtStamp(ms, false)).toBe(fmtClock(ms));
+  expect(fmtStamp(ms, true)).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$/);
 });

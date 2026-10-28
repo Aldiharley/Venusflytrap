@@ -2,11 +2,13 @@
 // generated from its index alone, so any time range can be queried and any id reopened.
 // Judgments follow vft-core's rules (shield.rs `cause_for`, `ban_cause`, `banned_judgment`;
 // score.rs: non-shadow points sum to the score, shadow contributions score 0).
+import { matches, type Term } from '../query';
 import type { Fixtures } from './fixtures';
 import { DECOYS } from './fixtures';
 import { mulberry32 } from './rng';
 import type {
-  Bands, BanRecord, Cause, Contribution, Family, FieldRef, HistoryRow, Judgment, RequestDetail, SourceView, Verdict,
+  Bands, BanRecord, Cause, Contribution, Family, FieldRef, GroupBy, HistoryPage, HistoryQuery, HistoryRow, Judgment,
+  RequestDetail, SourceView, Verdict,
 } from './types';
 
 export const PERIOD_MS = 10_000;
@@ -121,6 +123,18 @@ export interface History {
   row(k: number): HistoryRow;
   /** The full detail for an id, or null if it is malformed, in the future or past retention. */
   detail(id: string): RequestDetail | null;
+  /** Runs an already-parsed query over the range, clipped to now and retention. */
+  query(hq: HistoryQuery, terms: Term[]): HistoryPage;
+}
+
+function groupValue(r: HistoryRow, g: GroupBy): string | null {
+  switch (g) {
+    case 'src': return r.src_key;
+    case 'path': return r.path;
+    case 'construct': return r.construct;
+    case 'stage': return r.stage ?? 'Clean';
+    case 'verdict': return r.verdict;
+  }
 }
 
 export function makeHistory(f: Fixtures, now: () => number): History {
@@ -225,6 +239,39 @@ export function makeHistory(f: Fixtures, now: () => number): History {
         if (r.src_key === row.src_key) timeline.push(r);
       }
       return { ...detail, timeline };
+    },
+    query(hq, terms) {
+      const lo = Math.max(0, Math.ceil(hq.from / PERIOD_MS), Math.ceil((now() - RETENTION_MS) / PERIOD_MS));
+      const hi = Math.min(Math.floor((hq.to - 1) / PERIOD_MS), Math.floor(now() / PERIOD_MS));
+      const limit = Math.max(1, Math.min(1000, hq.limit ?? 100));
+      if (hq.group_by) {
+        const counts = new Map<string, number>();
+        let total = 0;
+        for (let k = hi; k >= lo; k--) {
+          const r = gen(k).row;
+          if (!matches(r, terms)) continue;
+          const v = groupValue(r, hq.group_by);
+          if (v === null) continue;
+          counts.set(v, (counts.get(v) ?? 0) + 1);
+          total++;
+        }
+        const groups = [...counts].map(([value, count]) => ({ value, count }))
+          .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+        return { rows: [], groups, total, next: null };
+      }
+      const start = hq.cursor ? Math.min(hi, Number(hq.cursor)) : hi;
+      const rows: HistoryRow[] = [];
+      let total = 0;
+      let next: string | null = null;
+      for (let k = hi; k >= lo; k--) {
+        const r = gen(k).row;
+        if (!matches(r, terms)) continue;
+        total++;
+        if (k > start) continue;
+        if (rows.length < limit) rows.push(r);
+        else next ??= String(k);
+      }
+      return { rows, groups: null, total, next };
     },
   };
 }

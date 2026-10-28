@@ -4,7 +4,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 // @axe-core/playwright resolves playwright-core 1.64.1 while @playwright/test brings 1.64.0, so their Page types differ nominally.
 type AxePage = ConstructorParameters<typeof AxeBuilder>[0]['page'];
 
-const ROUTES = ['/', '/topology', '/topology?view=table', '/chains', '/monitor'] as const;
+// The Monitor route with a query checks the highlighted query and blocked-row styling under axe.
+const ROUTES = ['/', '/topology', '/topology?view=table', '/chains', '/monitor', '/monitor?q=-verdict%3Aallow%20construct%3Asqli.*'] as const;
 
 // Something only the mounted screen has, so axe never runs against the bare loading shell.
 const MOUNTED: Record<(typeof ROUTES)[number], (page: Page) => Locator> = {
@@ -12,7 +13,8 @@ const MOUNTED: Record<(typeof ROUTES)[number], (page: Page) => Locator> = {
   '/topology': (page) => page.locator('.scene'),
   '/topology?view=table': (page) => page.getByRole('table').first(),
   '/chains': (page) => page.getByRole('grid'),
-  '/monitor': (page) => page.getByText('arrives with console plan SP6b'),
+  '/monitor': (page) => page.getByRole('grid'),
+  '/monitor?q=-verdict%3Aallow%20construct%3Asqli.*': (page) => page.getByRole('grid'),
 };
 
 async function collectCsp(page: Page) {
@@ -84,4 +86,25 @@ test('theme toggle persists across reloads', async ({ page }) => {
   await page.getByLabel('Dark').check();
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test('monitor: / focuses the query, Enter runs it, the grid adds filters and opens a request', async ({ page }) => {
+  await page.goto('/monitor?static');
+  await expect(page.getByRole('grid')).toBeVisible();
+  await page.locator('body').press('/');
+  const query = page.getByRole('combobox', { name: 'Query' });
+  await expect(query).toBeFocused();
+  await query.fill('verdict:block');
+  await query.press('Enter');
+  await expect(page).toHaveURL(/q=verdict%3Ablock/);
+  const first = page.locator('td[data-r="0"][data-c="0"]');
+  await first.focus();
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/q=verdict%3Ablock\+src%3A/);
+  await page.locator('td[data-r="0"][data-c="0"]').focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/requests\/R[0-9A-Z]+/);
 });

@@ -1,7 +1,11 @@
+import { parse } from '../query';
 import { SourceError } from './errors';
 import { BASE_RPS, makeFixtures, type Fixtures } from './fixtures';
+import { makeHistory, type History } from './history';
 import { mulberry32 } from './rng';
-import type { BanEntry, Counters, Dashboard, LiveFrame, Session, SourceView, StatusRecord } from './types';
+import type {
+  BanEntry, Counters, Dashboard, HistoryPage, HistoryQuery, LiveFrame, Session, SourceView, StatusRecord,
+} from './types';
 
 /** Every call carries the caller's AbortSignal; aborting rejects it with a SourceError of kind 'aborted'. */
 export interface Call { signal: AbortSignal }
@@ -18,6 +22,8 @@ export interface DataSource {
   board(call: Call): Promise<SourceView[]>;
   bans(call: Call): Promise<BanEntry[]>;
   decoys(call: Call): Promise<string[]>;
+  /** A history query; a syntax error rejects as `bad_request` with the token's `pos`/`len`. */
+  history(q: HistoryQuery, call: Call): Promise<HistoryPage>;
   /** Live frames until the returned function is called. */
   subscribe(onFrame: (f: LiveFrame) => void): () => void;
 }
@@ -50,6 +56,7 @@ export class FixtureSource implements DataSource {
   private readonly latencyMs: number;
   private readonly fault: FixtureOptions['fault'];
   protected readonly f: Fixtures;
+  protected readonly h: History;
   private board_: SourceView[];
 
   constructor(opts: FixtureOptions = {}) {
@@ -59,6 +66,7 @@ export class FixtureSource implements DataSource {
     this.latencyMs = opts.latencyMs ?? 0;
     this.fault = opts.fault;
     this.f = makeFixtures(this.now());
+    this.h = makeHistory(this.f, this.now);
     this.board_ = this.f.board;
   }
 
@@ -78,6 +86,14 @@ export class FixtureSource implements DataSource {
   board(call: Call) { return this.reply('board', call, () => this.board_); }
   bans(call: Call) { return this.reply('bans', call, () => this.f.bans); }
   decoys(call: Call) { return this.reply('decoys', call, () => this.f.decoys); }
+  history(hq: HistoryQuery, call: Call) {
+    return this.reply('history', call, () => {
+      if (!(hq.to > hq.from)) throw SourceError.fromStatus(400, 'The time range is empty.');
+      const p = parse(hq.q);
+      if (p.error) throw SourceError.fromStatus(400, p.error.msg, { pos: p.error.pos, len: p.error.len });
+      return this.h.query(hq, p.terms);
+    });
+  }
 
   subscribe(onFrame: (f: LiveFrame) => void): () => void {
     if (!this.live) return () => {};

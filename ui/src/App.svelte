@@ -15,7 +15,7 @@
     dashboard: () => import('./screens/Dashboard.svelte'),
     topology: () => import('./screens/Topology.svelte'),
     chains: () => import('./screens/Chains.svelte'),
-    monitor: placeholder,
+    monitor: () => import('./screens/Monitor.svelte'),
     honeypot: placeholder,
     settings: placeholder,
     keys: placeholder,

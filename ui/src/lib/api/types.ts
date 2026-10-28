@@ -112,6 +112,32 @@ export interface HistoryRow {
   sampled: boolean;
 }
 
+/** The group-by chips of UX §5. */
+export type GroupBy = 'src' | 'path' | 'construct' | 'stage' | 'verdict';
+export const GROUP_BYS: readonly GroupBy[] = ['src', 'path', 'construct', 'stage', 'verdict'];
+
+/** `POST /api/v1/history/query`. `from` is inclusive, `to` exclusive; both are required. */
+export interface HistoryQuery {
+  q: string;
+  from: number;
+  to: number;
+  group_by?: GroupBy | null;
+  /** Page size: default 100, at most 1000. */
+  limit?: number;
+  /** `next` from the previous page. */
+  cursor?: string | null;
+}
+export interface HistoryPage {
+  /** Newest first; empty when grouped. */
+  rows: HistoryRow[];
+  /** Group value and count, largest first; null when not grouped. */
+  groups: { value: string; count: number }[] | null;
+  /** Matches in the whole range (rows, or the sum of the groups). */
+  total: number;
+  /** Cursor for the next page, or null on the last one. */
+  next: string | null;
+}
+
 /** `GET /api/v1/requests/{id}` (UX §6). */
 export interface RequestDetail {
   row: HistoryRow;
