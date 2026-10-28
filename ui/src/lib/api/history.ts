@@ -78,14 +78,13 @@ const tenth = (n: number) => Math.round(n * 10) / 10;
 const pick = <T>(rnd: () => number, xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)];
 const between = (rnd: () => number, lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1));
 
-/** Splits `score` into points: the top item keeps most, the rest corroborate; exact to 0.1. */
-function split(score: number, n: number, rnd: () => number): number[] {
+/** Splits `score` into the top item's points and one corroborating item's
+ *  (2–5 %, as 10 % of a latent's raw points would add); exact to 0.1. */
+function split(score: number, n: 1 | 2, rnd: () => number): number[] {
   const total = score * 10;
   if (n === 1) return [score];
-  const top = Math.round(total * (0.8 + 0.12 * rnd()));
-  const rest = total - top;
-  const second = n === 2 ? rest : Math.round(rest * 0.6);
-  return [top, second, ...(n === 3 ? [rest - second] : [])].map((t) => t / 10);
+  const top = Math.round(total * (0.95 + 0.03 * rnd()));
+  return [top, total - top].map((t) => t / 10);
 }
 
 interface Gen { row: HistoryRow; detail: Omit<RequestDetail, 'timeline' | 'ban'> }
@@ -100,13 +99,19 @@ function bandOf(score: number): Verdict {
 function detection(score: number, a: Attack, construct: string, rnd: () => number): { contributions: Contribution[]; decided_by: Cause } {
   const verdict = bandOf(score);
   const n = 1 + Math.floor(rnd() * 3);
-  const pts = split(score, n, rnd);
+  // As the engine scores (D10): the top keeps its points, an independent item
+  // on another field shares the corroboration, and the derived items on the
+  // top's own field (ai.anomaly-score, api.type-violation) add nothing.
+  const pts = split(score, n === 1 ? 1 : 2, rnd);
   const value = verdict === 'Monitor' ? 'Suspicious' : 'Dangerous';
   const contributions: Contribution[] = [
     { engine: a.engine, field: a.field, construct, family: a.family, value, weight: tenth(0.6 + 0.4 * rnd()), points: pts[0], shadow: false },
   ];
-  if (n >= 2) contributions.push({ engine: 'ai', field: a.field, construct: null, family: null, value: 'Suspicious', weight: 0.6, points: pts[1], shadow: false });
-  if (n >= 3) contributions.push({ engine: 'api-safety', field: a.field, construct: 'api.type-violation', family: a.family, value: 'Dangerous', weight: 0.7, points: pts[2], shadow: false });
+  if (n >= 2) contributions.push({ engine: 'graph-taint', field: { loc: 'Header', name: 'sec-ch-ua' }, construct: 'cmd.shell-meta', family: 'CommandInjection', value: 'Suspicious', weight: 0.5, points: pts[1], shadow: false });
+  if (n >= 3) {
+    contributions.push({ engine: 'ai', field: a.field, construct: 'ai.anomaly-score', family: 'Anomaly', value: 'Suspicious', weight: 0.6, points: 0, shadow: false });
+    contributions.push({ engine: 'api-safety', field: a.field, construct: 'api.type-violation', family: a.family, value: 'Dangerous', weight: 0.7, points: 0, shadow: false });
+  }
   const shadow = SHADOW[a.family];
   if (shadow && rnd() < 0.45) {
     contributions.push({ engine: 'graph-taint', field: a.field, construct: shadow, family: a.family, value: 'Suspicious', weight: 0.5, points: 0, shadow: true });
