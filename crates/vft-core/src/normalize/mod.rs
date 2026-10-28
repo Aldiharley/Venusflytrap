@@ -26,6 +26,10 @@ pub struct Normalized {
     pub text: String,
     /// Decoded text with original case preserved (for logging/XSS casing).
     pub cased: String,
+    /// `text` with comments kept (whitespace still canonicalized, lowercased).
+    /// `Some` only when canonicalization removed a comment, so the graph can
+    /// also read the bytes a comment would otherwise hide (DQ5).
+    pub kept: Option<String>,
     /// Number of decode layers peeled.
     pub layers: u8,
     pub flags: Flags,
@@ -103,7 +107,7 @@ pub fn decode(input: &str, opts: &Options) -> Decoded {
 /// `d`'s flags and layers. The result is cut (`truncated`) when the fold passes
 /// `max_payload` chars or the raw piece was bounded.
 pub fn fold(d: &Decoded, text: &str, opts: &Options) -> Normalized {
-    finish(fold_stage(d, text, opts))
+    finish(fold_stage(d, text, opts), opts)
 }
 
 /// [`fold`] for a part that is split when cut: a cut stops after folding and
@@ -113,7 +117,7 @@ pub fn fold_unless_cut(d: &Decoded, text: &str, opts: &Options) -> Result<Normal
     if f.truncated {
         Err(f.work)
     } else {
-        Ok(finish(f))
+        Ok(finish(f, opts))
     }
 }
 
@@ -135,12 +139,15 @@ fn fold_stage(d: &Decoded, text: &str, opts: &Options) -> Folded {
     Folded { folded, flags: d.flags.clone(), layers: d.layers, truncated: d.truncated || cut, work }
 }
 
-fn finish(f: Folded) -> Normalized {
+fn finish(f: Folded, opts: &Options) -> Normalized {
     let mut flags = f.flags;
     let canon = canonicalize_ws_comments(&f.folded, &mut flags);
+    let kept = (flags.had_comment && !opts.disabled.is(&sinks::DECODE_KEEP_COMMENTS))
+        .then(|| canonicalize_ws(&f.folded).to_lowercase());
     Normalized {
         text: canon.to_lowercase(),
         cased: canon,
+        kept,
         layers: f.layers,
         flags,
         truncated: f.truncated,
@@ -449,6 +456,11 @@ fn count_scripts(s: &str) -> usize {
         }
     }
     [latin, cyrillic, greek].iter().filter(|x| **x).count()
+}
+
+/// Collapse runs of whitespace to one space and trim, keeping comments.
+pub fn canonicalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Collapse whitespace, strip SQL comments, flag conditional comments.

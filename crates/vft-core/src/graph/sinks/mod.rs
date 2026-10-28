@@ -84,6 +84,7 @@ pub static DECODE_PERCENT_LOSSY: ConstructInfo = ConstructInfo { id: "decode.per
 pub static DECODE_ENTITY: ConstructInfo = ConstructInfo { id: "decode.entity", family: None, kind: ConstructKind::Decoder, summary: "HTML entities: numeric, plus a fixed set of named ones" };
 pub static DECODE_ESC_HEX: ConstructInfo = ConstructInfo { id: "decode.esc-hex", family: None, kind: ConstructKind::Decoder, summary: "\\xNN and \\uNNNN escapes" };
 pub static DECODE_B64_WHOLE: ConstructInfo = ConstructInfo { id: "decode.b64-whole", family: None, kind: ConstructKind::Decoder, summary: "a field that is base64 as a whole; also tried before '+' becomes a space" };
+pub static DECODE_KEEP_COMMENTS: ConstructInfo = ConstructInfo { id: "decode.keep-comments", family: None, kind: ConstructKind::Decoder, summary: "when a comment was stripped, the graph also reads the field with comments kept and adds the constructs formed there, so a comment cannot hide the text after it" };
 pub static PARSE_BODY_JSON: ConstructInfo = ConstructInfo { id: "parse.body-json", family: None, kind: ConstructKind::Decoder, summary: "body classification: one json:<pointer> field per JSON string leaf; ndjson line by line" };
 
 static REGISTRY: &[&ConstructInfo] = &[
@@ -131,6 +132,7 @@ static REGISTRY: &[&ConstructInfo] = &[
     &DECODE_ENTITY,
     &DECODE_ESC_HEX,
     &DECODE_B64_WHOLE,
+    &DECODE_KEEP_COMMENTS,
     &PARSE_BODY_JSON,
     &shell::GATE_CMD_POSITION,
 ];
