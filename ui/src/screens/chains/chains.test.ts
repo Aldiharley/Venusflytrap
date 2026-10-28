@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { createEvent, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { beforeAll, expect, test } from 'vitest';
 import type { SourceView } from '../../lib/api/types';
@@ -57,6 +57,35 @@ test('Apply re-sorts and returns focus to the same source, even after focus move
   expect(keyOf(grid.querySelector('td[data-r="0"]'))).toBe(bumpKey);
   expect(keyOf(document.activeElement)).toBe(focusedKey);
   expect(document.activeElement?.getAttribute('data-r')).not.toBe('0');
+  app.board = original;
+});
+
+test('mouse-down on Apply keeps focus in the grid, so browsers that do not focus buttons on click still apply', async () => {
+  // Safari and Firefox on macOS never focus a clicked button: focus would leave the grid for
+  // <body>, unfreeze the order and unmount the bar before the click lands.
+  router.navigate('/chains');
+  const original = app.board;
+  render(Chains, { props: { title: 'Attack chains' } });
+  const grid = screen.getByRole('grid');
+  const first = grid.querySelector<HTMLElement>('[tabindex="0"]')!;
+  const focusedKey = keyOf(first);
+  first.focus();
+  const rows = grid.querySelectorAll('tbody tr');
+  const bumpKey = keyOf(rows[rows.length - 1].querySelector('td'))!;
+  app.board = original.map((s: SourceView) =>
+    s.key === bumpKey ? { ...s, stage: 'Exfiltration' as const, last_seen_ms: Date.now() + 3_600_000 } : s);
+  await tick();
+  const apply = await screen.findByRole('button', { name: /Apply/ });
+  const down = createEvent.mouseDown(apply);
+  await fireEvent(apply, down);
+  expect(down.defaultPrevented).toBe(true);
+  expect(keyOf(document.activeElement)).toBe(focusedKey); // still on the cell, bar still mounted
+  expect(screen.queryByRole('button', { name: /Apply/ })).not.toBeNull();
+  await fireEvent.click(apply);
+  await tick();
+  await tick();
+  expect(keyOf(grid.querySelector('td[data-r="0"]'))).toBe(bumpKey);
+  expect(keyOf(document.activeElement)).toBe(focusedKey);
   app.board = original;
 });
 
