@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, type Component } from 'svelte';
   import type { Attachment } from 'svelte/attachments';
+  import { toSourceError, type SourceError } from './lib/api/errors';
   import { FixtureSource } from './lib/api/source';
   import ToastStack from './lib/components/ToastStack.svelte';
   import NavRail from './lib/shell/NavRail.svelte';
@@ -14,11 +15,11 @@
     dashboard: () => import('./screens/Dashboard.svelte'),
     topology: () => import('./screens/Topology.svelte'),
     chains: () => import('./screens/Chains.svelte'),
-    monitor: placeholder,
+    monitor: () => import('./screens/Monitor.svelte'),
     honeypot: placeholder,
     settings: placeholder,
     keys: placeholder,
-    request: placeholder,
+    request: () => import('./screens/RequestDetails.svelte'),
     source: placeholder,
     notfound: placeholder,
   };
@@ -29,16 +30,16 @@
   };
 
   let ready = $state(false);
-  let failed = $state(false);
+  let failed = $state<SourceError | null>(null);
   let boot = 0;
   function load() {
     const mine = ++boot;
-    failed = false;
+    failed = null;
     ready = false;
     const live = !new URLSearchParams(location.search).has('static');
     app.start(new FixtureSource({ live })).then(
       () => { if (mine === boot) ready = true; },
-      () => { if (mine === boot) failed = true; },
+      (e) => { if (mine === boot) failed = toSourceError(e); },
     );
   }
   onMount(() => {
@@ -60,6 +61,14 @@
     focusPending = false;
     el.querySelector<HTMLElement>('h1')?.focus();
   };
+
+  // A screen chunk that fails to load (dropped connection, stale deploy) gets an error and Retry;
+  // Retry re-runs the import and keeps focus on the heading.
+  let attempt = $state(0);
+  function retryScreen() {
+    focusPending = true;
+    attempt++;
+  }
   $effect(() => { document.title = `${TITLES[router.route.name]} · Venusflytrap`; });
 </script>
 
@@ -69,10 +78,18 @@
   <NavRail />
   <main id="main" tabindex="-1">
     {#if ready}
-      {#key router.path}
+      {#key `${router.path}#${attempt}`}
         {#await SCREENS[router.route.name]() then mod}
           <div {@attach focusScreen}>
             <mod.default title={TITLES[router.route.name]} param={router.route.param} />
+          </div>
+        {:catch}
+          <div {@attach focusScreen}>
+            <h1 tabindex="-1">{TITLES[router.route.name]}</h1>
+            <div class="card failed" role="alert">
+              <p>This screen could not be loaded. Check the connection, then retry.</p>
+              <button class="btn btn-primary" onclick={retryScreen}>Retry</button>
+            </div>
           </div>
         {/await}
       {/key}
@@ -80,6 +97,7 @@
       <h1 tabindex="-1">{TITLES[router.route.name]}</h1>
       <div class="card failed" role="alert">
         <p>The console could not load its data from the source.</p>
+        <p class="secondary">{failed.status ? `HTTP ${failed.status} · ` : ''}{failed.message}</p>
         <button class="btn btn-primary" onclick={load}>Retry</button>
       </div>
     {:else}

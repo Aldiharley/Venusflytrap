@@ -1,3 +1,4 @@
+import { toSourceError } from '../api/errors';
 import type { DataSource } from '../api/source';
 import type { Counters, LiveFrame, LiveState, Session, SourceView, StatusRecord } from '../api/types';
 
@@ -24,15 +25,24 @@ class AppState {
   private stops: (() => void)[] = [];
   /** Bumped by stop(); a start() that finds it changed after its await was stopped or superseded. */
   private gen = 0;
+  private ctl: AbortController | null = null;
 
+  /** Loads the shell's data and subscribes. Rejects with a SourceError; resolves quietly if stopped or superseded. */
   async start(src: DataSource) {
     this.stop(); // a second start supersedes the first
     const gen = this.gen;
+    const ctl = (this.ctl = new AbortController());
     this.src = src;
-    const [session, status, counters, board] = await Promise.all([
-      src.session(), src.status(), src.counters(), src.board(),
-    ]);
+    const call = { signal: ctl.signal };
+    let loaded: [Session, StatusRecord, Counters, SourceView[]];
+    try {
+      loaded = await Promise.all([src.session(call), src.status(call), src.counters(call), src.board(call)]);
+    } catch (e) {
+      if (gen !== this.gen) return;
+      throw toSourceError(e);
+    }
     if (gen !== this.gen) return; // stopped or superseded while loading: register nothing
+    const [session, status, counters, board] = loaded;
     this.session = session;
     this.status = status;
     this.counters = counters;
@@ -47,6 +57,8 @@ class AppState {
 
   stop() {
     this.gen++;
+    this.ctl?.abort();
+    this.ctl = null;
     for (const s of this.stops.splice(0)) s();
   }
 

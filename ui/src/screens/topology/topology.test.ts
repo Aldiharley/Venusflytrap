@@ -1,7 +1,10 @@
 import { render, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { expect, test } from 'vitest';
+import { SourceError } from '../../lib/api/errors';
 import { makeFixtures } from '../../lib/api/fixtures';
+import { FixtureSource } from '../../lib/api/source';
+import { app } from '../../lib/state/app.svelte';
 import { motion } from '../../lib/state/theme.svelte';
 import Topology from '../Topology.svelte';
 import { buildModel, clusterRates } from './model';
@@ -147,4 +150,14 @@ test('Pause only hides packets: the map stays the default view', () => {
   } finally {
     motion.set(false);
   }
+});
+
+test('a failed dashboard load shows an inline error card and keeps the map', async () => {
+  await app.start(new FixtureSource({ live: false, fault: (m) => (m === 'dashboard' ? SourceError.fromStatus(502, 'bad gateway') : null) }));
+  const r = render(Topology, { props: { title: 'Traffic topology' } });
+  const alert = await within(r.container).findByRole('alert');
+  expect(alert.textContent).toContain('HTTP 502');
+  expect(within(alert).getByRole('button', { name: 'Retry' })).toBeTruthy();
+  expect(r.container.querySelector('.scene')).toBeTruthy();
+  app.stop();
 });

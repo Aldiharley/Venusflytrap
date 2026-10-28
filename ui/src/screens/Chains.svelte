@@ -168,7 +168,9 @@
 {#if frozen && pending > 0}
   <div class="pending glass" role="status">
     Order paused while you navigate — {pending} {pending === 1 ? 'update' : 'updates'}.
-    <button class="btn btn-sm btn-primary" onclick={apply}>Apply (R)</button>
+    <!-- Safari and Firefox on macOS do not focus a clicked button, so mouse-down would drop focus to <body>,
+         unfreeze the grid and unmount this bar before the click. Keeping focus where it is lets the click land. -->
+    <button class="btn btn-sm btn-primary" onmousedown={(e) => e.preventDefault()} onclick={apply}>Apply (R)</button>
   </div>
 {/if}
 </div>

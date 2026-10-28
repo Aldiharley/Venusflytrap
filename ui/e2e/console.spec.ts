@@ -4,7 +4,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 // @axe-core/playwright resolves playwright-core 1.64.1 while @playwright/test brings 1.64.0, so their Page types differ nominally.
 type AxePage = ConstructorParameters<typeof AxeBuilder>[0]['page'];
 
-const ROUTES = ['/', '/topology', '/topology?view=table', '/chains', '/monitor'] as const;
+// The Monitor route with a query checks the highlighted query and blocked-row styling under axe.
+const ROUTES = ['/', '/topology', '/topology?view=table', '/chains', '/monitor', '/monitor?q=-verdict%3Aallow%20construct%3Asqli.*'] as const;
 
 // Something only the mounted screen has, so axe never runs against the bare loading shell.
 const MOUNTED: Record<(typeof ROUTES)[number], (page: Page) => Locator> = {
@@ -12,7 +13,8 @@ const MOUNTED: Record<(typeof ROUTES)[number], (page: Page) => Locator> = {
   '/topology': (page) => page.locator('.scene'),
   '/topology?view=table': (page) => page.getByRole('table').first(),
   '/chains': (page) => page.getByRole('grid'),
-  '/monitor': (page) => page.getByText('arrives with console plan SP6b'),
+  '/monitor': (page) => page.getByRole('grid'),
+  '/monitor?q=-verdict%3Aallow%20construct%3Asqli.*': (page) => page.getByRole('grid'),
 };
 
 async function collectCsp(page: Page) {
@@ -85,3 +87,50 @@ test('theme toggle persists across reloads', async ({ page }) => {
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
+
+test('monitor: / focuses the query, Enter runs it, the grid adds filters and opens a request', async ({ page }) => {
+  await page.goto('/monitor?static');
+  await expect(page.getByRole('grid')).toBeVisible();
+  await page.locator('body').press('/');
+  const query = page.getByRole('combobox', { name: 'Query' });
+  await expect(query).toBeFocused();
+  await query.fill('verdict:block');
+  await query.press('Enter');
+  await expect(page).toHaveURL(/q=verdict%3Ablock/);
+  const first = page.locator('td[data-r="0"][data-c="0"]');
+  await first.focus();
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/q=verdict%3Ablock\+src%3A/);
+  await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
+  await expect(page.getByRole('grid')).toBeVisible();
+  await page.locator('td[data-r="1"][data-c="0"]').focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/\/requests\/R[0-9A-Z]+/);
+  // Request details: focus on the h1, then Tab reaches the why sentence's setting link.
+  await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
+  const why = page.getByRole('region', { name: 'Why this verdict' });
+  await expect(why).toContainText('Blocked: score');
+  await expect(why.getByRole('link', { name: 'scoring.block_at' }).first()).toHaveAttribute('href', '/settings?highlight=scoring.block_at');
+  // Back returns to Monitor with the opened row focused (kept in history state).
+  await page.goBack();
+  await expect(page.locator('td[data-r="1"][data-c="0"]')).toBeFocused();
+});
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`request details in ${scheme}: no serious axe violations, no CSP violations`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    const csp = await collectCsp(page);
+    // A blocked request with corroborating evidence (the richest why panel).
+    await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
+    await page.locator('td[data-c="0"] a').first().click();
+    await expect(page.getByRole('region', { name: 'Contributions' })).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    const results = await new AxeBuilder({ page: page as unknown as AxePage }).analyze();
+    const bad = results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
+    expect(bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+    expect(await csp()).toEqual([]);
+  });
+}
