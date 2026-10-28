@@ -1,0 +1,67 @@
+# DQ4 external baselines: ModSecurity v3 + CRS and Coraza + CRS, each in front of one
+# stand-in upstream that answers 200. Only the two WAF ports are published, and only
+# on 127.0.0.1; the upstream sits on an internal network with no published port.
+#
+# Settings come from the environment (defaults in brackets):
+#   MODSEC_PL [1], MODSEC_THRESHOLD [5]   -> BLOCKING_PARANOIA, ANOMALY_INBOUND
+#   CORAZA_PL [1], CORAZA_THRESHOLD [5]   -> PARANOIA, BLOCKING_PARANOIA, ANOMALY_INBOUND
+# Request body limits are set to Venusflytrap's 1 MiB (`limits.max_body`) on both
+# engines, and the JSON audit log keeps parts A, B, H and Z only (headers and rule
+# messages, no bodies, so records stay under Docker's 16 KiB log-line split); every
+# other variable is the image default.
+#
+#   docker compose -f eval/baselines/docker-compose.yml up -d
+#   py -I -X utf8 eval/replay_external.py replay --target 127.0.0.1:18080 ...   (ModSecurity)
+#   py -I -X utf8 eval/replay_external.py replay --target 127.0.0.1:18081 ...   (Coraza)
+#   docker compose -f eval/baselines/docker-compose.yml down
+name: vft-dq4
+
+x-tcp: &tcp
+  sysctls:
+    net.ipv4.ip_local_port_range: "1024 65000"
+    net.ipv4.tcp_tw_reuse: "1"
+
+services:
+  upstream:
+    image: owasp/modsecurity-crs:4.30.0-nginx-202610180210@sha256:7698c48a41a43138ae317feeec964d1515b861cc1d9e50617bc1cdfe9f314e1d
+    entrypoint: ["nginx", "-g", "daemon off;", "-c", "/etc/dq4/upstream.conf"]
+    command: []
+    volumes:
+      - ./upstream.conf:/etc/dq4/upstream.conf:ro
+    networks: [backend]
+
+  modsecurity:
+    image: owasp/modsecurity-crs:4.30.0-nginx-202610180210@sha256:7698c48a41a43138ae317feeec964d1515b861cc1d9e50617bc1cdfe9f314e1d
+    <<: *tcp
+    environment:
+      BACKEND: http://upstream:8080
+      BLOCKING_PARANOIA: ${MODSEC_PL:-1}
+      ANOMALY_INBOUND: ${MODSEC_THRESHOLD:-5}
+      MODSEC_REQ_BODY_LIMIT: "1048576"
+      MODSEC_REQ_BODY_NOFILES_LIMIT: "1048576"
+      MODSEC_AUDIT_LOG_PARTS: ABHZ
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks: [backend, front]
+    depends_on: [upstream]
+
+  coraza:
+    image: ghcr.io/coreruleset/coraza-crs:4.30.0-caddy-alpine-202610271210@sha256:20294a0df7b6cf1db4b419e6a35757cd133960fc26a615e4c7c8850a154eefea
+    <<: *tcp
+    environment:
+      BACKEND: upstream:8080
+      PARANOIA: ${CORAZA_PL:-1}
+      BLOCKING_PARANOIA: ${CORAZA_PL:-1}
+      ANOMALY_INBOUND: ${CORAZA_THRESHOLD:-5}
+      CORAZA_REQ_BODY_LIMIT: "1048576"
+      CORAZA_REQ_BODY_NOFILES_LIMIT: "1048576"
+      CORAZA_AUDIT_LOG_PARTS: ABHZ
+    ports:
+      - "127.0.0.1:18081:8080"
+    networks: [backend, front]
+    depends_on: [upstream]
+
+networks:
+  backend:
+    internal: true
+  front: {}
