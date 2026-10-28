@@ -26,6 +26,7 @@ function gatedSource(): { src: DataSource; release: () => void; subscribed: () =
     bans: (c) => real.bans(c),
     decoys: (c) => real.decoys(c),
     history: (q, c) => real.history(q, c),
+    request: (id, c) => real.request(id, c),
     subscribe: (_cb: (f: LiveFrame) => void) => { subs++; return () => { unsubs++; }; },
   };
   return { src, release, subscribed: () => subs, unsubscribed: () => unsubs };
@@ -76,7 +77,7 @@ test('stop() aborts the calls start() has in flight', async () => {
   const src: DataSource = {
     session: (c) => real.session(spy(c)), status: (c) => real.status(spy(c)), counters: (c) => real.counters(spy(c)),
     dashboard: (a, b, c) => real.dashboard(a, b, c), board: (c) => real.board(spy(c)),
-    bans: (c) => real.bans(c), decoys: (c) => real.decoys(c), history: (q, c) => real.history(q, c), subscribe: () => () => {},
+    bans: (c) => real.bans(c), decoys: (c) => real.decoys(c), history: (q, c) => real.history(q, c), request: (id, c) => real.request(id, c), subscribe: () => () => {},
   };
   const started = app.start(src);
   app.stop();

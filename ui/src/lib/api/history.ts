@@ -6,6 +6,7 @@ import { matches, type Term } from '../query';
 import type { Fixtures } from './fixtures';
 import { DECOYS } from './fixtures';
 import { mulberry32 } from './rng';
+import { banView } from './views';
 import type {
   Bands, BanRecord, Cause, Contribution, Family, FieldRef, GroupBy, HistoryPage, HistoryQuery, HistoryRow, Judgment,
   RequestDetail, SourceView, Verdict,
@@ -87,7 +88,7 @@ function split(score: number, n: number, rnd: () => number): number[] {
   return [top, second, ...(n === 3 ? [rest - second] : [])].map((t) => t / 10);
 }
 
-interface Gen { row: HistoryRow; detail: Omit<RequestDetail, 'timeline'> }
+interface Gen { row: HistoryRow; detail: Omit<RequestDetail, 'timeline' | 'ban'> }
 
 function bandOf(score: number): Verdict {
   if (score >= BANDS.block_at) return 'Block';
@@ -238,7 +239,8 @@ export function makeHistory(f: Fixtures, now: () => number): History {
         const r = j === k ? row : gen(j).row;
         if (r.src_key === row.src_key) timeline.push(r);
       }
-      return { ...detail, timeline };
+      const rec = f.banRecords.get(row.src_key);
+      return { ...detail, ban: rec ? banView(rec) : null, timeline };
     },
     query(hq, terms) {
       const lo = Math.max(0, Math.ceil(hq.from / PERIOD_MS), Math.ceil((now() - RETENTION_MS) / PERIOD_MS));

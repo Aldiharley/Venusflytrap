@@ -4,7 +4,7 @@ import { BASE_RPS, makeFixtures, type Fixtures } from './fixtures';
 import { makeHistory, type History } from './history';
 import { mulberry32 } from './rng';
 import type {
-  BanEntry, Counters, Dashboard, HistoryPage, HistoryQuery, LiveFrame, Session, SourceView, StatusRecord,
+  BanEntry, Counters, Dashboard, HistoryPage, HistoryQuery, LiveFrame, RequestDetail, Session, SourceView, StatusRecord,
 } from './types';
 
 /** Every call carries the caller's AbortSignal; aborting rejects it with a SourceError of kind 'aborted'. */
@@ -24,6 +24,8 @@ export interface DataSource {
   decoys(call: Call): Promise<string[]>;
   /** A history query; a syntax error rejects as `bad_request` with the token's `pos`/`len`. */
   history(q: HistoryQuery, call: Call): Promise<HistoryPage>;
+  /** One stored request with its full judgment; an unknown or expired id rejects as `not_found`. */
+  request(id: string, call: Call): Promise<RequestDetail>;
   /** Live frames until the returned function is called. */
   subscribe(onFrame: (f: LiveFrame) => void): () => void;
 }
@@ -86,6 +88,13 @@ export class FixtureSource implements DataSource {
   board(call: Call) { return this.reply('board', call, () => this.board_); }
   bans(call: Call) { return this.reply('bans', call, () => this.f.bans); }
   decoys(call: Call) { return this.reply('decoys', call, () => this.f.decoys); }
+  request(id: string, call: Call) {
+    return this.reply('request', call, () => {
+      const d = this.h.detail(id);
+      if (!d) throw SourceError.fromStatus(404, 'Request not found.');
+      return d;
+    });
+  }
   history(hq: HistoryQuery, call: Call) {
     return this.reply('history', call, () => {
       if (!(hq.to > hq.from)) throw SourceError.fromStatus(400, 'The time range is empty.');

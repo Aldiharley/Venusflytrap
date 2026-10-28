@@ -148,6 +148,8 @@ export interface RequestDetail {
   bands: Bands;
   /** The deciding option's value and where it came from, at the deciding revision. */
   setting: { key: string; value: string; source: OptionSource; rev: number };
+  /** The source's ban now, if any (for "Source banned until hh:mm"). */
+  ban: BanView | null;
   /** The source's most recent requests, newest first (this one included). */
   timeline: HistoryRow[];
   /** Raw and decoded field values; null when `history.store_snippets` is off. */

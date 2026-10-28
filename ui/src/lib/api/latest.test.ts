@@ -86,3 +86,11 @@ test('history rejects a syntax error as a 400 carrying the bad token', async () 
   const page = await src.history({ q: 'verdict:block', from: NOW - 3_600_000, to: NOW }, call());
   expect(page.rows.length).toBeGreaterThan(0);
 });
+
+test('request answers a stored id and rejects an unknown one as not_found', async () => {
+  const src = new FixtureSource({ now: () => NOW, live: false });
+  const page = await src.history({ q: '', from: NOW - 3_600_000, to: NOW, limit: 1 }, call());
+  const d = await src.request(page.rows[0].id, call());
+  expect(d.row).toEqual(page.rows[0]);
+  await expect(src.request('R0', call())).rejects.toMatchObject({ kind: 'not_found', status: 404 });
+});

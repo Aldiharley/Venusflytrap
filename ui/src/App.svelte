@@ -19,7 +19,7 @@
     honeypot: placeholder,
     settings: placeholder,
     keys: placeholder,
-    request: placeholder,
+    request: () => import('./screens/RequestDetails.svelte'),
     source: placeholder,
     notfound: placeholder,
   };

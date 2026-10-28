@@ -3,6 +3,11 @@
 Svelte 5 + Vite SPA. In this stage every screen reads deterministic fixtures through
 `src/lib/api/source.ts` (`FixtureSource`); SP5 adds the HTTP + SSE source.
 
+Wire types come from `src/gen` (generated from vft-core by ts-rs; never edit by hand, check with
+`cargo test -p vft-core --features ts --test ts_bindings`). `src/lib/api/types.ts` re-exports them and
+adds the provisional view types. Every `DataSource` call takes `{ signal }` and fails with a typed
+`SourceError`; screens load through `Latest`, which aborts the previous call and drops stale responses.
+
     npm install
     npm run dev          # http://localhost:5173 (append ?static to stop the simulated live feed)
     npm test             # unit and component tests (Vitest + jsdom)
