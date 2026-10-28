@@ -51,7 +51,7 @@ test('a static FixtureSource emits no frames', async () => {
   await new Promise((r) => setTimeout(r, 30));
   stop();
   expect(frames).toBe(0);
-  expect((await src.board()).length).toBeGreaterThan(8);
+  expect((await src.board({ signal: new AbortController().signal })).length).toBeGreaterThan(8);
 });
 
 test('a live FixtureSource emits counters and board frames', async () => {

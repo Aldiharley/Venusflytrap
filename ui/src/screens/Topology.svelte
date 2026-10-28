@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { SourceError } from '../lib/api/errors';
+  import { Latest } from '../lib/api/latest';
   import type { Dashboard } from '../lib/api/types';
+  import ErrorCard from '../lib/components/ErrorCard.svelte';
   import { Pause, Play, Table2 } from '../lib/icons';
   import { fmtCount } from '../lib/format';
   import { app } from '../lib/state/app.svelte';
@@ -13,16 +16,22 @@
 
   let { title }: { title: string } = $props();
   let dashboard = $state<Dashboard | null>(null);
+  let error = $state<SourceError | null>(null);
+  const latest = new Latest();
 
+  // Route groups come from the dashboard aggregate; on failure the last one stays on the map.
   async function load() {
-    if (!app.src) return;
+    const src = app.src;
+    if (!src) return;
     const to = Date.now();
-    dashboard = await app.src.dashboard(to - 3_600_000, to);
+    const r = await latest.run((call) => src.dashboard(to - 3_600_000, to, call));
+    if (!r) return;
+    if (r.ok) { dashboard = r.value; error = null; } else error = r.error;
   }
   onMount(() => {
     load();
     const t = setInterval(load, 60_000);
-    return () => clearInterval(t);
+    return () => { clearInterval(t); latest.abort(); };
   });
 
   const view = $derived(router.search.get('view') ?? (motion.osReduced ? 'table' : 'map'));
@@ -49,6 +58,8 @@
   <p class="secondary status">Live: {app.liveLabel} · dropped {fmtCount(app.counters?.dropped_total ?? 0)}</p>
 </header>
 
+{#if error}<div class="error"><ErrorCard {error} onretry={load} /></div>{/if}
+
 <div class="layout">
   <div class="stage">
     {#if view === 'table'}
@@ -73,6 +84,7 @@
 <style>
   .head { display: flex; align-items: baseline; gap: var(--vf-space-4); margin-bottom: var(--vf-space-4); }
   .status { font-size: var(--vf-fs-sm); }
+  .error { margin-bottom: var(--vf-space-3); }
   .layout { display: grid; grid-template-columns: minmax(0, 1fr) 48px; gap: var(--vf-space-3); }
   .stage { position: relative; }
   .rail { display: grid; align-content: start; gap: var(--vf-space-1); padding: var(--vf-space-1); border-radius: var(--vf-radius-md); box-shadow: var(--vf-shadow-1); }

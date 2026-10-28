@@ -1,8 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { SourceError } from '../lib/api/errors';
+  import { Latest } from '../lib/api/latest';
   import { STAGES, VERDICTS, type Dashboard } from '../lib/api/types';
   import { propUrl } from '../lib/assets';
   import EmptyState from '../lib/components/EmptyState.svelte';
+  import ErrorCard from '../lib/components/ErrorCard.svelte';
   import KpiTile from '../lib/components/KpiTile.svelte';
   import Link from '../lib/components/Link.svelte';
   import Region from '../lib/components/Region.svelte';
@@ -16,7 +19,9 @@
   const RANGES: [string, number][] = [['1 h', 3_600_000], ['6 h', 6 * 3_600_000], ['24 h', 24 * 3_600_000], ['7 d', 7 * 24 * 3_600_000]];
 
   let data = $state<Dashboard | null>(null);
+  let error = $state<SourceError | null>(null);
   let updatedAt = $state(0);
+  const latest = new Latest();
 
   const span = $derived.by(() => {
     const from = Number(router.search.get('from'));
@@ -25,15 +30,22 @@
   });
 
   async function load() {
-    if (!app.src) return;
+    const src = app.src;
+    if (!src) return;
     const to = Date.now();
-    data = await app.src.dashboard(to - span, to);
-    updatedAt = Date.now();
+    const from = to - span;
+    const r = await latest.run((call) => src.dashboard(from, to, call));
+    if (!r) return; // superseded by a newer load, or the screen left
+    if (r.ok) {
+      data = r.value;
+      error = null;
+      updatedAt = Date.now();
+    } else error = r.error;
   }
 
   onMount(() => {
     const t = setInterval(load, 60_000);
-    return () => clearInterval(t);
+    return () => { clearInterval(t); latest.abort(); };
   });
   $effect(() => { void span; load(); });
 
@@ -57,6 +69,10 @@
   </div>
 </header>
 
+{#if error}
+  <div class="error"><ErrorCard {error} onretry={load} /></div>
+{/if}
+
 {#if app.status && app.status.worst !== 'Ok'}
   <p class="banner card" role="status">Service state: {app.status.worst}. {app.status.components.filter((c) => c.state !== 'Ok').map((c) => c.name).join(', ')}</p>
 {/if}
@@ -72,7 +88,7 @@
   </dl>
 
   <div class="chart">
-    <Region title="Requests over time" {updatedAt} busy={!data}>
+    <Region title="Requests over time" {updatedAt} busy={!data && !error} stale={!!error}>
       {#if data}
         <StackedArea series={data.requests_by_verdict} from={data.from_ms} bucketMs={data.bucket_ms} />
       {:else}
@@ -82,7 +98,7 @@
   </div>
 
   <div class="stages">
-    <Region title="Sources by stage" {updatedAt}>
+    <Region title="Sources by stage" {updatedAt} stale={!!error}>
       {#if data}
         <ul class="bars">
           {#each STAGES as s (s)}
@@ -101,7 +117,7 @@
   </div>
 
   <div class="constructs">
-    <Region title="Top constructs" {updatedAt}>
+    <Region title="Top constructs" {updatedAt} stale={!!error}>
       {#if data && data.top_constructs.length}
         <table class="data-table">
           <thead><tr><th>Construct</th><th>Family</th><th class="n">Count</th></tr></thead>
@@ -122,7 +138,7 @@
   </div>
 
   <div class="paths">
-    <Region title="Top targeted paths" {updatedAt}>
+    <Region title="Top targeted paths" {updatedAt} stale={!!error}>
       {#if data}
         <table class="data-table">
           <thead><tr><th>Path prefix</th><th class="n">Requests</th><th class="n">Blocked</th></tr></thead>
@@ -153,6 +169,7 @@
 <style>
   .head { display: flex; align-items: center; gap: var(--vf-space-4); margin-bottom: var(--vf-space-5); }
   .seg { margin-left: auto; display: inline-flex; gap: var(--vf-space-1); }
+  .error { margin-bottom: var(--vf-space-4); }
   .banner { margin-bottom: var(--vf-space-4); background: var(--vf-attention-soft); color: var(--vf-attention); }
   .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--vf-space-5); }
   .kpis { grid-column: 1 / 4; grid-row: 1 / 4; display: grid; grid-template-columns: 1fr 1fr; gap: var(--vf-space-3); align-content: start; margin: 0; }
