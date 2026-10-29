@@ -18,6 +18,7 @@ const CONFIDENCE_MEDIUM: u8 = 2;
 const CONFIDENCE_HIGH: u8 = 3;
 
 /// HTTP Activity `activity_id` for a request method.
+/// Methods are case-sensitive (RFC 9110 section 9.1), so only the uppercase tokens match.
 fn activity_id(method: &str) -> u32 {
     match method {
         "CONNECT" => 1,
@@ -50,7 +51,7 @@ fn confidence_id(c: u8) -> u8 {
     }
 }
 
-/// Fields every record shares: time, metadata, src_endpoint, message.
+/// Fields every record shares: time, metadata, message.
 fn common(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str) -> Map<String, Value> {
     let mut metadata = json!({
         "version": VERSION,
@@ -68,9 +69,6 @@ fn common(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str) -> Map<String
     let mut m = Map::new();
     m.insert("time".into(), json!(ts_ms));
     m.insert("metadata".into(), metadata);
-    if let Some(ip) = req.src_ip {
-        m.insert("src_endpoint".into(), json!({ "ip": ip.to_string() }));
-    }
     m.insert("message".into(), json!(j.decided_by.msg));
     m
 }
@@ -82,13 +80,18 @@ pub fn encode(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str) -> Vec<Va
     let stopped = matches!(j.verdict, Verdict::Challenge | Verdict::Block);
 
     let activity = activity_id(&req.method);
+    let src_endpoint = req.src_ip.map(|ip| json!({ "ip": ip.to_string() }));
+    let http_request = json!({ "http_method": req.method, "url": { "path": req.path } });
     let mut http = base.clone();
     http.insert("class_uid".into(), json!(4002));
     http.insert("category_uid".into(), json!(4));
     http.insert("activity_id".into(), json!(activity));
     http.insert("type_uid".into(), json!(400200 + activity));
     http.insert("severity_id".into(), json!(severity));
-    http.insert("http_request".into(), json!({ "http_method": req.method, "url": { "path": req.path } }));
+    if let Some(ep) = &src_endpoint {
+        http.insert("src_endpoint".into(), ep.clone());
+    }
+    http.insert("http_request".into(), http_request.clone());
     http.insert("action_id".into(), json!(if stopped { ACTION_DENIED } else { ACTION_ALLOWED }));
     let disposition = match j.verdict {
         Verdict::Allow => DISPOSITION_ALLOWED,
@@ -128,6 +131,11 @@ pub fn encode(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str) -> Vec<Va
             json!({ "uid": event_id, "title": j.decided_by.msg, "attacks": attacks }),
         );
         f.insert("attacks".into(), Value::Array(attacks));
+        // Detection Finding has no top-level src_endpoint; the source goes in an
+        // evidence. Without one the evidence would fail its at_least_one constraint.
+        if let Some(ep) = src_endpoint {
+            f.insert("evidences".into(), json!([{ "src_endpoint": ep, "http_request": http_request }]));
+        }
         if let Some(c) = j.confidence {
             f.insert("confidence_score".into(), json!(c));
             f.insert("confidence_id".into(), json!(confidence_id(c)));
@@ -144,6 +152,7 @@ mod tests {
 
     const HTTP: &str = include_str!("../tests/fixtures/ocsf-1.9.0-http_activity.json");
     const FINDING: &str = include_str!("../tests/fixtures/ocsf-1.9.0-detection_finding.json");
+    const EVIDENCES: &str = include_str!("../tests/fixtures/ocsf-1.9.0-evidences.json");
     const SAMPLE: &str = include_str!("../tests/fixtures/ocsf-sample.json");
 
     fn required(schema: &Value) -> Vec<String> {
@@ -229,6 +238,57 @@ mod tests {
         }
     }
 
+    /// Every key of `rec` is an attribute of `schema`, and each of the
+    /// schema's `at_least_one` constraints is met.
+    fn assert_valid(schema: &Value, rec: &Value, what: &str) {
+        let attrs = schema["attributes"].as_object().unwrap();
+        for k in rec.as_object().unwrap().keys() {
+            assert!(attrs.contains_key(k), "{what}: `{k}` is not a 1.9.0 attribute: {rec}");
+        }
+        if let Some(one) = schema["constraints"]["at_least_one"].as_array() {
+            assert!(
+                one.iter().any(|k| rec.get(k.as_str().unwrap()).is_some()),
+                "{what}: none of the at_least_one attributes {one:?}: {rec}"
+            );
+        }
+    }
+
+    #[test]
+    fn records_use_only_schema_attributes() {
+        let http: Value = serde_json::from_str(HTTP).unwrap();
+        let finding: Value = serde_json::from_str(FINDING).unwrap();
+        let evidences: Value = serde_json::from_str(EVIDENCES).unwrap();
+        let (req, base) = union_select("POST");
+        let mut no_ip = req.clone();
+        no_ip.src_ip = None;
+        for r in [&req, &no_ip] {
+            for v in [Verdict::Allow, Verdict::Monitor, Verdict::Challenge, Verdict::Block] {
+                let mut j = base.clone();
+                j.verdict = v;
+                j.chain = Some(ChainOutcome { episode_start_ms: Some(5), ..Default::default() });
+                let recs = encode(r, &j, 1, EID);
+                assert_valid(&http, &recs[0], "4002");
+                assert_eq!(recs[0].get("src_endpoint").is_some(), r.src_ip.is_some(), "{}", recs[0]);
+                if let Some(f) = recs.get(1) {
+                    assert_valid(&finding, f, "2004");
+                    assert!(f.get("src_endpoint").is_none(), "2004 has no top-level src_endpoint: {f}");
+                    match r.src_ip {
+                        Some(ip) => {
+                            let ev = f["evidences"].as_array().unwrap();
+                            assert_eq!(ev.len(), 1, "{f}");
+                            assert_valid(&evidences, &ev[0], "evidences");
+                            assert_eq!(ev[0]["src_endpoint"]["ip"], ip.to_string(), "{f}");
+                            assert_eq!(ev[0]["http_request"]["http_method"], "POST", "{f}");
+                            assert_eq!(ev[0]["http_request"]["url"]["path"], "/x", "{f}");
+                        }
+                        // An evidence with only http_request would break at_least_one.
+                        None => assert!(f.get("evidences").is_none(), "{f}"),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn shared_sample_matches() {
         let sample: Value = serde_json::from_str(SAMPLE).unwrap();
@@ -246,7 +306,10 @@ mod tests {
             other => panic!("unknown verdict {other}"),
         };
         j.score = i["score"].as_u64().unwrap() as u8;
-        j.decided_by.construct = Some(s("construct"));
+        let construct = s("construct");
+        let summary = vft_core::graph::sinks::lookup(&construct).map(|c| c.summary);
+        assert_eq!(summary, Some(s("construct_summary").as_str()), "construct_summary must match the registry");
+        j.decided_by.construct = Some(construct);
         j.decided_by.msg = s("msg");
         j.confidence = i["confidence"].as_u64().map(|c| c as u8);
         j.attack = i["attack"]
@@ -266,10 +329,17 @@ mod tests {
         j.chain = Some(ChainOutcome { episode_start_ms: Some(start), ..Default::default() });
         assert_eq!(vft_core::chain::group_id(req.src_ip.unwrap(), j.chain.as_ref().unwrap()), Some(group));
 
-        let got = encode(&req, &j, i["ts_ms"].as_u64().unwrap(), &s("event_id"));
-        let expected = sample["expected"].as_array().unwrap();
+        let mut got = encode(&req, &j, i["ts_ms"].as_u64().unwrap(), &s("event_id"));
+        let mut expected = sample["expected"].as_array().unwrap().clone();
         assert_eq!(got.len(), expected.len(), "{}", json!(got));
-        for (g, e) in got.iter().zip(expected) {
+        // product.version tracks the crate: assert it here, keep it out of the shared file.
+        for r in &got {
+            assert_eq!(r["metadata"]["product"]["version"], env!("CARGO_PKG_VERSION"), "{r}");
+        }
+        for r in got.iter_mut().chain(expected.iter_mut()) {
+            r["metadata"]["product"].as_object_mut().unwrap().remove("version");
+        }
+        for (g, e) in got.iter().zip(&expected) {
             assert_eq!(g, e, "\n got: {g}\nwant: {e}");
         }
     }

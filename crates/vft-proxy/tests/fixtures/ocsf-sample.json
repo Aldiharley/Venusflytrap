@@ -1,10 +1,12 @@
 {
+  "_comment": "Shared by the Rust and TS OCSF encoders. metadata.product.version is excluded from the comparison (each side asserts it equals its own package version); this key is ignored.",
   "input": {
     "method": "POST",
     "path": "/login",
     "src_ip": "192.0.2.1",
     "verdict": "Block",
     "construct": "sqli.union-select",
+    "construct_summary": "UNION followed by SELECT",
     "msg": "UNION followed by SELECT in query parameter id",
     "score": 100,
     "ts_ms": 1700000000000,
@@ -27,7 +29,7 @@
         "version": "1.9.0",
         "uid": "018bcfe5-6800-7abc-8def-0123456789ab",
         "profiles": ["security_control"],
-        "product": { "name": "Venusflytrap", "vendor_name": "Venusflytrap", "version": "0.1.0" },
+        "product": { "name": "Venusflytrap", "vendor_name": "Venusflytrap" },
         "correlation_uid": "192.0.2.1@1699999990000"
       },
       "src_endpoint": { "ip": "192.0.2.1" },
@@ -48,10 +50,9 @@
         "version": "1.9.0",
         "uid": "018bcfe5-6800-7abc-8def-0123456789ab",
         "profiles": ["security_control"],
-        "product": { "name": "Venusflytrap", "vendor_name": "Venusflytrap", "version": "0.1.0" },
+        "product": { "name": "Venusflytrap", "vendor_name": "Venusflytrap" },
         "correlation_uid": "192.0.2.1@1699999990000"
       },
-      "src_endpoint": { "ip": "192.0.2.1" },
       "message": "UNION followed by SELECT in query parameter id",
       "is_alert": true,
       "finding_info": {
@@ -68,6 +69,12 @@
         {
           "tactic": { "uid": "TA0001", "name": "Initial Access" },
           "technique": { "uid": "T1190", "name": "Exploit Public-Facing Application" }
+        }
+      ],
+      "evidences": [
+        {
+          "src_endpoint": { "ip": "192.0.2.1" },
+          "http_request": { "http_method": "POST", "url": { "path": "/login" } }
         }
       ],
       "confidence_score": 92,
