@@ -24,7 +24,17 @@ struct ContribLine<'a> {
 }
 
 #[derive(Serialize)]
+struct AttackLine<'a> {
+    tactic_id: &'a str,
+    id: &'a str,
+}
+
+#[derive(Serialize)]
 struct AuditLine<'a> {
+    event_id: &'a str,
+    group_id: Option<String>,
+    confidence: Option<u8>,
+    attack: Vec<AttackLine<'a>>,
     ts_ms: u64,
     request_id: u64,
     method: &'a str,
@@ -125,11 +135,22 @@ impl AuditSink {
         }
     }
 
-    pub fn record(&self, req: &Request, j: &Judgment, ts_ms: u64, request_id: u64) {
+    pub fn record(&self, req: &Request, j: &Judgment, ts_ms: u64, request_id: u64, event_id: &str) {
         let Some(tx) = self.tx.as_ref().filter(|_| self.enabled) else {
             return;
         };
         let line = AuditLine {
+            event_id,
+            group_id: req
+                .src_ip
+                .zip(j.chain.as_ref())
+                .and_then(|(ip, o)| vft_core::chain::group_id(ip, o)),
+            confidence: j.confidence,
+            attack: j
+                .attack
+                .iter()
+                .map(|a| AttackLine { tactic_id: &a.tactic_id, id: &a.id })
+                .collect(),
             ts_ms,
             request_id,
             method: &req.method,
@@ -226,7 +247,7 @@ mod tests {
         let mut req = Request::get("/x");
         req.query.push(("id".into(), "1 union select a".into()));
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1_700_000_000_000, 7);
+        sink.record(&req, &j, 1_700_000_000_000, 7, "019000000000-7000-8000-000000000001");
         sink.close();
         let line = std::fs::read_to_string(&p).unwrap();
         let v: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
@@ -236,6 +257,10 @@ mod tests {
         assert!(v["cause"].is_string() && v["option_key"].is_string(), "{v}");
         assert!(v["contributions"][0]["points"].is_number(), "{v}");
         assert_eq!(v["contributions"][0]["shadow"], false, "{v}");
+        assert_eq!(v["event_id"], "019000000000-7000-8000-000000000001", "{v}");
+        assert!(v.get("confidence").is_some(), "{v}");
+        assert!(v["attack"].is_array(), "{v}");
+        assert!(v.get("group_id").is_some() && v["group_id"].is_null(), "{v}");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -246,7 +271,7 @@ mod tests {
         let req = Request::get("/rotate");
         let j = Shield::new(Config::default()).inspect(&req);
         for i in 0..20 {
-            sink.record(&req, &j, i, i);
+            sink.record(&req, &j, i, i, "e");
         }
         sink.close();
         assert!(p.with_extension("1").exists(), "rotated file missing");
@@ -261,7 +286,7 @@ mod tests {
         let sink = AuditSink::off();
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1);
+        sink.record(&req, &j, 1, 1, "e");
         assert_eq!(sink.dropped(), 0);
         assert_eq!(sink.write_errors(), 0);
         sink.close();
@@ -277,7 +302,7 @@ mod tests {
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
         for i in 0..10 {
-            sink.record(&req, &j, i, i);
+            sink.record(&req, &j, i, i, "e");
         }
         assert_eq!(sink.dropped(), 0);
         let errs = sink.write_errors.clone();
@@ -293,11 +318,11 @@ mod tests {
         let sink = AuditSink::new(Some(p.clone()), 1024 * 1024);
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1); // lost: directory missing
+        sink.record(&req, &j, 1, 1, "e"); // lost: directory missing
         std::thread::sleep(Duration::from_millis(100));
         std::fs::create_dir_all(&dir).unwrap();
         std::thread::sleep(Duration::from_millis(600)); // let the idle tick retry
-        sink.record(&req, &j, 2, 2);
+        sink.record(&req, &j, 2, 2, "e");
         let errs = sink.write_errors.clone();
         sink.close();
         let text = std::fs::read_to_string(&p).unwrap();

@@ -29,6 +29,7 @@ use vft_core::{Judgment, Shield, Verdict};
 
 pub mod adapt;
 pub mod audit;
+pub mod ids;
 pub mod pipeline;
 pub use hyper::http;
 
@@ -100,6 +101,7 @@ pub struct ProxyState {
     pub pipeline: pipeline::Pipeline,
     pub upstream: String,
     pub audit: audit::AuditSink,
+    pub ids: ids::EventIds,
     request_seq: std::sync::atomic::AtomicU64,
     /// If true, Block/Challenge are stopped; otherwise everything is forwarded.
     pub enforce: bool,
@@ -119,6 +121,7 @@ impl ProxyState {
             pipeline: pipeline::Pipeline::new(Arc::new(shield)),
             upstream,
             audit,
+            ids: ids::EventIds::new(),
             request_seq: std::sync::atomic::AtomicU64::new(0),
             enforce,
             client,
@@ -199,7 +202,9 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     if state.enforce {
         if let Some(d) = state.pipeline.fast_track(&parts, Some(peer.ip()), now_ms()) {
             let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            state.audit.record(&d.request, &d.judgment, now_ms(), id);
+            let ts = now_ms();
+            let eid = state.ids.next(ts);
+            state.audit.record(&d.request, &d.judgment, ts, id, &eid);
             return Ok(refusal(d.judgment.verdict));
         }
     }
@@ -224,7 +229,9 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
 
     let decision = state.pipeline.decide(&parts, &collected, Some(peer.ip()), now_ms());
     let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.audit.record(&decision.request, &decision.judgment, now_ms(), id);
+    let ts = now_ms();
+    let eid = state.ids.next(ts);
+    state.audit.record(&decision.request, &decision.judgment, ts, id, &eid);
     let j = decision.judgment;
 
     if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {
