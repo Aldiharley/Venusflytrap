@@ -169,13 +169,19 @@ test('auto-refresh pauses while focus is in the grid and offers the new results 
 
 test('the grid has Technique and Confidence columns right after Construct', async () => {
   const { grid } = await mount('/monitor?q=construct%3Acmd.chained-command');
-  const heads = within(grid).getAllByRole('columnheader').map((h) => h.textContent);
-  expect(heads.slice(7, 10)).toEqual(['Construct', 'Technique', 'Confidence']);
-  expect(within(grid).getByRole('columnheader', { name: 'Confidence' }).getAttribute('title')).toBe('Precision on dev of the deciding construct');
+  const heads = within(grid).getAllByRole('columnheader');
+  expect(heads.slice(7, 10).map((h) => h.textContent)).toEqual(['Construct', 'Technique', 'Conf.Confidence']);
+  // The Confidence header shows "Conf."; its accessible name and tooltip keep the full word.
+  const conf = within(grid).getByRole('columnheader', { name: 'Confidence' });
+  expect(conf).toBe(heads[9]);
+  expect(conf.getAttribute('title')).toBe('Precision on dev of the deciding construct');
+  expect(conf.querySelector('[aria-hidden="true"]')!.textContent).toBe('Conf.');
   const row = grid.querySelector('tbody tr')!;
   const tech = row.querySelector('td[data-c="8"]')!;
+  // Only the primary technique (row.technique); the construct's other tag (T1059) is in Request details.
+  expect(tech.querySelectorAll('.chip').length).toBe(1);
   expect(tech.textContent).toContain('T1190');
-  expect(tech.textContent).toContain('T1059');
+  expect(tech.textContent).not.toContain('T1059');
   expect(tech.querySelector('[title="Initial Access · Exploit Public-Facing Application"]')).toBeTruthy();
   expect(tech.querySelector('.sr-only')!.textContent).toBe('Initial Access · Exploit Public-Facing Application');
   expect(row.querySelector('td[data-c="9"]')!.textContent!.trim()).toBe('70');

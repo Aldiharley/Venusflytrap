@@ -21,7 +21,8 @@
   let { title }: { title: string } = $props();
   const PAGE = 100;
 
-  interface Col { key: string; label: string; field: Field | null; n?: boolean }
+  /** `short` is the visible header when the full label does not fit; the label stays the accessible name. */
+  interface Col { key: string; label: string; short?: string; field: Field | null; n?: boolean }
   const COLS: Col[] = [
     { key: 'ts', label: 'Time', field: null },
     { key: 'verdict', label: 'Verdict', field: 'verdict' },
@@ -32,7 +33,7 @@
     { key: 'path', label: 'Path', field: 'path' },
     { key: 'construct', label: 'Construct', field: 'construct' },
     { key: 'technique', label: 'Technique', field: null },
-    { key: 'confidence', label: 'Confidence', field: null, n: true },
+    { key: 'confidence', label: 'Confidence', short: 'Conf.', field: null, n: true },
     { key: 'stage', label: 'Stage', field: 'stage' },
     { key: 'decided', label: 'Decided by', field: null },
     { key: 'rev', label: 'Rev', field: 'config_rev', n: true },
@@ -354,7 +355,7 @@
             {/each}
           </tbody>
         {:else}
-          <thead><tr>{#each COLS as c (c.key)}<th scope="col" class="c-{c.key}" class:n={c.n} title={HEAD_TITLE[c.key]}>{c.label}</th>{/each}</tr></thead>
+          <thead><tr>{#each COLS as c (c.key)}<th scope="col" class="c-{c.key}" class:n={c.n} title={HEAD_TITLE[c.key]}>{#if c.short}<span aria-hidden="true">{c.short}</span><span class="sr-only">{c.label}</span>{:else}{c.label}{/if}</th>{/each}</tr></thead>
           <tbody>
             {#each rows as row, r (row.id)}
               <tr class:blocked={row.verdict === 'Block'} aria-rowindex={r + 2}>
@@ -437,24 +438,29 @@
   .grid { font-size: var(--vf-fs-sm); table-layout: fixed; }
   .grid th, .grid td { padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .grid th { position: sticky; top: 0; z-index: 1; background: var(--vf-surface-raised); }
-  .grid th.c-ts { width: 5.1%; }
-  .grid th.c-verdict { width: 12.5%; }
-  .grid th.c-score { width: 4.8%; }
+  /* Widths (about 1160 px of grid at 1280 and 1440): every header fits its label; Time and the usual
+     Decided-by key take one line; Path is readable; Technique fits one chip (T1595.003); Confidence shows "Conf.". */
+  .grid th.c-ts { width: 6.5%; }
+  .grid th.c-verdict { width: 9%; }
+  .grid th.c-score { width: 4.7%; }
   .grid th.c-src { width: 7.5%; }
-  .grid th.c-method { width: 6%; }
-  .grid th.c-host { width: 5.5%; }
-  .grid th.c-path { width: 5%; }
-  .grid th.c-construct { width: 8%; }
-  .grid th.c-technique { width: 8.6%; }
-  .grid th.c-confidence { width: 8%; }
-  .grid th.c-stage { width: 7.5%; }
-  .grid th.c-decided { width: 7.5%; }
-  .grid th.c-rev { width: 4%; }
+  .grid th.c-method { width: 5.7%; }
+  .grid th.c-host { width: 4.8%; }
+  .grid th.c-path { width: 9.7%; }
+  .grid th.c-construct { width: 9%; }
+  .grid th.c-technique { width: 7.7%; }
+  .grid th.c-confidence { width: 4.4%; }
+  .grid th.c-stage { width: 6.5%; }
+  .grid th.c-decided { width: 11.2%; }
+  .grid th.c-rev { width: 3.3%; }
   .grid th.c-latency { width: 6%; }
   .grid th.c-upstream { width: 4%; }
-  .grid.dated th.c-ts { width: 6.4%; }
+  /* With the date, Time breaks once, between the date and the clock. */
+  .grid.dated th.c-ts { width: 8.5%; }
   .grid.dated th.c-src { width: 6.5%; }
-  .grid td.c-verdict, .grid td.c-technique { white-space: normal; }
+  .grid.dated th.c-verdict { width: 8.5%; }
+  .grid.dated th.c-path { width: 9.2%; }
+  .grid td.c-verdict { white-space: normal; }
   .srcwrap { display: flex; align-items: center; min-width: 0; }
   .grid td:focus-visible { outline-offset: -2px; box-shadow: none; }
   .grid tr:hover td { background: var(--vf-row-hover); }

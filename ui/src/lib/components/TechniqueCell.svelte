@@ -1,24 +1,20 @@
 <script lang="ts">
+  import type { AttackTag } from '../../gen/AttackTag';
   import { techniquesFor } from '../api/attack';
   import AttackChip from './AttackChip.svelte';
 
-  // A history row's technique. The row's own `technique` id decides whether there is one; the
-  // fixture table only enriches it with tactic and name. A construct the table does not know
-  // still shows its id, as a bare chip whose accessible name is the id.
+  // A history row's technique: one chip, the row's own primary `technique` id. The fixture table
+  // only enriches it with tactic and name; the construct's other tags are in Request details. A
+  // technique the table does not know still shows its id, as a bare chip whose accessible name is the id.
   let { technique, construct }: { technique: string | null; construct: string | null } = $props();
-  const tags = $derived.by(() => {
-    if (technique === null) return [];
-    const known = techniquesFor(construct);
-    return known.some((t) => t.id === technique) ? known : [{ tactic_id: '', tactic: '', id: technique, name: '' }];
+  const tag = $derived.by((): AttackTag | null => {
+    if (technique === null) return null;
+    return techniquesFor(construct).find((t) => t.id === technique) ?? { tactic_id: '', tactic: '', id: technique, name: '' };
   });
 </script>
 
-{#if tags.length === 0}
+{#if tag === null}
   <span aria-hidden="true">—</span><span class="sr-only">no technique</span>
 {:else}
-  <span class="techs">{#each tags as tag (tag.id)}<AttackChip {tag} compact />{/each}</span>
+  <AttackChip {tag} compact />
 {/if}
-
-<style>
-  .techs { display: inline-flex; flex-wrap: wrap; gap: 2px; }
-</style>
