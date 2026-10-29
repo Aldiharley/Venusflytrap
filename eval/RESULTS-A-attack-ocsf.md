@@ -5,9 +5,9 @@ output format: `serve --ocsf <path>` writes OCSF 1.9.0 JSONL beside the audit fi
 acceptance run. Every number below was copied from the run output; nothing is estimated.
 
 - **Baseline:** a build whose detection is identical to main `ed2a953` (`fix12b.exe`).
-- **Measured tree:** branch `a-attack-ocsf`, release build: `e704769` for the serve diff, and the
-  final head `6a0c195` (after the final-review fixes) for the dev A/B and the OCSF smoke test. See
-  "Which commit each check ran on".
+- **Measured tree:** branch `a-attack-ocsf`, release build: `e704769` for the serve diff, and
+  `b1c11cf`, the last engine commit (after the final-review fixes; later commits change only docs), for
+  the dev A/B and the OCSF smoke test. See "Which commit each check ran on".
 - **Corpus:** the blazehttp corpus, with the dev/held-out split manifest (sha256 prefix `06d8905d897ba1a8`).
   Held-out was not touched.
 
@@ -26,16 +26,17 @@ acceptance run. Every number below was copied from the run output; nothing is es
   so the first one observed after it starts a new episode). Fast-tracked requests from a banned source
   are not observed by the chain at all and carry no `group_id`.
 - `serve --ocsf <path>` writes one OCSF HTTP Activity (class 4002) record per request and one Detection
-  Finding (class 2004) per Challenge or Block. Under `--monitor-only` (nothing is blocked) the 4002 says
-  action Allowed and disposition Logged for every verdict; the 2004 is still written for a Challenge or
-  Block. A sub-technique (`T1595.003`) goes in `sub_technique`, with its parent (`T1595`) in `technique`.
+  Finding (class 2004) per Challenge or Block. Enforcement only changes Challenge and Block: under
+  `--monitor-only` (nothing is blocked) their 4002 takes Monitor's action Allowed and disposition
+  Logged, and the 2004 is still written. Allow (Allowed/Allowed) and Monitor (Allowed/Logged) are the
+  same in both modes. A sub-technique (`T1595.003`) goes in `sub_technique`, with its parent (`T1595`) in `technique`.
 
 ## No detection change
 
 ### Dev A/B (library mode, dev rows, 16,938 shared rows)
 
-On the final head `6a0c195`,
-`bash eval/ab_dev.sh a-final "" "" <baseline binary> target/release/venusflytrap.exe`:
+On the last engine commit `b1c11cf`,
+`bash eval/ab_dev.sh a-final2 "" "" <baseline binary> target/release/venusflytrap.exe`:
 
 ```
 ab: 16938 shared rows, 0 only in a, 0 only in b
@@ -114,16 +115,16 @@ two construct ids override their family.
 
 ## OCSF smoke test
 
-### Final head (`6a0c195`)
+### Last engine commit (`b1c11cf`)
 
-The same command and the same three requests, on the final head. The upstream is closed, so each got a
-502; under `--monitor-only` every request was forwarded.
+The same command and the same three requests, on `b1c11cf`. The upstream is closed, so each got a 502;
+under `--monitor-only` every request was forwarded.
 
 | Check | Result |
 |---|---|
 | Audit lines | 3, with 3 distinct `event_id`s |
 | OCSF lines | 5: 3 HTTP Activity (4002), 2 Detection Finding (2004) |
-| 4002 `action_id` / `disposition_id` | 1 Allowed / 17 Logged on all three, including the two Blocks (`severity_id` 4) |
+| 4002 `action_id` / `disposition_id` | plain GET (Allow): 1 Allowed / 1 Allowed; the two forwarded Blocks (`severity_id` 4): 1 Allowed / 17 Logged |
 | 2004 records | one each for the union-select Block and the decoy Block |
 | `metadata.uid` | on the three 4002 records only (the 2004s link through `finding_info.uid`) |
 | Decoy finding `attacks` | `technique {T1595, Active Scanning}`, `sub_technique {T1595.003, Wordlist Scanning}` |
@@ -163,13 +164,14 @@ and 2 Detection Finding records). The table and counts above are from that re-ru
 
 ## Which commit each check ran on
 
-- Dev A/B: `e704769` first, then again on the final head `6a0c195`, after the final-review fixes
-  (OCSF enforcement and sub-technique slots, per-key group ID, console). Both show delta 0/0, fallen 0
-  and 0 differing cells.
+- Dev A/B: `e704769` first, then on `6a0c195` and again on `b1c11cf`, the last engine commit, after the
+  final-review fixes (OCSF enforcement and sub-technique slots, per-key group ID, console). All show
+  delta 0/0, fallen 0 and 0 differing cells.
 - Serve diff: `e704769` only. The commits after it change annotations (`attack`, `confidence`), the
   group ID, the OCSF encoder and the console, none of which feed a verdict, score or deciding construct;
-  the dev A/B on the final head confirms that in library mode.
-- OCSF smoke test: `57c5e73`, then the final head `6a0c195`.
+  the dev A/B on `b1c11cf` confirms that in library mode.
+- OCSF smoke test: `57c5e73`, then `6a0c195` (before the Allow correction, when the plain GET still
+  said Logged), then `b1c11cf`; the table above is from `b1c11cf`.
 
 ## What this does not show
 
@@ -180,7 +182,7 @@ and 2 Detection Finding records). The table and counts above are from that re-ru
 - The mapping is by construct family, not per request: a request that decided on `xss.*` is tagged
   T1190 whether or not it is an exploit of a public-facing application.
 - No SIEM was tested end to end. The OCSF records were checked against the 1.9.0 schema in the
-  branch's tests (commit `e704769`, extended on the final head to every enum attribute of both classes
+  branch's tests (commit `e704769`, extended in `7fa4814` to every enum attribute of both classes
   and to the 1.9.0 `attack` object); no ingestion pipeline consumed them.
 - Held-out was not run: nothing in this sub-project can change a verdict, and the dev and serve diffs
   above are exact.
