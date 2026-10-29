@@ -29,7 +29,8 @@ const HOST = 'shop.example';
  * the client IP, then `@` and the episode start. The console names an IPv6 source `addr/64`; the key's
  * address is the part before the `/`, so every client in one /64 shares the group.
  */
-export const groupId = (srcKey: string, episodeStartMs: number | null) => `${srcKey.split('/')[0]}@${episodeStartMs}`;
+export const groupId = (srcKey: string, episodeStartMs: number | null): string | null =>
+  episodeStartMs === null ? null : `${srcKey.split('/')[0]}@${episodeStartMs}`;
 
 export const rowId = (k: number) => `R${k.toString(36).toUpperCase()}`;
 export function rowIndex(id: string): number | null {

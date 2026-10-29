@@ -37,11 +37,13 @@ export interface OcsfOptions {
   enforced?: boolean;
 }
 
-/** The 4002 action and disposition. Unenforced, every request is Allowed and Logged whatever the verdict. */
+/**
+ * The 4002 action and disposition. Enforcement only changes Challenge and Block: unenforced they are
+ * forwarded, so they take Monitor's Allowed/Logged. Allow and Monitor are the same in both modes.
+ */
 function actionDisposition(v: Verdict, enforced: boolean): [number, number] {
-  if (!enforced) return [ACTION_ALLOWED, DISPOSITION_LOGGED];
   if (v === 'Allow') return [ACTION_ALLOWED, DISPOSITION_ALLOWED];
-  if (v === 'Monitor') return [ACTION_ALLOWED, DISPOSITION_LOGGED];
+  if (v === 'Monitor' || !enforced) return [ACTION_ALLOWED, DISPOSITION_LOGGED];
   return [ACTION_DENIED, DISPOSITION_BLOCKED];
 }
 
@@ -90,7 +92,9 @@ export function encodeOcsf(detail: RequestDetail, eventId: string, opts: OcsfOpt
   http.http_request = httpRequest;
   [http.action_id, http.disposition_id] = actionDisposition(j.verdict, opts.enforced ?? true);
   const construct = j.decided_by.construct;
-  if (construct !== null) http.firewall_rule = opts.summary ? { uid: construct, name: opts.summary } : { uid: construct };
+  // As in Rust: a known summary is the name, even an empty one; no summary, no name.
+  const summary = opts.summary ?? null;
+  if (construct !== null) http.firewall_rule = summary !== null ? { uid: construct, name: summary } : { uid: construct };
   const out: Rec[] = [http];
 
   if (detected) {

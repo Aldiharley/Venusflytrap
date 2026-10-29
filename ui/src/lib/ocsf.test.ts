@@ -86,8 +86,9 @@ test('verdicts map to action, disposition and severity as in Rust; enforcement d
   expect(triple(at('Monitor'))).toEqual([1, 17, 2]);
   expect(triple(at('Challenge'))).toEqual([2, 2, 3]);
   expect(triple(at('Block', true))).toEqual([2, 2, 4]);
-  // Unenforced (monitor-only), every verdict is Allowed and Logged; severity still follows the verdict.
-  expect((['Allow', 'Monitor', 'Challenge', 'Block'] as const).map((v) => triple(at(v, false)))).toEqual([[1, 17, 1], [1, 17, 2], [1, 17, 3], [1, 17, 4]]);
+  // Unenforced (monitor-only), Challenge and Block take Monitor's Allowed/Logged; Allow and Monitor do not change.
+  expect((['Allow', 'Monitor', 'Challenge', 'Block'] as const).map((v) => triple(at(v, false)))).toEqual([[1, 1, 1], [1, 17, 2], [1, 17, 3], [1, 17, 4]]);
+  for (const v of ['Allow', 'Monitor'] as const) expect(at(v, false)).toEqual(at(v, true));
 });
 
 test('only the HTTP Activity has metadata.uid; the finding links to it through finding_info.uid', () => {
@@ -138,6 +139,8 @@ test('unknown methods are activity 99; without a summary the rule has no name, a
   expect(h.firewall_rule).toEqual({ uid: 'sqli.union-select' });
   expect(encodeOcsf(d, 'e', { summary: null })[0].firewall_rule).toEqual({ uid: 'sqli.union-select' });
   expect(encodeOcsf(d, 'e', { summary: 'UNION followed by SELECT' })[0].firewall_rule).toEqual({ uid: 'sqli.union-select', name: 'UNION followed by SELECT' });
+  // An empty summary is still a summary, as Rust emits a registered construct's summary as is.
+  expect(encodeOcsf(d, 'e', { summary: '' })[0].firewall_rule).toEqual({ uid: 'sqli.union-select', name: '' });
 });
 
 test('a judgment without a construct has no firewall_rule; without a group no correlation_uid', () => {

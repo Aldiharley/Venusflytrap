@@ -139,6 +139,7 @@ test('rows and judgments carry ATT&CK, confidence and group from the deciding co
 test('the group ID uses the source key, so one IPv6 /64 or one IPv4 source has one group', () => {
   expect(groupId('2001:db8:4f::/64', 1_000)).toBe('2001:db8:4f::@1000');
   expect(groupId('192.0.2.88', 1_000)).toBe('192.0.2.88@1000');
+  expect(groupId('192.0.2.88', null)).toBeNull(); // no episode, no group (as chain::group_id)
   const v6 = HOUR.filter((d) => d.judgment.chain && d.row.src_key.includes('/'));
   expect(v6.length).toBeGreaterThan(0);
   for (const d of v6) {

@@ -109,11 +109,14 @@ changing a single detection:
   `disposition_id` (Allowed, Logged for Monitor, Blocked for Challenge and Block;
   numeric values from the fixture), `firewall_rule {uid = construct, name = summary}` when a
   construct decided (no `name` when the construct is not registered, e.g. `chain.ban`).
-- Enforcement: `encode` takes whether the decision was enforced. Under
-  `serve --monitor-only` every request is forwarded, so the 4002 says
-  `action_id` Allowed (1) and `disposition_id` Logged (17) for every verdict;
-  `severity_id` still follows the verdict, and Challenge and Block still get
-  their 2004, since the detection happened. Enforced, the mapping above applies.
+- Enforcement: `encode` takes whether the decision was enforced. Enforcement
+  only changes what happens to Challenge and Block. Under `serve --monitor-only`
+  they are forwarded, so their 4002 takes Monitor's mapping, `action_id`
+  Allowed (1) and `disposition_id` Logged (17); `severity_id` still follows the
+  verdict, and they still get their 2004, since the detection happened. Allow
+  (Allowed 1 / Allowed 1) and Monitor (Allowed 1 / Logged 17) are forwarded in
+  both modes, so their records do not depend on it. Enforced, the mapping above
+  applies unchanged.
 - Per Challenge or Block, one **Detection Finding** record: `class_uid 2004`,
   `category_uid 2`, `activity_id 1` (Create), `type_uid 200401`, `time`,
   `severity_id`, `confidence_score` and `confidence_id` (1–39 Low 1, 40–69

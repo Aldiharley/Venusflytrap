@@ -51,13 +51,15 @@ fn confidence_id(c: u8) -> u8 {
     }
 }
 
-/// The 4002 `action_id` and `disposition_id`. Unenforced (`serve --monitor-only`)
-/// every request is forwarded, so it is Allowed and Logged whatever the verdict.
+/// The 4002 `action_id` and `disposition_id`. Enforcement only changes what
+/// happens to Challenge and Block: unenforced (`serve --monitor-only`) they are
+/// forwarded, so they take Monitor's Allowed/Logged. Allow and Monitor are the
+/// same in both modes.
 fn action_disposition(v: Verdict, enforced: bool) -> (u8, u8) {
     match v {
-        _ if !enforced => (ACTION_ALLOWED, DISPOSITION_LOGGED),
         Verdict::Allow => (ACTION_ALLOWED, DISPOSITION_ALLOWED),
         Verdict::Monitor => (ACTION_ALLOWED, DISPOSITION_LOGGED),
+        Verdict::Challenge | Verdict::Block if !enforced => (ACTION_ALLOWED, DISPOSITION_LOGGED),
         Verdict::Challenge | Verdict::Block => (ACTION_DENIED, DISPOSITION_BLOCKED),
     }
 }
@@ -107,9 +109,9 @@ fn common(j: &Judgment, ts_ms: u64, group_id: Option<&str>) -> Map<String, Value
 /// `metadata.correlation_uid` on both. Only the 4002 has `metadata.uid =
 /// event_id`; the 2004 links to it through `finding_info.uid = event_id`, so
 /// no two records share a `metadata.uid`. `enforced` is false when the proxy
-/// forwards every request (`serve --monitor-only`): the 4002 then says Allowed
-/// and Logged for every verdict, and a Challenge or Block still has its 2004,
-/// since the detection happened.
+/// forwards every request (`serve --monitor-only`): a Challenge or Block 4002
+/// then says Allowed and Logged, as a Monitor does, and still has its 2004,
+/// since the detection happened. Allow and Monitor do not depend on it.
 pub fn encode(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str, group_id: Option<&str>, enforced: bool) -> Vec<Value> {
     let base = common(j, ts_ms, group_id);
     let severity = severity_id(j.verdict);
@@ -314,24 +316,28 @@ mod tests {
     }
 
     #[test]
-    fn unenforced_requests_are_allowed_and_logged_but_detections_keep_their_finding() {
+    fn unenforced_challenge_and_block_are_logged_like_monitor_but_keep_their_finding() {
         let (req, base) = union_select("POST");
         for v in VERDICTS {
             let mut j = base.clone();
             j.verdict = v;
+            // [action_id, disposition_id] unenforced, then enforced.
+            let (want_off, want_on) = match v {
+                Verdict::Allow => ((1, 1), (1, 1)),
+                Verdict::Monitor => ((1, 17), (1, 17)),
+                Verdict::Challenge | Verdict::Block => ((1, 17), (2, 2)),
+            };
             let off = encode(&req, &j, 1, EID, None, false);
-            assert_eq!((&off[0]["action_id"], &off[0]["disposition_id"]), (&json!(1), &json!(17)), "{v:?}");
+            assert_eq!((&off[0]["action_id"], &off[0]["disposition_id"]), (&json!(want_off.0), &json!(want_off.1)), "{v:?}");
             assert_eq!(off[0]["severity_id"], severity_id(v), "severity still follows the verdict");
             let detected = matches!(v, Verdict::Challenge | Verdict::Block);
             assert_eq!(off.len(), if detected { 2 } else { 1 }, "{v:?}");
-            // Enforced, the mapping follows the verdict.
             let on = encode(&req, &j, 1, EID, None, true);
-            let want = match v {
-                Verdict::Allow => (1, 1),
-                Verdict::Monitor => (1, 17),
-                Verdict::Challenge | Verdict::Block => (2, 2),
-            };
-            assert_eq!((&on[0]["action_id"], &on[0]["disposition_id"]), (&json!(want.0), &json!(want.1)), "{v:?}");
+            assert_eq!((&on[0]["action_id"], &on[0]["disposition_id"]), (&json!(want_on.0), &json!(want_on.1)), "{v:?}");
+            // Allow and Monitor records do not depend on enforcement at all.
+            if !detected {
+                assert_eq!(off, on, "{v:?}");
+            }
             // The finding does not depend on enforcement.
             assert_eq!(off.get(1), on.get(1), "{v:?}");
         }
