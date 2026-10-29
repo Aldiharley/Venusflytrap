@@ -58,8 +58,9 @@ def render_ts(rows, src, manifest_sha, date):
     body = ''.join(f"  '{k}': {v},\n" for k, v in rows)
     return (f"// {_header(src, manifest_sha, date)}\n"
             f"export const CONFIDENCE: Record<string, number> = {{\n{body}}};\n\n"
+            "// Own keys only: an id such as 'constructor' must not find an inherited property.\n"
             "export function confidenceOf(id: string | null): number | null {\n"
-            "  return id !== null && id in CONFIDENCE ? CONFIDENCE[id] : null;\n}\n")
+            "  return id !== null && Object.hasOwn(CONFIDENCE, id) ? CONFIDENCE[id] : null;\n}\n")
 
 def main():
     ap = argparse.ArgumentParser()

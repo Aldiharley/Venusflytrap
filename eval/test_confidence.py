@@ -67,8 +67,9 @@ class T(unittest.TestCase):
             "  'sqli.union-select': 37,\n"
             '};\n'
             '\n'
+            "// Own keys only: an id such as 'constructor' must not find an inherited property.\n"
             'export function confidenceOf(id: string | null): number | null {\n'
-            '  return id !== null && id in CONFIDENCE ? CONFIDENCE[id] : null;\n'
+            '  return id !== null && Object.hasOwn(CONFIDENCE, id) ? CONFIDENCE[id] : null;\n'
             '}\n'))
         self.assertNotIn('\r', rs + ts)
 

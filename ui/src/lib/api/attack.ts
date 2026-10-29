@@ -24,14 +24,16 @@ const BY_FAMILY: Record<Family, readonly AttackTag[]> = {
   Anomaly: [],
 };
 
+// Maps, not object literals: a construct id such as 'constructor' must not find an inherited property.
+
 /** The overrides that beat the family (attack.rs `techniques_for`). */
-const OVERRIDE: Record<string, readonly AttackTag[]> = {
-  'intel.scanner-ua': [T1595_002],
-  'intel.deny-listed': [],
-};
+const OVERRIDE = new Map<string, readonly AttackTag[]>([
+  ['intel.scanner-ua', [T1595_002]],
+  ['intel.deny-listed', []],
+]);
 
 /** Construct id to family: the engine registry ids the fixtures emit and the Rust tests pin. Anything else has no tags. */
-const FAMILY: Record<string, Family> = {
+const FAMILY = new Map<string, Family>(Object.entries({
   'sqli.union-select': 'Sqli',
   'sqli.boolean-tautology': 'Sqli',
   'sqli.fn-load-file': 'Sqli',
@@ -53,13 +55,13 @@ const FAMILY: Record<string, Family> = {
   'ai.anomaly-score': 'Anomaly',
   'api.oversized-header': 'Anomaly',
   'api.type-violation': 'Sqli', // the engine files it under Sqli (sinks/mod.rs)
-};
+} satisfies Record<string, Family>));
 
 /** The techniques of a construct id; empty for null and for unregistered ids (such as `chain.ban`). */
 export function techniquesFor(construct: string | null): AttackTag[] {
   if (construct === null) return [];
-  const o = OVERRIDE[construct];
+  const o = OVERRIDE.get(construct);
   if (o) return [...o];
-  const fam = FAMILY[construct];
+  const fam = FAMILY.get(construct);
   return fam ? [...BY_FAMILY[fam]] : [];
 }

@@ -11,6 +11,7 @@ export const CONFIDENCE: Record<string, number> = {
   'xss.script-tag': 38,
 };
 
+// Own keys only: an id such as 'constructor' must not find an inherited property.
 export function confidenceOf(id: string | null): number | null {
-  return id !== null && id in CONFIDENCE ? CONFIDENCE[id] : null;
+  return id !== null && Object.hasOwn(CONFIDENCE, id) ? CONFIDENCE[id] : null;
 }

@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { techniquesFor } from './attack';
+import { confidenceOf } from './confidence';
 
 // Pins the same expectations as crates/vft-core/src/attack.rs.
 const ids = (c: string | null) => techniquesFor(c).map((t) => t.id);
@@ -27,4 +28,11 @@ test('limits, anomaly, deny-list, unregistered ids and null have no tags', () =>
 test('a tag carries its tactic and the full technique name', () => {
   expect(techniquesFor('honeypot.decoy-hit')[0]).toEqual({ tactic_id: 'TA0043', tactic: 'Reconnaissance', id: 'T1595.003', name: 'Active Scanning: Wordlist Scanning' });
   expect(techniquesFor('cmd.chained-command')[1]).toEqual({ tactic_id: 'TA0002', tactic: 'Execution', id: 'T1059', name: 'Command and Scripting Interpreter' });
+});
+
+test('ids named like inherited properties have no tags and no confidence', () => {
+  for (const c of ['constructor', '__proto__', 'toString', 'valueOf', 'hasOwnProperty']) {
+    expect(ids(c), c).toEqual([]);
+    expect(confidenceOf(c), c).toBeNull();
+  }
 });
