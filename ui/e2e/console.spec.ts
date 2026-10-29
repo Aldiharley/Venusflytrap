@@ -134,3 +134,65 @@ for (const scheme of ['light', 'dark'] as const) {
     expect(await csp()).toEqual([]);
   });
 }
+
+async function expectNoSeriousAxe(page: Page) {
+  const results = await new AxeBuilder({ page: page as unknown as AxePage }).analyze();
+  const bad = results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
+  expect(bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+}
+
+test('monitor: the Technique and Confidence columns are present, and a blocked row carries an ATT&CK chip', async ({ page }) => {
+  await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
+  const grid = page.getByRole('grid');
+  await expect(grid).toBeVisible();
+  await expect(grid.getByRole('columnheader', { name: 'Technique' })).toBeVisible();
+  await expect(grid.getByRole('columnheader', { name: 'Confidence' })).toBeVisible();
+  await expect(grid.getByText(/^T\d{4}(\.\d{3})?$/).first()).toBeVisible();
+});
+
+test('request details: a blocked request shows ATT&CK chips, confidence, IDs, and the OCSF tab', async ({ page }) => {
+  await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
+  await page.locator('td[data-c="0"] a').first().click();
+  const why = page.getByRole('region', { name: 'Why this verdict' });
+  await expect(why).toBeVisible();
+  await expect(why.getByText(/^T\d{4}(\.\d{3})?$/).first()).toBeVisible();
+  await expect(why.getByText(/^Precision on dev: (\d+|not measured)/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy event ID' })).toBeVisible();
+
+  const tablist = page.getByRole('tablist', { name: 'Request view' });
+  await expect(tablist.getByRole('tab', { name: 'Evidence' })).toHaveAttribute('aria-selected', 'true');
+  await tablist.getByRole('tab', { name: 'View as OCSF' }).click();
+  await expect(tablist.getByRole('tab', { name: 'View as OCSF' })).toHaveAttribute('aria-selected', 'true');
+  const ocsf = page.getByRole('region', { name: 'OCSF records' });
+  await expect(ocsf).toContainText('"class_uid": 4002');
+  await expect(ocsf).toContainText('"class_uid": 2004');
+  await expect(why).toHaveCount(0);
+
+  // Arrow keys move between the tabs.
+  await tablist.getByRole('tab', { name: 'View as OCSF' }).focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(tablist.getByRole('tab', { name: 'Evidence' })).toBeFocused();
+  await expect(page.getByRole('region', { name: 'Why this verdict' })).toBeVisible();
+});
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`monitor with the Technique and Confidence columns in ${scheme}: no serious axe violations`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto('/monitor?static');
+    await expect(page.getByRole('grid').getByRole('columnheader', { name: 'Technique' })).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await expectNoSeriousAxe(page);
+  });
+
+  test(`request details in ${scheme}: the Evidence tab and the OCSF tab have no serious axe violations`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
+    await page.locator('td[data-c="0"] a').first().click();
+    await expect(page.getByRole('region', { name: 'Why this verdict' })).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await expectNoSeriousAxe(page);
+    await page.getByRole('tab', { name: 'View as OCSF' }).click();
+    await expect(page.getByRole('region', { name: 'OCSF records' })).toBeVisible();
+    await expectNoSeriousAxe(page);
+  });
+}
