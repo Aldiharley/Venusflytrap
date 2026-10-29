@@ -84,7 +84,8 @@ changing a single detection:
 
 ### 3.6 OCSF encoder (vft-proxy)
 
-- New module `ocsf.rs`; enabled by `audit.ocsf_path` (absent = off). A second
+- New module `ocsf.rs`; enabled by `serve --ocsf <path>` next to the existing
+  `--audit` flag (absent = off; the proxy has no audit config section). A second
   instance of the existing sink type writes OCSF JSONL there, with the same
   non-blocking send, rotation and drop and error counters.
 - Per request, one **HTTP Activity** record: `class_uid 4002`, `category_uid 4`,
