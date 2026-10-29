@@ -24,6 +24,13 @@ export const EPISODE_MS = 30 * 60_000;
 export const BANDS: Bands = { monitor_at: 40, challenge_at: 70, block_at: 90 };
 const HOST = 'shop.example';
 
+/**
+ * The episode group ID as the engine builds it (chain.rs `group_id`): the source key's address, not
+ * the client IP, then `@` and the episode start. The console names an IPv6 source `addr/64`; the key's
+ * address is the part before the `/`, so every client in one /64 shares the group.
+ */
+export const groupId = (srcKey: string, episodeStartMs: number | null) => `${srcKey.split('/')[0]}@${episodeStartMs}`;
+
 export const rowId = (k: number) => `R${k.toString(36).toUpperCase()}`;
 export function rowIndex(id: string): number | null {
   if (!/^R[0-9A-Z]+$/.test(id)) return null;
@@ -222,7 +229,7 @@ export function makeHistory(f: Fixtures, now: () => number): History {
     const row: HistoryRow = {
       ...base, verdict: judgment.verdict, score: judgment.score, src_key: src.key, method, path,
       construct: c.construct, technique: judgment.attack[0]?.id ?? null, confidence: judgment.confidence,
-      group_id: judgment.chain ? `${src.ip}@${judgment.chain.episode_start_ms}` : null, stage: src.stage, cause: c.kind, decided_option: c.option_key,
+      group_id: judgment.chain ? groupId(src.key, judgment.chain.episode_start_ms) : null, stage: src.stage, cause: c.kind, decided_option: c.option_key,
       upstream_status: forwarded ? (method === 'POST' && path === '/login' ? 302 : 200) : null,
       sampled: judgment.verdict === 'Allow',
     };

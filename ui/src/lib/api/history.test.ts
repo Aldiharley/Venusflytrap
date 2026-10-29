@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { makeFixtures } from './fixtures';
-import { BANDS, PERIOD_MS, makeHistory, rowId } from './history';
+import { BANDS, PERIOD_MS, groupId, makeHistory, rowId } from './history';
 import { parse } from '../query';
 import { techniquesFor } from './attack';
 import { confidenceOf } from './confidence';
@@ -129,10 +129,21 @@ test('rows and judgments carry ATT&CK, confidence and group from the deciding co
     if (j.chain) {
       expect(j.chain.episode_start_ms).not.toBeNull();
       expect(j.chain.episode_start_ms!).toBeLessThanOrEqual(d.row.ts_ms);
-      expect(d.row.group_id).toBe(`${d.ip}@${j.chain.episode_start_ms}`);
+      expect(d.row.group_id).toBe(groupId(d.row.src_key, j.chain.episode_start_ms));
     } else {
       expect(d.row.group_id).toBeNull();
     }
+  }
+});
+
+test('the group ID uses the source key, so one IPv6 /64 or one IPv4 source has one group', () => {
+  expect(groupId('2001:db8:4f::/64', 1_000)).toBe('2001:db8:4f::@1000');
+  expect(groupId('192.0.2.88', 1_000)).toBe('192.0.2.88@1000');
+  const v6 = HOUR.filter((d) => d.judgment.chain && d.row.src_key.includes('/'));
+  expect(v6.length).toBeGreaterThan(0);
+  for (const d of v6) {
+    expect(d.row.group_id!.startsWith(`${d.row.src_key.split('/')[0]}@`)).toBe(true);
+    expect(d.row.group_id!.startsWith(`${d.ip}@`)).toBe(false); // not the client address
   }
 });
 
