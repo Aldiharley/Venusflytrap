@@ -30,6 +30,7 @@ use vft_core::{Judgment, Shield, Verdict};
 pub mod adapt;
 pub mod audit;
 pub mod ids;
+pub mod ocsf;
 pub mod pipeline;
 pub use hyper::http;
 
@@ -101,6 +102,8 @@ pub struct ProxyState {
     pub pipeline: pipeline::Pipeline,
     pub upstream: String,
     pub audit: audit::AuditSink,
+    /// OCSF 1.9.0 records for the same events (off unless `serve --ocsf`).
+    pub ocsf: audit::AuditSink,
     pub ids: ids::EventIds,
     request_seq: std::sync::atomic::AtomicU64,
     /// If true, Block/Challenge are stopped; otherwise everything is forwarded.
@@ -111,7 +114,7 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
-    pub fn new(shield: Shield, upstream: String, audit: audit::AuditSink, enforce: bool) -> Self {
+    pub fn new(shield: Shield, upstream: String, audit: audit::AuditSink, ocsf: audit::AuditSink, enforce: bool) -> Self {
         let limits = shield.config().limits.clone();
         let decision_headers = shield.config().proxy.decision_headers;
         let mut conn = HttpConnector::new();
@@ -121,6 +124,7 @@ impl ProxyState {
             pipeline: pipeline::Pipeline::new(Arc::new(shield)),
             upstream,
             audit,
+            ocsf,
             ids: ids::EventIds::new(),
             request_seq: std::sync::atomic::AtomicU64::new(0),
             enforce,
@@ -205,6 +209,7 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
             let ts = now_ms();
             let eid = state.ids.next(ts);
             state.audit.record(&d.request, &d.judgment, ts, id, &eid);
+            state.ocsf.record(&d.request, &d.judgment, ts, id, &eid);
             return Ok(refusal(d.judgment.verdict));
         }
     }
@@ -232,6 +237,7 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     let ts = now_ms();
     let eid = state.ids.next(ts);
     state.audit.record(&decision.request, &decision.judgment, ts, id, &eid);
+    state.ocsf.record(&decision.request, &decision.judgment, ts, id, &eid);
     let j = decision.judgment;
 
     if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {
@@ -348,6 +354,7 @@ mod tests {
         ProxyState::new(
             Shield::new(Config::default()),
             "http://127.0.0.1:1".into(),
+            audit::AuditSink::off(),
             audit::AuditSink::off(),
             true,
         )

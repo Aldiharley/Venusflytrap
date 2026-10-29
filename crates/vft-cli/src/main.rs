@@ -69,6 +69,9 @@ enum Command {
         /// Rotate the audit file to <name>.1 once it reaches this many MiB.
         #[arg(long, default_value_t = 100)]
         audit_max_mb: u64,
+        /// Also write OCSF 1.9.0 JSONL to this file (rotated at --audit-max-mb).
+        #[arg(long)]
+        ocsf: Option<String>,
         /// Only log, don't actually block (observation mode) when set.
         #[arg(long)]
         monitor_only: bool,
@@ -194,18 +197,26 @@ fn main() -> anyhow::Result<()> {
             upstream,
             audit,
             audit_max_mb,
+            ocsf,
             monitor_only,
         } => {
             let cfg = load_config(cli.config.as_ref())?;
             let shield = Shield::new(cfg);
-            let sink = vft_proxy::audit::AuditSink::new(
-                audit.map(std::path::PathBuf::from),
-                audit_max_mb.saturating_mul(1024 * 1024),
-            );
+            let max_bytes = audit_max_mb.saturating_mul(1024 * 1024);
+            let sink = vft_proxy::audit::AuditSink::new(audit.map(std::path::PathBuf::from), max_bytes);
+            let ocsf_sink = match ocsf {
+                Some(p) => vft_proxy::audit::AuditSink::with_format(
+                    Some(std::path::PathBuf::from(p)),
+                    max_bytes,
+                    vft_proxy::audit::Format::Ocsf,
+                ),
+                None => vft_proxy::audit::AuditSink::off(),
+            };
             let state = Arc::new(vft_proxy::ProxyState::new(
                 shield,
                 upstream,
                 sink,
+                ocsf_sink,
                 !monitor_only,
             ));
             let rt = tokio::runtime::Builder::new_multi_thread()

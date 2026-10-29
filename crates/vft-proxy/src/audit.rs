@@ -51,17 +51,32 @@ struct AuditLine<'a> {
     option_key: &'a str,
 }
 
+/// What a sink writes per judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// One venusflytrap audit line.
+    Jsonl,
+    /// One line per OCSF 1.9.0 record (`ocsf::encode`).
+    Ocsf,
+}
+
 pub struct AuditSink {
     tx: Option<SyncSender<String>>,
     worker: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
     write_errors: Arc<AtomicU64>,
     enabled: bool,
+    format: Format,
 }
 
 impl AuditSink {
-    /// `None` writes to stdout.
+    /// A JSONL audit sink; `None` writes to stdout.
     pub fn new(path: Option<PathBuf>, max_bytes: u64) -> Self {
+        Self::with_format(path, max_bytes, Format::Jsonl)
+    }
+
+    /// `None` writes to stdout.
+    pub fn with_format(path: Option<PathBuf>, max_bytes: u64, format: Format) -> Self {
         let (tx, rx) = sync_channel::<String>(4096);
         let write_errors = Arc::new(AtomicU64::new(0));
         let errs = write_errors.clone();
@@ -121,6 +136,7 @@ impl AuditSink {
             dropped: Arc::new(AtomicU64::new(0)),
             write_errors,
             enabled: true,
+            format,
         }
     }
 
@@ -132,6 +148,7 @@ impl AuditSink {
             dropped: Arc::new(AtomicU64::new(0)),
             write_errors: Arc::new(AtomicU64::new(0)),
             enabled: false,
+            format: Format::Jsonl,
         }
     }
 
@@ -139,47 +156,28 @@ impl AuditSink {
         let Some(tx) = self.tx.as_ref().filter(|_| self.enabled) else {
             return;
         };
-        let line = AuditLine {
-            event_id,
-            group_id: req
-                .src_ip
-                .zip(j.chain.as_ref())
-                .and_then(|(ip, o)| vft_core::chain::group_id(ip, o)),
-            confidence: j.confidence,
-            attack: j
-                .attack
-                .iter()
-                .map(|a| AttackLine { tactic_id: &a.tactic_id, id: &a.id })
-                .collect(),
-            ts_ms,
-            request_id,
-            method: &req.method,
-            path: &req.path,
-            src_ip: req.src_ip.map(|i| i.to_string()),
-            verdict: format!("{:?}", j.verdict),
-            score: j.score,
-            stage: j.stage().map(|s| format!("{s:?}")),
-            banned: j.banned(),
-            layers: j.normalized_layers,
-            contributions: j
-                .contributions
-                .iter()
-                .map(|c| ContribLine {
-                    construct: c.construct.as_deref(),
-                    field: c.field.as_ref().map(|f| format!("{:?}:{}", f.loc, f.name)),
-                    value: format!("{:?}", c.value),
-                    points: c.points,
-                    shadow: c.shadow,
-                })
-                .collect(),
-            reason: &j.decided_by.msg,
-            cause: format!("{:?}", j.decided_by.kind),
-            option_key: j.decided_by.option_key,
-        };
-        let Ok(json) = serde_json::to_string(&line) else {
-            return;
-        };
-        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = tx.try_send(json) {
+        match self.format {
+            Format::Jsonl => {
+                if let Some(json) = jsonl_line(req, j, ts_ms, request_id, event_id) {
+                    self.send(tx, json);
+                }
+            }
+            Format::Ocsf => {
+                for rec in crate::ocsf::encode(req, j, ts_ms, event_id) {
+                    match serde_json::to_string(&rec) {
+                        Ok(json) => self.send(tx, json),
+                        // An encoding failure is a write error on this sink only.
+                        Err(_) => {
+                            self.write_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn send(&self, tx: &SyncSender<String>, line: String) {
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = tx.try_send(line) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -198,6 +196,48 @@ impl AuditSink {
             let _ = w.join();
         }
     }
+}
+
+/// The JSONL audit line for one judgment; `None` if it does not serialize.
+fn jsonl_line(req: &Request, j: &Judgment, ts_ms: u64, request_id: u64, event_id: &str) -> Option<String> {
+    let line = AuditLine {
+        event_id,
+        group_id: req
+            .src_ip
+            .zip(j.chain.as_ref())
+            .and_then(|(ip, o)| vft_core::chain::group_id(ip, o)),
+        confidence: j.confidence,
+        attack: j
+            .attack
+            .iter()
+            .map(|a| AttackLine { tactic_id: &a.tactic_id, id: &a.id })
+            .collect(),
+        ts_ms,
+        request_id,
+        method: &req.method,
+        path: &req.path,
+        src_ip: req.src_ip.map(|i| i.to_string()),
+        verdict: format!("{:?}", j.verdict),
+        score: j.score,
+        stage: j.stage().map(|s| format!("{s:?}")),
+        banned: j.banned(),
+        layers: j.normalized_layers,
+        contributions: j
+            .contributions
+            .iter()
+            .map(|c| ContribLine {
+                construct: c.construct.as_deref(),
+                field: c.field.as_ref().map(|f| format!("{:?}:{}", f.loc, f.name)),
+                value: format!("{:?}", c.value),
+                points: c.points,
+                shadow: c.shadow,
+            })
+            .collect(),
+        reason: &j.decided_by.msg,
+        cause: format!("{:?}", j.decided_by.kind),
+        option_key: j.decided_by.option_key,
+    };
+    serde_json::to_string(&line).ok()
 }
 
 fn open(p: &std::path::Path) -> Option<File> {
@@ -261,6 +301,25 @@ mod tests {
         assert!(v.get("confidence").is_some(), "{v}");
         assert!(v["attack"].is_array(), "{v}");
         assert!(v.get("group_id").is_some() && v["group_id"].is_null(), "{v}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ocsf_sink_writes_one_line_per_record() {
+        let p = tmp("ocsf.jsonl");
+        let sink = AuditSink::with_format(Some(p.clone()), 10 * 1024 * 1024, Format::Ocsf);
+        let mut req = Request::get("/x");
+        req.query.push(("id".into(), "1 union select a,b".into()));
+        let mut j = Shield::new(Config::default()).inspect(&req);
+        j.verdict = vft_core::Verdict::Block;
+        sink.record(&req, &j, 1_700_000_000_000, 7, "e");
+        sink.close();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let classes: Vec<u64> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["class_uid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(classes, vec![4002, 2004], "{text}");
         let _ = std::fs::remove_file(&p);
     }
 

@@ -44,7 +44,7 @@ async fn stub(respond: bool) -> Stub {
 }
 
 async fn proxy(cfg: Config, upstream: std::net::SocketAddr) -> std::net::SocketAddr {
-    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), true));
+    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), vft_proxy::audit::AuditSink::off(), true));
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(serve_listener(state, l));
@@ -269,7 +269,7 @@ async fn client_that_never_reads_is_dropped_at_max_connection_ms() {
 }
 
 async fn proxy_with_state(cfg: Config, upstream: std::net::SocketAddr) -> (std::net::SocketAddr, Arc<ProxyState>) {
-    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), true));
+    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), vft_proxy::audit::AuditSink::off(), true));
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(serve_listener(state.clone(), l));
