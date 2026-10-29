@@ -135,10 +135,16 @@ for (const scheme of ['light', 'dark'] as const) {
   });
 }
 
-async function expectNoSeriousAxe(page: Page) {
+// The new ATT&CK/OCSF screens are held to every impact level, not only serious and critical.
+async function expectNoAxe(page: Page) {
   const results = await new AxeBuilder({ page: page as unknown as AxePage }).analyze();
-  const bad = results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
-  expect(bad.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+  expect(results.violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+}
+
+// The emulated scheme took effect and no explicit theme override is set.
+async function expectScheme(page: Page, scheme: 'light' | 'dark') {
+  expect(await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)).toBe(scheme === 'dark');
+  await expect(page.locator('html')).not.toHaveAttribute('data-theme');
 }
 
 test('monitor: the Technique and Confidence columns are present, and a blocked row carries an ATT&CK chip', async ({ page }) => {
@@ -176,23 +182,34 @@ test('request details: a blocked request shows ATT&CK chips, confidence, IDs, an
 });
 
 for (const scheme of ['light', 'dark'] as const) {
-  test(`monitor with the Technique and Confidence columns in ${scheme}: no serious axe violations`, async ({ page }) => {
+  test(`monitor with the Technique and Confidence columns in ${scheme}: no axe violations`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: scheme });
     await page.goto('/monitor?static');
     await expect(page.getByRole('grid').getByRole('columnheader', { name: 'Technique' })).toBeVisible();
     await page.waitForLoadState('networkidle');
-    await expectNoSeriousAxe(page);
+    await expectScheme(page, scheme);
+    await expectNoAxe(page);
   });
 
-  test(`request details in ${scheme}: the Evidence tab and the OCSF tab have no serious axe violations`, async ({ page }) => {
+  test(`monitor rows with technique chips in ${scheme}: no axe violations`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
+    await expect(page.getByRole('grid').getByText(/^T\d{4}(\.\d{3})?$/).first()).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await expectScheme(page, scheme);
+    await expectNoAxe(page);
+  });
+
+  test(`request details in ${scheme}: the Evidence tab and the OCSF tab have no axe violations`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: scheme });
     await page.goto('/monitor?static&q=verdict%3Ablock%20cause%3ADetection');
     await page.locator('td[data-c="0"] a').first().click();
     await expect(page.getByRole('region', { name: 'Why this verdict' })).toBeVisible();
     await page.waitForLoadState('networkidle');
-    await expectNoSeriousAxe(page);
+    await expectScheme(page, scheme);
+    await expectNoAxe(page);
     await page.getByRole('tab', { name: 'View as OCSF' }).click();
     await expect(page.getByRole('region', { name: 'OCSF records' })).toBeVisible();
-    await expectNoSeriousAxe(page);
+    await expectNoAxe(page);
   });
 }
