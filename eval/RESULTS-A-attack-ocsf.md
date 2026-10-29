@@ -5,38 +5,51 @@ output format: `serve --ocsf <path>` writes OCSF 1.9.0 JSONL beside the audit fi
 acceptance run. Every number below was copied from the run output; nothing is estimated.
 
 - **Baseline:** a build whose detection is identical to main `ed2a953` (`fix12b.exe`).
-- **Measured tree:** branch `a-attack-ocsf`, release build: `e704769` for the dev A/B and serve diff,
-  `57c5e73` for the OCSF smoke test.
+- **Measured tree:** branch `a-attack-ocsf`, release build: `e704769` for the serve diff, and the
+  final head `6a0c195` (after the final-review fixes) for the dev A/B and the OCSF smoke test. See
+  "Which commit each check ran on".
 - **Corpus:** the blazehttp corpus, with the dev/held-out split manifest (sha256 prefix `06d8905d897ba1a8`).
   Held-out was not touched.
 
 ## What changed (fields only)
 
 - A judgment carries `attack` (a list of ATT&CK tactic and technique tags) and `confidence` (an integer
-  0 to 100, or null), both derived from the deciding construct.
-- Each audit line carries `event_id` (UUIDv7), `group_id` (a source and episode id shared by the
-  requests of one chain episode), `confidence` and `attack`.
+  1 to 100, or null), both derived from the deciding construct. Confidence is attached to every
+  judgment its construct decides, whatever the verdict (a Monitor too), although it was measured on
+  Challenge/Block rows only: it applies to every verdict this construct decides.
+- Each audit line carries `event_id` (UUIDv7), `group_id`, `confidence` and `attack`. The group ID is
+  `"{key}@{episode_start_ms}"`, where `{key}` is the chain's source key as an address (IPv4-mapped IPv6
+  folded to IPv4, IPv6 masked to `chain.ipv6_prefix`), so every request of one source key's episode
+  shares it.
+- A new episode, and so a new `group_id`, also starts when the chain tracker evicts the source at
+  capacity, or when a ban lasts longer than the chain window (requests during a ban are not observed,
+  so the first one observed after it starts a new episode). Fast-tracked requests from a banned source
+  are not observed by the chain at all and carry no `group_id`.
 - `serve --ocsf <path>` writes one OCSF HTTP Activity (class 4002) record per request and one Detection
-  Finding (class 2004) per Challenge or Block.
+  Finding (class 2004) per Challenge or Block. Under `--monitor-only` (nothing is blocked) the 4002 says
+  action Allowed and disposition Logged for every verdict; the 2004 is still written for a Challenge or
+  Block. A sub-technique (`T1595.003`) goes in `sub_technique`, with its parent (`T1595`) in `technique`.
 
 ## No detection change
 
 ### Dev A/B (library mode, dev rows, 16,938 shared rows)
 
-`bash eval/ab_dev.sh a-fields "" "" <baseline binary> target/release/venusflytrap.exe`:
+On the final head `6a0c195`,
+`bash eval/ab_dev.sh a-final "" "" <baseline binary> target/release/venusflytrap.exe`:
 
 ```
 ab: 16938 shared rows, 0 only in a, 0 only in b
 delta: tp=+0 fp=+0
 mcnemar lib_verdict malicious: b=0 c=0 p=1
 mcnemar lib_verdict benign: b=0 c=0 p=1
-a: tp=150 fp=100 tn=16510 fn=178 recall=45.73% fp_rate=0.602%
-b: tp=150 fp=100 tn=16510 fn=178 recall=45.73% fp_rate=0.602%
+a: tp=150 fp=100 tn=16510 fn=178 recall=45.73% [40.42%, 51.14%] fp_rate=0.602% [0.495%, 0.732%]
+b: tp=150 fp=100 tn=16510 fn=178 recall=45.73% [40.42%, 51.14%] fp_rate=0.602% [0.495%, 0.732%]
 fallen: 0 malicious rows from Challenge/Block to Allow/Monitor
 ```
 
-A column-by-column comparison of the two CSVs (`lib_verdict`, `score`, `top`, `cause`, all 16,938 rows)
-found 0 differing cells. The new judgment fields are not in the eval CSV, so this checks that the
+The first run, on `e704769` (step `a-fields`), printed the same counts. A column-by-column comparison
+of the two CSVs (`lib_verdict`, `score`, `top`, `cause`, all 16,938 rows) found 0 differing cells on
+both runs. The new judgment fields are not in the eval CSV, so this checks that the
 verdicts, scores and deciding constructs are unchanged.
 
 ### Serve-mode decision diff (full corpus)
@@ -101,6 +114,26 @@ two construct ids override their family.
 
 ## OCSF smoke test
 
+### Final head (`6a0c195`)
+
+The same command and the same three requests, on the final head. The upstream is closed, so each got a
+502; under `--monitor-only` every request was forwarded.
+
+| Check | Result |
+|---|---|
+| Audit lines | 3, with 3 distinct `event_id`s |
+| OCSF lines | 5: 3 HTTP Activity (4002), 2 Detection Finding (2004) |
+| 4002 `action_id` / `disposition_id` | 1 Allowed / 17 Logged on all three, including the two Blocks (`severity_id` 4) |
+| 2004 records | one each for the union-select Block and the decoy Block |
+| `metadata.uid` | on the three 4002 records only (the 2004s link through `finding_info.uid`) |
+| Decoy finding `attacks` | `technique {T1595, Active Scanning}`, `sub_technique {T1595.003, Wordlist Scanning}` |
+| `group_id` | one value, `127.0.0.1@<episode start>`, on all 3 audit lines and all 5 OCSF records |
+
+The ban row's `firewall_rule` is `{uid: "chain.ban"}` without a name (an unregistered construct). The
+process was stopped afterwards.
+
+### First run (`57c5e73`)
+
 `venusflytrap serve --bind 127.0.0.1:18089 --upstream http://127.0.0.1:9 --audit a.jsonl --ocsf a.ocsf.jsonl --monitor-only`,
 then three requests: a plain GET (`/index.html`), a query with a union-select construct
 (`/search?q=1 union select username,password from users--`) and a configured decoy
@@ -130,18 +163,24 @@ and 2 Detection Finding records). The table and counts above are from that re-ru
 
 ## Which commit each check ran on
 
-The dev A/B and the serve diff were run on `e704769`. Commit `57c5e73` changes only the `attack` and
-`confidence` annotations (`finalize` re-annotates those two fields), not any verdict, score or deciding
-construct, so those two checks were not re-run.
+- Dev A/B: `e704769` first, then again on the final head `6a0c195`, after the final-review fixes
+  (OCSF enforcement and sub-technique slots, per-key group ID, console). Both show delta 0/0, fallen 0
+  and 0 differing cells.
+- Serve diff: `e704769` only. The commits after it change annotations (`attack`, `confidence`), the
+  group ID, the OCSF encoder and the console, none of which feed a verdict, score or deciding construct;
+  the dev A/B on the final head confirms that in library mode.
+- OCSF smoke test: `57c5e73`, then the final head `6a0c195`.
 
 ## What this does not show
 
 - Confidence is dev precision on one corpus (blazehttp), measured on rows that are partly artefacts of
   how the corpus was recorded (benign `Referer` headers). It is a measured number for this corpus, not a
-  calibrated probability for another deployment.
+  calibrated probability for another deployment. It was measured on Challenge/Block rows but is
+  attached to every judgment its construct decides, so a Monitor verdict shows the same number.
 - The mapping is by construct family, not per request: a request that decided on `xss.*` is tagged
   T1190 whether or not it is an exploit of a public-facing application.
 - No SIEM was tested end to end. The OCSF records were checked against the 1.9.0 schema in the
-  branch's tests (commit `e704769`); no ingestion pipeline consumed them.
+  branch's tests (commit `e704769`, extended on the final head to every enum attribute of both classes
+  and to the 1.9.0 `attack` object); no ingestion pipeline consumed them.
 - Held-out was not run: nothing in this sub-project can change a verdict, and the dev and serve diffs
   above are exact.
