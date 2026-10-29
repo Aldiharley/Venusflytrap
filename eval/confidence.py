@@ -66,10 +66,12 @@ def main():
     ap.add_argument('csv'); ap.add_argument('--manifest', required=True)
     ap.add_argument('--rust', required=True); ap.add_argument('--ts', required=True)
     ap.add_argument('--min-rows', type=int, default=5)
+    ap.add_argument('--date', default=None, help='header date (default: today)')
     a = ap.parse_args()
-    sha = hashlib.sha256(open(a.manifest, 'rb').read()).hexdigest()
+    with open(a.manifest, 'rb') as f:
+        sha = hashlib.sha256(f.read()).hexdigest()
     rows = table(count(read_rows(a.csv)), a.min_rows)
-    date = datetime.date.today().isoformat()
+    date = a.date or datetime.date.today().isoformat()
     src = os.path.basename(a.csv)
     for path, text in ((a.rust, render_rust(rows, src, sha, date)), (a.ts, render_ts(rows, src, sha, date))):
         with open(path, 'w', encoding='utf-8', newline='\n') as f:
