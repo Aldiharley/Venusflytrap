@@ -5,7 +5,8 @@ output format: `serve --ocsf <path>` writes OCSF 1.9.0 JSONL beside the audit fi
 acceptance run. Every number below was copied from the run output; nothing is estimated.
 
 - **Baseline:** a build whose detection is identical to main `ed2a953` (`fix12b.exe`).
-- **Measured tree:** branch `a-attack-ocsf` at `e704769`, release build.
+- **Measured tree:** branch `a-attack-ocsf`, release build: `e704769` for the dev A/B and serve diff,
+  `57c5e73` for the OCSF smoke test.
 - **Corpus:** the blazehttp corpus, with the dev/held-out split manifest (sha256 prefix `06d8905d897ba1a8`).
   Held-out was not touched.
 
@@ -116,10 +117,22 @@ The process was stopped afterwards and none was left running.
 
 The union-select request was a Block with `confidence` 17 and ATT&CK T1190 in both the audit line and
 the OCSF finding (`finding_info.attacks`, `confidence_score`). The decoy request was a Block (cause
-`Ban`, reason "hard-block: request hit a honeypot decoy path") and its audit line and finding carry `attack: []` and `confidence`
-null: when the proxy answers a decoy hit, the judgment's deciding construct is not
-`honeypot.decoy-hit`, so the T1595.003 tag in the mapping above is not attached on this path. The
-`honeypot.decoy-hit` tag is covered by a unit test on the judgment only.
+`Ban`, reason "hard-block: request hit a honeypot decoy path; source banned"). Its audit line carries
+`attack` T1595.003 (TA0043 Reconnaissance, Active Scanning: Wordlist Scanning) and its OCSF finding
+carries the same technique in `attacks`. Its `confidence` is `null`: `honeypot.decoy-hit` has no
+measured confidence, because the dev split has no honeypot rows to measure it on.
+
+The smoke test above was first run on `e704769`, where the decoy request carried `attack: []`: a ban
+replaced the judgment's deciding construct, so the tags were lost. Commit `57c5e73` fixes this (a ban
+keeps the ATT&CK tags of the detection that caused it), and the smoke test was re-run on `57c5e73` with
+the same three requests and the same counts (3 audit lines with 3 distinct `event_id`s; 3 HTTP Activity
+and 2 Detection Finding records). The table and counts above are from that re-run.
+
+## Which commit each check ran on
+
+The dev A/B and the serve diff were run on `e704769`. Commit `57c5e73` changes only the `attack` and
+`confidence` annotations (`finalize` re-annotates those two fields), not any verdict, score or deciding
+construct, so those two checks were not re-run.
 
 ## What this does not show
 
