@@ -20,6 +20,7 @@
 pub mod attack;
 pub mod body;
 pub mod chain;
+pub mod confidence;
 pub mod config;
 pub mod detect;
 pub mod graph;
