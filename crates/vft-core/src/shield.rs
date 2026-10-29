@@ -387,7 +387,12 @@ impl Shield {
     }
 
     /// Apply a chain outcome to a judgment. Never lowers the verdict.
+    ///
+    /// Tags describe the detection that decided the request; a ban keeps the
+    /// tags of the detection that caused it, though `decided_by` then names
+    /// the untagged `chain.ban`.
     pub fn finalize(&self, mut j: Judgment, o: &ChainOutcome) -> Judgment {
+        let detected = j.decided_by.construct.clone();
         j.chain = Some(*o);
         let sc = &self.cfg.scoring;
         if o.advanced && o.stage_after.is_some() {
@@ -425,7 +430,11 @@ impl Shield {
             let msg = format!("{}; source banned ({:?}) for {} s", j.decided_by.msg, b.cause, (b.until_ms - b.since_ms) / 1000);
             j.decided_by = ban_cause(&b, msg);
         }
-        j.annotate()
+        if o.new_ban.is_some() {
+            j.annotate_as(detected.as_deref())
+        } else {
+            j.annotate()
+        }
     }
 
     /// The judgment for a request from an actively banned source (no inspection).
@@ -1670,6 +1679,60 @@ mod tests {
         assert_eq!(c.points, 0.0);
         assert_eq!(j.verdict, Verdict::Allow);
         assert_eq!(j.score, 0);
+    }
+
+    #[test]
+    fn a_ban_keeps_the_tags_of_the_detection_that_caused_it() {
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip: IpAddr = "10.0.0.21".parse().unwrap();
+        let mut hp = Request::get("/.git/config");
+        hp.src_ip = Some(ip);
+        let j = s.inspect_stateful(&hp, &mut chain, 0);
+        assert_eq!(j.decided_by.kind, CauseKind::Ban);
+        assert_eq!(j.attack.first().map(|t| t.id.as_str()), Some("T1595.003"));
+        assert_eq!(j.confidence, crate::confidence::confidence("honeypot.decoy-hit"));
+
+        // Repeated exploitation: the ban keeps the injection construct's tags.
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 22));
+        let mut xss = Request::get("/p");
+        xss.src_ip = Some(ip);
+        xss.query.push(("q".into(), "<script>alert(1)</script>".into()));
+        let first = s.inspect_stateful(&xss, &mut chain, 0);
+        let _ = s.inspect_stateful(&xss, &mut chain, 1_000);
+        let banned = s.inspect_stateful(&xss, &mut chain, 2_000);
+        assert_eq!(banned.decided_by.kind, CauseKind::Ban);
+        assert!(!banned.attack.is_empty());
+        assert_eq!(banned.attack, first.attack);
+        assert_eq!(banned.confidence, first.confidence);
+    }
+
+    #[test]
+    fn stage_escalation_keeps_the_original_constructs_tags() {
+        let s = shield();
+        let mut j = Judgment::allow();
+        j.score = 30;
+        j.decided_by.construct = Some("sqli.union-select".into());
+        let j = j.annotate();
+        let o = ChainOutcome { stage_before: None, stage_after: Some(Stage::Recon), advanced: true, new_ban: None, episode_start_ms: None };
+        let j = s.finalize(j, &o);
+        assert_eq!(j.decided_by.kind, CauseKind::ChainEscalation);
+        assert_eq!(j.attack.first().map(|t| t.id.as_str()), Some("T1190"));
+        assert!(j.confidence.is_some());
+    }
+
+    #[test]
+    fn a_fast_tracked_ban_carries_no_tags() {
+        let s = shield();
+        let mut chain = ChainTracker::new(&s.config().chain);
+        let ip: IpAddr = "10.0.0.23".parse().unwrap();
+        let mut hp = Request::get("/.git/config");
+        hp.src_ip = Some(ip);
+        let _ = s.inspect_stateful(&hp, &mut chain, 0);
+        let j = s.inspect_stateful(&browser("/index.html", ip), &mut chain, 1_000);
+        assert!(j.banned() && j.chain.is_none());
+        assert!(j.attack.is_empty() && j.confidence.is_none());
     }
 
     #[test]

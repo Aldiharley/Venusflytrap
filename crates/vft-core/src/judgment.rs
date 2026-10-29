@@ -180,8 +180,17 @@ impl Judgment {
     }
 
     /// Fill `attack` and `confidence` from `decided_by.construct`.
-    pub fn annotate(mut self) -> Self {
-        match self.decided_by.construct.as_deref() {
+    ///
+    /// Tags describe the detection that decided the request; a ban keeps the
+    /// tags of the detection that caused it (see `Shield::finalize`).
+    pub fn annotate(self) -> Self {
+        let construct = self.decided_by.construct.clone();
+        self.annotate_as(construct.as_deref())
+    }
+
+    /// Fill `attack` and `confidence` from `construct`, clearing them when it is `None`.
+    pub(crate) fn annotate_as(mut self, construct: Option<&str>) -> Self {
+        match construct {
             Some(c) => {
                 self.attack = crate::attack::tags_for(c);
                 self.confidence = crate::confidence::confidence(c);
