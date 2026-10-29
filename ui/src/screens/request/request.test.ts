@@ -120,6 +120,10 @@ test('the why panel shows one chip per ATT&CK tag with its tactic, and the preci
   expect(header.querySelectorAll('.tag-item').length).toBe(d.judgment.attack.length);
   const line = within(header).getByText(`Precision on dev: ${d.judgment.confidence}`);
   expect(line.getAttribute('title')).toBe(CONFIDENCE_TITLE);
+  // The explanation is visible text too, not only a tooltip.
+  const help = within(why).getByText(CONFIDENCE_TITLE, { selector: 'p:not([title])' });
+  expect(help.className).toContain('secondary');
+  expect(help.className).not.toContain('sr-only');
 });
 
 test('a construct with no measured precision says "not measured"; one with no technique shows none', async () => {
@@ -127,6 +131,7 @@ test('a construct with no measured precision says "not measured"; one with no te
   const why = await show(d);
   const line = within(why).getByText('Precision on dev: not measured');
   expect(line.getAttribute('title')).toBe(CONFIDENCE_TITLE);
+  expect(within(why).getByText(CONFIDENCE_TITLE, { selector: 'p:not([title])' })).toBeTruthy();
   expect(why.querySelectorAll('.tag-item').length).toBe(0);
   expect(why.textContent).toContain('No ATT&CK technique');
 });

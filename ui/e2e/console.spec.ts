@@ -163,6 +163,7 @@ test('request details: a blocked request shows ATT&CK chips, confidence, IDs, an
   await expect(why).toBeVisible();
   await expect(why.getByText(/^T\d{4}(\.\d{3})?$/).first()).toBeVisible();
   await expect(why.getByText(/^Precision on dev: (\d+|not measured)/)).toBeVisible();
+  await expect(why.getByText(/^Share of this construct's blocks on the dev split/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Copy event ID' })).toBeVisible();
 
   const tablist = page.getByRole('tablist', { name: 'Request view' });

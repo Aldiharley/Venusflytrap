@@ -45,7 +45,10 @@
 
   // The event id is the history row's id for now: the fixture ids are not UUIDs.
   const eventId = $derived(d?.row.id ?? '');
-  const ocsf = $derived(d ? JSON.stringify(encodeOcsf(d, eventId, { version: app.status?.version }), null, 2) : '');
+  // Enforced unless something says the proxy runs monitor-only: neither the status record nor the
+  // fixture rows carry the mode yet, so this is always true for now (the B API will provide it).
+  const enforced = true;
+  const ocsf = $derived(d ? JSON.stringify(encodeOcsf(d, eventId, { version: app.status?.version, enforced }), null, 2) : '');
   const CONFIDENCE_HELP = "Share of this construct's blocks on the dev split that were attacks (lower 95 % bound). It does not change the score.";
 
   async function copy(text: string, what: string) {
@@ -140,6 +143,7 @@
         {/each}
         <p class="conf small secondary" title={CONFIDENCE_HELP}>Precision on dev: {d.judgment.confidence ?? 'not measured'}</p>
       </header>
+      <p class="conf-help small secondary">{CONFIDENCE_HELP}</p>
       <p class="sentence">{#each parts as p, i (i)}{#if p.href}<Link href={p.href} class="mono code">{p.text}</Link>{:else if p.code}<code class="mono code">{p.text}</code>{:else}{p.text}{/if}{/each}</p>
       <dl class="cause">
         <div><dt class="label-caps">Decided by</dt><dd>{cause.kind}</dd></div>
@@ -279,6 +283,7 @@
   .why-head .title { margin-right: var(--vf-space-1); }
   .tag-item { display: inline-flex; align-items: center; gap: var(--vf-space-1); }
   .conf { margin: 0; }
+  .conf-help { margin: calc(-1 * var(--vf-space-2)) 0 0; }
   .idrow { display: flex; align-items: center; gap: var(--vf-space-1); }
   .icon { padding: 0 var(--vf-space-2); }
   .why { grid-column: 1 / 8; }
