@@ -330,7 +330,10 @@ impl Shield {
             decided_by,
             chain: None,
             normalized_layers: max_layers,
-        };
+            attack: Vec::new(),
+            confidence: None,
+        }
+        .annotate();
         (j, work.used)
     }
 
@@ -422,7 +425,7 @@ impl Shield {
             let msg = format!("{}; source banned ({:?}) for {} s", j.decided_by.msg, b.cause, (b.until_ms - b.since_ms) / 1000);
             j.decided_by = ban_cause(&b, msg);
         }
-        j
+        j.annotate()
     }
 
     /// The judgment for a request from an actively banned source (no inspection).
@@ -448,7 +451,10 @@ impl Shield {
             decided_by: ban_cause(ban, format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms)),
             chain: None,
             normalized_layers: 0,
+            attack: Vec::new(),
+            confidence: None,
         }
+        .annotate()
     }
 
     /// Single-threaded stateful inspection: ban fast-track, pure inspect,
@@ -1664,5 +1670,17 @@ mod tests {
         assert_eq!(c.points, 0.0);
         assert_eq!(j.verdict, Verdict::Allow);
         assert_eq!(j.score, 0);
+    }
+
+    #[test]
+    fn judgments_are_annotated_and_scores_unchanged() {
+        let s = shield();
+        let mut req = Request::get("/search");
+        req.query.push(("q".into(), "1 union select a from b".into()));
+        let j = s.inspect(&req);
+        assert_eq!(j.decided_by.construct.as_deref(), Some("sqli.union-select"));
+        assert_eq!(j.attack.first().map(|t| t.id.as_str()), Some("T1190"));
+        let plain = s.inspect(&Request::get("/"));
+        assert!(plain.attack.is_empty() && plain.confidence.is_none());
     }
 }

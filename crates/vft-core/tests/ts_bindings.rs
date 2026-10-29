@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use ts_rs::{Config, TS};
 use vft_core::chain::{BanCause, BanRecord, ChainOutcome};
 use vft_core::options::{Apply, Expertise, OptionDescriptor, OptionKind, Source};
-use vft_core::{Cause, CauseKind, Contribution, Family, FieldRef, FourValued, Judgment, Location, Stage, Verdict};
+use vft_core::{AttackTag, Cause, CauseKind, Contribution, Family, FieldRef, FourValued, Judgment, Location, Stage, Verdict};
 
 fn gen_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/src/gen")
@@ -33,6 +33,7 @@ fn generated_types_are_current() {
     let cfg = Config::new().with_large_int("number");
     let mut stale = Vec::new();
     check::<Judgment>(&cfg, &mut stale);
+    check::<AttackTag>(&cfg, &mut stale);
     check::<Cause>(&cfg, &mut stale);
     check::<CauseKind>(&cfg, &mut stale);
     check::<Contribution>(&cfg, &mut stale);
