@@ -17,6 +17,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod attack;
 pub mod body;
 pub mod chain;
 pub mod config;
@@ -32,6 +33,7 @@ pub mod request;
 pub mod score;
 pub mod shield;
 
+pub use attack::AttackTag;
 pub use chain::{event_for, BanCause, BanRecord, ChainOutcome, ChainTracker, Event, SourceKey};
 pub use config::{BanPolicy, Config};
 pub use detect::{AiOracle, HeuristicOracle};
