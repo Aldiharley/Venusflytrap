@@ -5,7 +5,8 @@
   // the visually hidden text, so the meaning is not carried by colour or by an opaque id alone.
   // Reuses the evidence chip's neutral look (design system §1.3): it is a label, never a verdict.
   let { tag, compact = false }: { tag: AttackTag; compact?: boolean } = $props();
-  const full = $derived(`${tag.tactic} · ${tag.name}`);
+  // A bare tag (id only, no name) is named by its id.
+  const full = $derived(tag.name ? `${tag.tactic} · ${tag.name}` : tag.id);
 </script>
 
 <span class="chip" class:compact title={full}><span aria-hidden="true">{tag.id}</span><span class="sr-only">{full}</span></span>

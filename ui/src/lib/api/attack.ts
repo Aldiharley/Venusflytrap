@@ -30,23 +30,20 @@ const OVERRIDE: Record<string, readonly AttackTag[]> = {
   'intel.deny-listed': [],
 };
 
-/** Construct id to family: every id the fixtures emit, and the ids the Rust tests pin. */
+/** Construct id to family: the engine registry ids the fixtures emit and the Rust tests pin. Anything else has no tags. */
 const FAMILY: Record<string, Family> = {
   'sqli.union-select': 'Sqli',
   'sqli.boolean-tautology': 'Sqli',
   'sqli.fn-load-file': 'Sqli',
   'sqli.stacked-query': 'Sqli',
   'sqli.quote-breakout': 'Sqli',
-  'sqli.inline-comment': 'Sqli',
   'sig.classic-or': 'Sqli',
   'xss.event-handler': 'Xss',
   'xss.script-tag': 'Xss',
   'xss.dangerous-proto': 'Xss',
-  'xss.svg-onload': 'Xss',
   'cmd.chained-command': 'CommandInjection',
   'cmd.shell-meta': 'CommandInjection',
   'path.directory-traversal': 'PathTraversal',
-  'path.double-dot-encoded': 'PathTraversal',
   'sig.etc-passwd': 'PathTraversal',
   'recon.sensitive-path-probe': 'Recon',
   'honeypot.decoy-hit': 'Honeypot',

@@ -1,13 +1,12 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import type { SourceError } from '../lib/api/errors';
-  import { techniquesFor } from '../lib/api/attack';
   import { Latest } from '../lib/api/latest';
   import { GROUP_BYS, type GroupBy, type HistoryPage, type HistoryRow } from '../lib/api/types';
-  import AttackChip from '../lib/components/AttackChip.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import ErrorCard from '../lib/components/ErrorCard.svelte';
   import StageChip from '../lib/components/StageChip.svelte';
+  import TechniqueCell from '../lib/components/TechniqueCell.svelte';
   import { toasts } from '../lib/components/toasts.svelte';
   import VerdictChip from '../lib/components/VerdictChip.svelte';
   import { fmtClock, fmtCount, fmtStamp } from '../lib/format';
@@ -371,7 +370,7 @@
                     class="c-{col.key}"
                   >
                     {#if col.key === 'ts'}
-                      <a href={requestHref(row)} tabindex="-1" class="mono clip" onclick={(e) => linkClick(e, () => openRequest(row, c))}>{fmtStamp(row.ts_ms, withDate)}</a>
+                      <a href={requestHref(row)} tabindex="-1" class="mono clip" title={fmtStamp(row.ts_ms, true)} onclick={(e) => linkClick(e, () => openRequest(row, c))}>{fmtStamp(row.ts_ms, withDate)}</a>
                     {:else if col.key === 'verdict'}
                       <VerdictChip verdict={row.verdict} size="sm" />{#if row.sampled}<span class="tag">sampled</span>{/if}
                     {:else if col.key === 'score'}
@@ -387,7 +386,7 @@
                     {:else if col.key === 'construct'}
                       <span class="mono clip" title={row.construct ?? undefined}>{row.construct ?? '—'}</span>
                     {:else if col.key === 'technique'}
-                      {#if row.technique === null}<span aria-hidden="true">—</span><span class="sr-only">no technique</span>{:else}<span class="techs">{#each techniquesFor(row.construct) as tag (tag.id)}<AttackChip {tag} compact />{/each}</span>{/if}
+                      <TechniqueCell technique={row.technique} construct={row.construct} />
                     {:else if col.key === 'confidence'}
                       {#if row.confidence === null}<span aria-hidden="true">—</span><span class="sr-only">not measured</span>{:else}<span class="num">{row.confidence}</span>{/if}
                     {:else if col.key === 'stage'}
@@ -456,7 +455,6 @@
   .grid.dated th.c-ts { width: 6.4%; }
   .grid.dated th.c-src { width: 6.5%; }
   .grid td.c-verdict, .grid td.c-technique { white-space: normal; }
-  .techs { display: inline-flex; flex-wrap: wrap; gap: 2px; }
   .srcwrap { display: flex; align-items: center; min-width: 0; }
   .grid td:focus-visible { outline-offset: -2px; box-shadow: none; }
   .grid tr:hover td { background: var(--vf-row-hover); }

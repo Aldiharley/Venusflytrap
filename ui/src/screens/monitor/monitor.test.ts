@@ -197,3 +197,8 @@ test('ArrowRight walks Construct, Technique, Confidence, Stage in order', async 
   }
   expect(grid.querySelector('th.c-stage')!.textContent).toBe('Stage');
 });
+
+test('the Time link carries the full stamp as its title', async () => {
+  const { grid } = await mount('/monitor');
+  expect(cell(grid, 0, 0).querySelector('a')!.getAttribute('title')).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{2}:\d{2}:\d{2}$/);
+});

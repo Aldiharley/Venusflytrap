@@ -19,7 +19,7 @@ test('recon and deception map to Active Scanning', () => {
 });
 
 test('limits, anomaly, deny-list, unregistered ids and null have no tags', () => {
-  for (const c of ['limit.payload-truncated', 'ai.anomaly-score', 'api.oversized-header', 'intel.deny-listed', 'chain.ban', 'nope.nope', null]) {
+  for (const c of ['limit.payload-truncated', 'ai.anomaly-score', 'api.oversized-header', 'intel.deny-listed', 'chain.ban', 'nope.nope', 'sqli.inline-comment', 'xss.svg-onload', 'path.double-dot-encoded', null]) {
     expect(ids(c), String(c)).toEqual([]);
   }
 });
