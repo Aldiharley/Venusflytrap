@@ -2,6 +2,8 @@ import { expect, test } from 'vitest';
 import { makeFixtures } from './fixtures';
 import { BANDS, PERIOD_MS, makeHistory, rowId } from './history';
 import { parse } from '../query';
+import { techniquesFor } from './attack';
+import { confidenceOf } from './confidence';
 import type { Judgment, Verdict } from './types';
 
 const NOW = Date.UTC(2026, 9, 28, 14, 5, 0);
@@ -108,4 +110,39 @@ test('a detail carries the deciding bands, its timeline and snippets', () => {
   for (const t of d.timeline) expect(t.src_key).toBe(d.row.src_key);
   expect(d.timeline.every((t, i, a) => i === 0 || a[i - 1].ts_ms > t.ts_ms)).toBe(true);
   expect(d.fields?.[0]?.field).toEqual(d.judgment.decided_by.field);
+});
+
+test('rows and judgments carry ATT&CK, confidence and group from the deciding construct only', () => {
+  const rows = Array.from({ length: 200 }, (_, i) => h.row(K - i));
+  expect(rows.some((r) => r.technique !== null)).toBe(true);
+  expect(rows.some((r) => r.confidence !== null)).toBe(true);
+  for (const r of rows) {
+    expect(r.technique).toBe(techniquesFor(r.construct)[0]?.id ?? null);
+    expect(r.confidence).toBe(confidenceOf(r.construct));
+  }
+  for (const d of Array.from({ length: 200 }, (_, i) => h.detail(rowId(K - i))!)) {
+    const j = d.judgment;
+    expect(j.attack).toEqual(techniquesFor(j.decided_by.construct));
+    expect(j.confidence).toBe(confidenceOf(j.decided_by.construct));
+    expect(d.row.technique).toBe(j.attack[0]?.id ?? null);
+    expect(d.row.confidence).toBe(j.confidence);
+    if (j.chain) {
+      expect(j.chain.episode_start_ms).not.toBeNull();
+      expect(j.chain.episode_start_ms!).toBeLessThanOrEqual(d.row.ts_ms);
+      expect(d.row.group_id).toBe(`${d.ip}@${j.chain.episode_start_ms}`);
+    } else {
+      expect(d.row.group_id).toBeNull();
+    }
+  }
+});
+
+test('a fast-tracked banned judgment has no tags and no confidence', () => {
+  const banned = HOUR.filter((d) => d.judgment.decided_by.kind === 'Ban');
+  expect(banned.length).toBeGreaterThan(0);
+  for (const d of banned) {
+    expect(d.judgment.attack).toEqual([]);
+    expect(d.judgment.confidence).toBeNull();
+    expect(d.row.technique).toBeNull();
+    expect(d.row.confidence).toBeNull();
+  }
 });

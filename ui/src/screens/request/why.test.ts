@@ -6,10 +6,10 @@ const BANDS = { monitor_at: 40, challenge_at: 70, block_at: 90 };
 function detail(cause: Partial<Cause>, over: Partial<RequestDetail> = {}, verdict: RequestDetail['row']['verdict'] = 'Block', score = 94): RequestDetail {
   const decided_by: Cause = { kind: 'Detection', option_key: 'scoring.block_at', construct: 'sqli.union-select', field: { loc: 'Query', name: 'id' }, msg: 'm', ...cause };
   return {
-    row: { id: 'R1', ts_ms: 0, verdict, score, src_key: '203.0.113.7', method: 'GET', host: 'h', path: '/api/items', construct: decided_by.construct, stage: null, cause: decided_by.kind, decided_option: decided_by.option_key, config_rev: 12, latency_us: 1, upstream_status: null, sampled: false },
+    row: { id: 'R1', ts_ms: 0, verdict, score, src_key: '203.0.113.7', method: 'GET', host: 'h', path: '/api/items', construct: decided_by.construct, technique: null, confidence: null, group_id: null, stage: null, cause: decided_by.kind, decided_option: decided_by.option_key, config_rev: 12, latency_us: 1, upstream_status: null, sampled: false },
     ip: '203.0.113.7', query: '', bands: BANDS, ban: null, timeline: [], fields: null,
     setting: { key: decided_by.option_key, value: '90', source: 'override', rev: 12 },
-    judgment: { verdict, score, contributions: [], decided_by, chain: null, normalized_layers: 0 },
+    judgment: { verdict, score, contributions: [], decided_by, chain: null, normalized_layers: 0, attack: [], confidence: null },
     ...over,
   };
 }

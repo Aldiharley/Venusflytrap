@@ -6,7 +6,7 @@ import { app } from '../../lib/state/app.svelte';
 import { router } from '../../lib/state/router.svelte';
 import Monitor from '../Monitor.svelte';
 
-// Each test renders a 100-row, 13-column grid in jsdom; give slow machines room.
+// Each test renders a 100-row, 15-column grid in jsdom; give slow machines room.
 vi.setConfig({ testTimeout: 20_000 });
 
 beforeAll(async () => {
@@ -165,4 +165,35 @@ test('auto-refresh pauses while focus is in the grid and offers the new results 
   expect(cell(grid, 0, 0).querySelector('a')!.getAttribute('href')).toBe(firstId); // rows did not move
   await fireEvent.click(screen.getByRole('button', { name: 'Show' }));
   await waitFor(() => expect(cell(screen.getByRole('grid'), 0, 0).querySelector('a')!.getAttribute('href')).not.toBe(firstId));
+});
+
+test('the grid has Technique and Confidence columns right after Construct', async () => {
+  const { grid } = await mount('/monitor?q=construct%3Acmd.chained-command');
+  const heads = within(grid).getAllByRole('columnheader').map((h) => h.textContent);
+  expect(heads.slice(7, 10)).toEqual(['Construct', 'Technique', 'Confidence']);
+  expect(within(grid).getByRole('columnheader', { name: 'Confidence' }).getAttribute('title')).toBe('Precision on dev of the deciding construct');
+  const row = grid.querySelector('tbody tr')!;
+  const tech = row.querySelector('td[data-c="8"]')!;
+  expect(tech.textContent).toContain('T1190');
+  expect(tech.textContent).toContain('T1059');
+  expect(tech.querySelector('[title="Initial Access · Exploit Public-Facing Application"]')).toBeTruthy();
+  expect(tech.querySelector('.sr-only')!.textContent).toBe('Initial Access · Exploit Public-Facing Application');
+  expect(row.querySelector('td[data-c="9"]')!.textContent!.trim()).toBe('70');
+});
+
+test('a row with no technique or confidence shows a dash', async () => {
+  const { grid } = await mount('/monitor?q=cause%3ABan');
+  const row = grid.querySelector('tbody tr')!;
+  expect(row.querySelector('td[data-c="8"]')!.textContent!.trim()).toBe('—no technique');
+  expect(row.querySelector('td[data-c="9"]')!.textContent!.trim()).toBe('—not measured');
+});
+
+test('ArrowRight walks Construct, Technique, Confidence, Stage in order', async () => {
+  const { grid } = await mount('/monitor?q=verdict%3Ablock');
+  cell(grid, 0, 7).focus();
+  for (const c of [8, 9, 10]) {
+    await fireEvent.keyDown(grid, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(cell(grid, 0, c));
+  }
+  expect(grid.querySelector('th.c-stage')!.textContent).toBe('Stage');
 });

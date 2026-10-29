@@ -4,6 +4,8 @@
 // score.rs: non-shadow points sum to the score, shadow contributions score 0).
 import { matches, type Term } from '../query';
 import type { Fixtures } from './fixtures';
+import { techniquesFor } from './attack';
+import { confidenceOf } from './confidence';
 import { DECOYS } from './fixtures';
 import { mulberry32 } from './rng';
 import { banView } from './views';
@@ -16,6 +18,8 @@ export const PERIOD_MS = 10_000;
 /** `history.retention_days` (SP4) at its expected default. */
 export const RETENTION_MS = 30 * 86_400_000;
 export const CONFIG_REV = 12;
+/** Fixture episodes: a source's chain episode starts on the boundary of its 30 min window. */
+export const EPISODE_MS = 30 * 60_000;
 /** The engine defaults (config.rs ScoringConfig). */
 export const BANDS: Bands = { monitor_at: 40, challenge_at: 70, block_at: 90 };
 const HOST = 'shop.example';
@@ -166,14 +170,14 @@ export function makeHistory(f: Fixtures, now: () => number): History {
         verdict: 'Allow', score,
         contributions: noisy ? [{ engine: 'ai', field, construct: null, family: null, value: 'Suspicious', weight: 0.3, points: score, shadow: false }] : [],
         decided_by: { kind: 'NoEvidence', option_key: 'scoring.monitor_at', construct: null, field: null, msg: `score ${score} < scoring.monitor_at ${BANDS.monitor_at}` },
-        chain: null, normalized_layers: query.includes('%') ? 1 : 0,
+        chain: null, normalized_layers: query.includes('%') ? 1 : 0, attack: [], confidence: null,
       };
       if (query) fields = [{ field, raw: query.split('=')[1], decoded: decodeURIComponent(query.split('=')[1]), layers: query.includes('%') ? ['url'] : [] }];
     } else {
       const s = pick(rnd, attackers);
       src = s;
       const ban = f.banRecords.get(s.key);
-      const chain = { stage_before: s.stage, stage_after: s.stage, advanced: false, new_ban: null };
+      const chain = { stage_before: s.stage, stage_after: s.stage, advanced: false, new_ban: null, episode_start_ms: Math.floor(ts_ms / EPISODE_MS) * EPISODE_MS };
       if (ban && ban.since_ms <= ts_ms && ts_ms < ban.until_ms && rnd() < 0.6) {
         const construct = pick(rnd, s.top_constructs);
         ({ method, path } = ATTACKS[construct] ?? ATTACKS['sqli.union-select']);
@@ -181,7 +185,7 @@ export function makeHistory(f: Fixtures, now: () => number): History {
           verdict: 'Block', score: 100,
           contributions: [{ engine: 'chain', field: null, construct: 'chain.ban', family: null, value: 'Dangerous', weight: 1, points: 100, shadow: false }],
           decided_by: { kind: 'Ban', option_key: BAN_OPTION[ban.cause], construct: 'chain.ban', field: null, msg: `source banned (${ban.cause}) until t=${ban.until_ms} ms` },
-          chain: null, normalized_layers: 0,
+          chain: null, normalized_layers: 0, attack: [], confidence: null,
         };
         fields = [];
       } else if (rnd() < 0.08) {
@@ -191,7 +195,7 @@ export function makeHistory(f: Fixtures, now: () => number): History {
           verdict: 'Block', score: 100,
           contributions: [{ engine: 'honeypot', field: PATH, construct: 'honeypot.decoy-hit', family: 'Honeypot', value: 'Dangerous', weight: 1, points: 100, shadow: false }],
           decided_by: { kind: 'Honeypot', option_key: 'honeypot.decoy_paths', construct: 'honeypot.decoy-hit', field: PATH, msg: 'hard-block: request hit a honeypot decoy path' },
-          chain, normalized_layers: 0,
+          chain, normalized_layers: 0, attack: techniquesFor('honeypot.decoy-hit'), confidence: confidenceOf('honeypot.decoy-hit'),
         };
         fields = [{ field: PATH, raw: path, decoded: path, layers: [] }];
       } else {
@@ -205,7 +209,10 @@ export function makeHistory(f: Fixtures, now: () => number): History {
           ? (r < 0.7 ? between(rnd, 90, 100) : between(rnd, 70, 89))
           : (r < 0.7 ? between(rnd, 40, 69) : between(rnd, 70, 89));
         const { contributions, decided_by } = detection(score, a, construct, rnd);
-        judgment = { verdict: bandOf(score), score, contributions, decided_by, chain, normalized_layers: a.layers.length };
+        judgment = {
+          verdict: bandOf(score), score, contributions, decided_by, chain, normalized_layers: a.layers.length,
+          attack: techniquesFor(construct), confidence: confidenceOf(construct),
+        };
         fields = [{ field: a.field, raw: a.raw, decoded: a.decoded, layers: a.layers }];
       }
     }
@@ -214,7 +221,8 @@ export function makeHistory(f: Fixtures, now: () => number): History {
     const forwarded = judgment.verdict === 'Allow' || judgment.verdict === 'Monitor';
     const row: HistoryRow = {
       ...base, verdict: judgment.verdict, score: judgment.score, src_key: src.key, method, path,
-      construct: c.construct, stage: src.stage, cause: c.kind, decided_option: c.option_key,
+      construct: c.construct, technique: judgment.attack[0]?.id ?? null, confidence: judgment.confidence,
+      group_id: judgment.chain ? `${src.ip}@${judgment.chain.episode_start_ms}` : null, stage: src.stage, cause: c.kind, decided_option: c.option_key,
       upstream_status: forwarded ? (method === 'POST' && path === '/login' ? 302 : 200) : null,
       sampled: judgment.verdict === 'Allow',
     };

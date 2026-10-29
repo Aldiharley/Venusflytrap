@@ -99,6 +99,12 @@ export interface HistoryRow {
   /** Path without the query string. */
   path: string;
   construct: string | null;
+  /** The id of the first ATT&CK technique of `construct` (`judgment.attack[0]`), null when it has none. */
+  technique: string | null;
+  /** `judgment.confidence`: precision on dev of the deciding construct, 1-100. */
+  confidence: number | null;
+  /** `${ip}@${chain.episode_start_ms}` when the chain observed the request, otherwise null. */
+  group_id: string | null;
   stage: Stage | null;
   /** `decided_by.kind`, the G6 `cause:` field. */
   cause: CauseKind;

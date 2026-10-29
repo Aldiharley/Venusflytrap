@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import type { SourceError } from '../lib/api/errors';
+  import { techniquesFor } from '../lib/api/attack';
   import { Latest } from '../lib/api/latest';
   import { GROUP_BYS, type GroupBy, type HistoryPage, type HistoryRow } from '../lib/api/types';
+  import AttackChip from '../lib/components/AttackChip.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import ErrorCard from '../lib/components/ErrorCard.svelte';
   import StageChip from '../lib/components/StageChip.svelte';
@@ -30,12 +32,19 @@
     { key: 'host', label: 'Host', field: 'host' },
     { key: 'path', label: 'Path', field: 'path' },
     { key: 'construct', label: 'Construct', field: 'construct' },
+    { key: 'technique', label: 'Technique', field: null },
+    { key: 'confidence', label: 'Confidence', field: null, n: true },
     { key: 'stage', label: 'Stage', field: 'stage' },
     { key: 'decided', label: 'Decided by', field: null },
     { key: 'rev', label: 'Rev', field: 'config_rev', n: true },
     { key: 'latency', label: 'Latency', field: null, n: true },
     { key: 'upstream', label: 'HTTP', field: null, n: true },
   ];
+  const HEAD_TITLE: Record<string, string | undefined> = {
+    upstream: 'Upstream status',
+    technique: 'MITRE ATT&CK technique of the deciding construct',
+    confidence: 'Precision on dev of the deciding construct',
+  };
   const GROUP_LABEL: Record<GroupBy, string> = { src: 'Source', path: 'Path', construct: 'Construct', stage: 'Stage', verdict: 'Verdict' };
 
   const st = $derived(readState(router.search));
@@ -346,7 +355,7 @@
             {/each}
           </tbody>
         {:else}
-          <thead><tr>{#each COLS as c (c.key)}<th scope="col" class="c-{c.key}" class:n={c.n} title={c.key === 'upstream' ? 'Upstream status' : undefined}>{c.label}</th>{/each}</tr></thead>
+          <thead><tr>{#each COLS as c (c.key)}<th scope="col" class="c-{c.key}" class:n={c.n} title={HEAD_TITLE[c.key]}>{c.label}</th>{/each}</tr></thead>
           <tbody>
             {#each rows as row, r (row.id)}
               <tr class:blocked={row.verdict === 'Block'} aria-rowindex={r + 2}>
@@ -377,6 +386,10 @@
                       <span class="mono clip" title={row.path}>{row.path}</span>
                     {:else if col.key === 'construct'}
                       <span class="mono clip" title={row.construct ?? undefined}>{row.construct ?? '—'}</span>
+                    {:else if col.key === 'technique'}
+                      {#if row.technique === null}<span aria-hidden="true">—</span><span class="sr-only">no technique</span>{:else}<span class="techs">{#each techniquesFor(row.construct) as tag (tag.id)}<AttackChip {tag} compact />{/each}</span>{/if}
+                    {:else if col.key === 'confidence'}
+                      {#if row.confidence === null}<span aria-hidden="true">—</span><span class="sr-only">not measured</span>{:else}<span class="num">{row.confidence}</span>{/if}
                     {:else if col.key === 'stage'}
                       <StageChip stage={row.stage} compact />
                     {:else if col.key === 'decided'}
@@ -425,23 +438,25 @@
   .grid { font-size: var(--vf-fs-sm); table-layout: fixed; }
   .grid th, .grid td { padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .grid th { position: sticky; top: 0; z-index: 1; background: var(--vf-surface-raised); }
-  .grid th.c-ts { width: 7%; }
-  .grid th.c-verdict { width: 13%; }
-  .grid th.c-score { width: 5%; }
-  .grid th.c-src { width: 11%; }
+  .grid th.c-ts { width: 5.1%; }
+  .grid th.c-verdict { width: 12.5%; }
+  .grid th.c-score { width: 4.8%; }
+  .grid th.c-src { width: 7.5%; }
   .grid th.c-method { width: 6%; }
-  .grid th.c-host { width: 8%; }
-  .grid th.c-path { width: 8%; }
-  .grid th.c-construct { width: 10%; }
-  .grid th.c-stage { width: 7%; }
-  .grid th.c-decided { width: 11%; }
+  .grid th.c-host { width: 5.5%; }
+  .grid th.c-path { width: 5%; }
+  .grid th.c-construct { width: 8%; }
+  .grid th.c-technique { width: 8.6%; }
+  .grid th.c-confidence { width: 8%; }
+  .grid th.c-stage { width: 7.5%; }
+  .grid th.c-decided { width: 7.5%; }
   .grid th.c-rev { width: 4%; }
   .grid th.c-latency { width: 6%; }
   .grid th.c-upstream { width: 4%; }
-  .grid.dated th.c-ts { width: 10%; }
-  .grid.dated th.c-path { width: 7%; }
-  .grid.dated th.c-construct { width: 8%; }
-  .grid td.c-verdict { white-space: normal; }
+  .grid.dated th.c-ts { width: 6.4%; }
+  .grid.dated th.c-src { width: 6.5%; }
+  .grid td.c-verdict, .grid td.c-technique { white-space: normal; }
+  .techs { display: inline-flex; flex-wrap: wrap; gap: 2px; }
   .srcwrap { display: flex; align-items: center; min-width: 0; }
   .grid td:focus-visible { outline-offset: -2px; box-shadow: none; }
   .grid tr:hover td { background: var(--vf-row-hover); }
