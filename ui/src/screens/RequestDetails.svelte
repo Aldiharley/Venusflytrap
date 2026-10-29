@@ -3,13 +3,17 @@
   import type { SourceError } from '../lib/api/errors';
   import { Latest } from '../lib/api/latest';
   import type { RequestDetail } from '../lib/api/types';
+  import AttackChip from '../lib/components/AttackChip.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import ErrorCard from '../lib/components/ErrorCard.svelte';
   import EvidenceChip from '../lib/components/EvidenceChip.svelte';
   import Link from '../lib/components/Link.svelte';
   import StageChip from '../lib/components/StageChip.svelte';
   import VerdictChip from '../lib/components/VerdictChip.svelte';
+  import { toasts } from '../lib/components/toasts.svelte';
   import { fmtClock } from '../lib/format';
+  import { Copy } from '../lib/icons';
+  import { encodeOcsf } from '../lib/ocsf';
   import { app } from '../lib/state/app.svelte';
   import ScoreGauge from './request/ScoreGauge.svelte';
   import { constructHref, contributionRows, fieldLabel, settingHref, whyParts } from './request/why';
@@ -38,6 +42,33 @@
   const fmtTime = (ms: number) => `${new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${fmtClock(ms)}`;
   const fmtPoints = (n: number) => n.toFixed(1);
   const sourceHref = (key: string) => `/sources/${encodeURIComponent(key)}`;
+
+  // The event id is the history row's id for now: the fixture ids are not UUIDs.
+  const eventId = $derived(d?.row.id ?? '');
+  const ocsf = $derived(d ? JSON.stringify(encodeOcsf(d, eventId, { version: app.status?.version }), null, 2) : '');
+  const CONFIDENCE_HELP = "Share of this construct's blocks on the dev split that were attacks (lower 95 % bound). It does not change the score.";
+
+  async function copy(text: string, what: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toasts.push({ tone: 'success', text: `Copied ${what}.` });
+    } catch {
+      toasts.push({ tone: 'warn', text: `Could not copy the ${what}.` });
+    }
+  }
+
+  const TABS = [{ key: 'evidence', label: 'Evidence' }, { key: 'ocsf', label: 'View as OCSF' }] as const;
+  type TabKey = (typeof TABS)[number]['key'];
+  let tab = $state<TabKey>('evidence');
+  let tabEls: HTMLButtonElement[] = [];
+  function onTabKey(e: KeyboardEvent, i: number) {
+    const to = e.key === 'ArrowRight' ? (i + 1) % TABS.length : e.key === 'ArrowLeft' ? (i + TABS.length - 1) % TABS.length
+      : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    tab = TABS[to].key;
+    tabEls[to]?.focus();
+  }
 </script>
 
 <nav class="crumbs secondary" aria-label="Breadcrumb">
@@ -59,6 +90,15 @@
       <div><dt class="label-caps">Inspection</dt><dd class="num">{d.row.latency_us} µs</dd></div>
       <div><dt class="label-caps">Upstream</dt><dd class="num">{d.row.upstream_status ?? 'not forwarded'}</dd></div>
       <div><dt class="label-caps">Config</dt><dd class="num">rev {d.row.config_rev}</dd></div>
+      <div><dt class="label-caps">Event ID</dt><dd class="idrow"><span class="mono">{eventId}</span>
+        <button class="btn btn-ghost btn-sm icon" aria-label="Copy event ID" onclick={() => copy(eventId, 'event ID')}><Copy size={14} aria-hidden="true" /></button></dd></div>
+      <div><dt class="label-caps">Group ID</dt><dd class="idrow">
+        {#if d.row.group_id !== null}
+          {@const group = d.row.group_id}
+          <span class="mono">{group}</span>
+          <button class="btn btn-ghost btn-sm icon" aria-label="Copy group ID" onclick={() => copy(group, 'group ID')}><Copy size={14} aria-hidden="true" /></button>
+        {:else}<span aria-hidden="true">—</span><span class="sr-only">no group</span>{/if}
+      </dd></div>
     </dl>
   {/if}
 </header>
@@ -74,9 +114,32 @@
 {:else if cause && contribs}
   {#if d.row.sampled}<p class="banner card" role="note">Sampled request (1 % of Allows).</p>{/if}
 
-  <div class="grid">
+  <div class="tabs" role="tablist" aria-label="Request view">
+    {#each TABS as t, i (t.key)}
+      <button bind:this={tabEls[i]} role="tab" id="tab-{t.key}" class="tab" aria-selected={tab === t.key} aria-controls="panel-{t.key}"
+        tabindex={tab === t.key ? 0 : -1} onclick={() => (tab = t.key)} onkeydown={(e) => onTabKey(e, i)}>{t.label}</button>
+    {/each}
+  </div>
+
+  {#if tab === 'ocsf'}
+  <div role="tabpanel" id="panel-ocsf" aria-labelledby="tab-ocsf" class="panel">
+    <p class="secondary small">The records the proxy emits for this request, as OCSF 1.9.0 JSON: {d.row.verdict === 'Allow' || d.row.verdict === 'Monitor' ? 'an HTTP Activity (4002)' : 'an HTTP Activity (4002) and a Detection Finding (2004)'}.</p>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex: axe requires a keyboard-focusable scroll container -->
+    <pre class="mono ocsf" tabindex="0" role="region" aria-label="OCSF records">{ocsf}</pre>
+  </div>
+  {:else}
+  <div role="tabpanel" id="panel-evidence" aria-labelledby="tab-evidence" class="grid">
     <section class="card why" aria-labelledby="why-h">
-      <h2 id="why-h" class="title">Why this verdict</h2>
+      <header class="why-head">
+        <h2 id="why-h" class="title">Why this verdict</h2>
+        <VerdictChip verdict={d.row.verdict} size="sm" />
+        {#each d.judgment.attack as tag (tag.id)}
+          <span class="tag-item"><AttackChip {tag} /><span class="secondary small" aria-hidden="true">{tag.tactic}</span></span>
+        {:else}
+          <span class="secondary small">No ATT&amp;CK technique</span>
+        {/each}
+        <p class="conf small secondary" title={CONFIDENCE_HELP}>Precision on dev: {d.judgment.confidence ?? 'not measured'}</p>
+      </header>
       <p class="sentence">{#each parts as p, i (i)}{#if p.href}<Link href={p.href} class="mono code">{p.text}</Link>{:else if p.code}<code class="mono code">{p.text}</code>{:else}{p.text}{/if}{/each}</p>
       <dl class="cause">
         <div><dt class="label-caps">Decided by</dt><dd>{cause.kind}</dd></div>
@@ -184,6 +247,7 @@
       {/if}
     </section>
   </div>
+  {/if}
 {/if}
 
 <style>
@@ -198,6 +262,25 @@
   .banner { margin-bottom: var(--vf-space-4); background: var(--vf-attention-soft); color: var(--vf-attention); }
   .skeleton { height: 320px; background: var(--vf-surface-sunken); }
   .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--vf-space-5); }
+  .tabs { display: flex; gap: var(--vf-space-1); margin-bottom: var(--vf-space-4); border-bottom: var(--vf-bw-std) solid var(--vf-border-subtle); }
+  .tab {
+    height: var(--vf-control-sm); padding: 0 var(--vf-space-3); background: transparent; border: 0; cursor: pointer;
+    border-bottom: var(--vf-bw-strong) solid transparent; margin-bottom: calc(-1 * var(--vf-bw-std));
+    font-size: var(--vf-fs-sm); font-weight: 600; color: var(--vf-text-secondary);
+  }
+  .tab:hover { color: var(--vf-text-primary); }
+  .tab[aria-selected='true'] { color: var(--vf-accent); border-bottom-color: var(--vf-accent); }
+  .panel { display: grid; gap: var(--vf-space-3); }
+  .ocsf {
+    margin: 0; padding: var(--vf-space-4); overflow: auto; max-height: 70vh; white-space: pre;
+    background: var(--vf-surface-sunken); border-radius: var(--vf-radius-md); border: var(--vf-bw-hair) solid var(--vf-border-hairline);
+  }
+  .why-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--vf-space-2) var(--vf-space-3); }
+  .why-head .title { margin-right: var(--vf-space-1); }
+  .tag-item { display: inline-flex; align-items: center; gap: var(--vf-space-1); }
+  .conf { margin: 0; }
+  .idrow { display: flex; align-items: center; gap: var(--vf-space-1); }
+  .icon { padding: 0 var(--vf-space-2); }
   .why { grid-column: 1 / 8; }
   .gauge { grid-column: 8 / 13; }
   .contribs { grid-column: 1 / 13; }
