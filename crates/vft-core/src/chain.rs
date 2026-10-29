@@ -152,11 +152,21 @@ pub struct ChainOutcome {
     /// True only when the stage strictly increased with this event.
     pub advanced: bool,
     pub new_ban: Option<BanRecord>,
+    /// When this source's current episode began: its first event, or its first
+    /// event after a gap longer than the chain window.
+    pub episode_start_ms: Option<u64>,
+}
+
+/// Stable group ID for one source's episode, `"{ip}@{episode_start_ms}"`.
+pub fn group_id(ip: IpAddr, o: &ChainOutcome) -> Option<String> {
+    o.episode_start_ms.map(|start| format!("{ip}@{start}"))
 }
 
 struct SourceState {
     events: VecDeque<(u64, Event)>,
     last_seen: u64,
+    /// Start of the current episode; reset when the source idles past the chain window.
+    episode_start: u64,
     /// Request tally over the ban window: (bucket index, requests, hostile).
     tally: VecDeque<(u64, u32, u32)>,
 }
@@ -211,7 +221,15 @@ impl ChainTracker {
         let st = self
             .sources
             .entry(key)
-            .or_insert_with(|| SourceState { events: VecDeque::new(), last_seen: now_ms, tally: VecDeque::new() });
+            .or_insert_with(|| SourceState {
+            events: VecDeque::new(),
+            last_seen: now_ms,
+            tally: VecDeque::new(),
+            episode_start: now_ms,
+        });
+        if now_ms.saturating_sub(st.last_seen) > window_ms {
+            st.episode_start = now_ms;
+        }
         st.last_seen = now_ms;
         while st.events.front().is_some_and(|(t, _)| now_ms.saturating_sub(*t) > window_ms) {
             st.events.pop_front();
@@ -229,6 +247,7 @@ impl ChainTracker {
             .iter()
             .filter(|(t, e)| e.is_exploit() && now_ms.saturating_sub(*t) <= within_ms)
             .count();
+        let episode_start = st.episode_start;
         let (requests, hostile) = tally(&mut st.tally, now_ms, within_ms, ev != Event::Benign);
 
         let bp = &self.cfg.ban_policy;
@@ -246,7 +265,13 @@ impl ChainTracker {
         };
         let new_ban = cause.filter(|_| hostile_enough).map(|c| self.ban(key, c, now_ms));
         self.evict();
-        ChainOutcome { stage_before, stage_after, advanced: stage_after > stage_before, new_ban }
+        ChainOutcome {
+            stage_before,
+            stage_after,
+            advanced: stage_after > stage_before,
+            new_ban,
+            episode_start_ms: Some(episode_start),
+        }
     }
 
     /// Ban (or re-ban) a source. A previous record, even expired, counts as an offence.
@@ -534,5 +559,31 @@ mod tests {
         assert_eq!(event_for(&judgment(Verdict::Challenge, vec![ua])), Event::Benign);
         let live = Contribution { shadow: false, ..sqli };
         assert_eq!(event_for(&judgment(Verdict::Block, vec![live])), Event::Exfiltration);
+    }
+
+    #[test]
+    fn events_within_the_window_share_an_episode() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        let k = key(9);
+        let a = t.observe(k, Event::Benign, 1_000, true);
+        let b = t.observe(k, Event::Benign, 1_000 + 3_599_000, true);
+        assert_eq!(a.episode_start_ms, Some(1_000));
+        assert_eq!(b.episode_start_ms, Some(1_000));
+    }
+
+    #[test]
+    fn an_idle_window_starts_a_new_episode() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        let k = key(9);
+        t.observe(k, Event::Benign, 1_000, true);
+        let c = t.observe(k, Event::Benign, 1_000 + 3_600_001, true);
+        assert_eq!(c.episode_start_ms, Some(1_000 + 3_600_001));
+    }
+
+    #[test]
+    fn group_id_names_the_source_and_episode() {
+        let o = ChainOutcome { episode_start_ms: Some(42), ..Default::default() };
+        assert_eq!(group_id("198.51.100.7".parse().unwrap(), &o).as_deref(), Some("198.51.100.7@42"));
+        assert_eq!(group_id("198.51.100.7".parse().unwrap(), &ChainOutcome::default()), None);
     }
 }

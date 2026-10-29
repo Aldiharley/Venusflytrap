@@ -1518,7 +1518,7 @@ mod tests {
         let s = shield();
         let mut j = Judgment::allow();
         j.score = 30;
-        let o = ChainOutcome { stage_before: None, stage_after: Some(Stage::Recon), advanced: true, new_ban: None };
+        let o = ChainOutcome { stage_before: None, stage_after: Some(Stage::Recon), advanced: true, new_ban: None, episode_start_ms: None };
         let j = s.finalize(j, &o);
         assert_eq!(j.verdict, Verdict::Monitor);
         assert_eq!((j.decided_by.kind, j.decided_by.option_key), (CauseKind::ChainEscalation, "scoring.chain_stage_bonus"));
