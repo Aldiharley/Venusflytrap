@@ -99,3 +99,12 @@ test('a judgment without a construct has no firewall_rule; without a group no co
   expect(h.firewall_rule).toBeUndefined();
   expect((h.metadata as Record<string, unknown>).correlation_uid).toBeUndefined();
 });
+
+test('a method named like an inherited property is still an unknown method: activity 99', () => {
+  for (const m of ['constructor', '__proto__', 'toString', 'valueOf', 'hasOwnProperty']) {
+    const d = detailFrom(input);
+    d.row.method = m;
+    const [h] = encodeOcsf(d, 'e');
+    expect([m, h.activity_id, h.type_uid]).toEqual([m, 99, 400299]);
+  }
+});

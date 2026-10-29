@@ -16,12 +16,14 @@ const DISPOSITION_BLOCKED = 2;
 const DISPOSITION_LOGGED = 17;
 
 /** HTTP Activity `activity_id`. Methods are case-sensitive (RFC 9110 section 9.1), so only the uppercase tokens match. */
-const ACTIVITY: Record<string, number> = {
-  CONNECT: 1, DELETE: 2, GET: 3, HEAD: 4, OPTIONS: 5, POST: 6, PUT: 7, TRACE: 8, PATCH: 9,
-};
-const activityId = (method: string) => ACTIVITY[method] ?? 99;
+// A Map, not an object literal: the method comes from untrusted traffic, and `ACTIVITY['constructor']`
+// would find an inherited property instead of falling back to 99 as the Rust `match` does.
+const ACTIVITY = new Map<string, number>([
+  ['CONNECT', 1], ['DELETE', 2], ['GET', 3], ['HEAD', 4], ['OPTIONS', 5], ['POST', 6], ['PUT', 7], ['TRACE', 8], ['PATCH', 9],
+]);
+const activityId = (method: string) => ACTIVITY.get(method) ?? 99;
 
-const SEVERITY: Record<Verdict, number> = { Allow: 1, Monitor: 2, Challenge: 3, Block: 4 };
+const SEVERITY = new Map<Verdict, number>([['Allow', 1], ['Monitor', 2], ['Challenge', 3], ['Block', 4]]);
 
 const confidenceId = (c: number) => (c >= 70 ? 3 : c >= 40 ? 2 : 1);
 
@@ -48,7 +50,7 @@ export function encodeOcsf(detail: RequestDetail, eventId: string, opts: OcsfOpt
   const msg = j.decided_by.msg;
   const base = (): Rec => ({ time: row.ts_ms, metadata: structuredClone(metadata), message: msg });
 
-  const severity = SEVERITY[j.verdict];
+  const severity = SEVERITY.get(j.verdict);
   const stopped = j.verdict === 'Challenge' || j.verdict === 'Block';
   const activity = activityId(row.method);
   const srcEndpoint = detail.ip ? { ip: detail.ip } : null;
