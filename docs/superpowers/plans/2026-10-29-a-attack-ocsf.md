@@ -18,7 +18,7 @@
 - No outside product names in code, UI or docs beyond the public standards MITRE ATT&CK and OCSF.
 - OCSF target version string: `"1.9.0"`.
 - Confidence = ⌊100 × Wilson 95 % lower bound (z = 1.96) of TP / (TP + FP)⌋ over dev Challenge/Block rows decided by that construct; fewer than 5 such rows → no entry. Confidence never affects score or verdict.
-- Group ID string: `"{src_ip}@{episode_start_ms}"`; a new episode starts when the source was idle for more than the chain window (`chain.window_secs`, 3,600 s by default) or never seen.
+- Group ID string: `"{key}@{episode_start_ms}"`, where `{key}` is the chain source key's address (`SourceKey::ip`: IPv4-mapped folded to IPv4, IPv6 masked to `chain.ipv6_prefix`), not the raw client IP; a new episode starts when the source was idle for more than the chain window (`chain.window_secs`, 3,600 s by default) or never seen.
 - Console: existing tokens, fonts and components only; both themes; axe clean; initial JS ≤ 150 KB gz; `ui/vitest.junction.config.ts` style local configs are never committed.
 - Tune on dev only; held-out is not touched by this sub-project.
 - Commit trailer on every commit: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.

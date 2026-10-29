@@ -68,6 +68,15 @@ pub struct Decision {
     pub src: Option<SourceKey>,
 }
 
+impl Decision {
+    /// The episode group ID (`chain::group_id`) from the source key, so every
+    /// request one key's episode covers shares it. `None` without a known
+    /// source or a chain observation (a fast-tracked ban is not observed).
+    pub fn group_id(&self) -> Option<String> {
+        self.src.zip(self.judgment.chain.as_ref()).and_then(|(k, o)| vft_core::chain::group_id(k, o))
+    }
+}
+
 pub struct Pipeline {
     shield: Arc<Shield>,
     chain: ChainStore,
@@ -342,6 +351,24 @@ mod tests {
         assert_eq!((d.judgment.verdict, d.judgment.banned()), (Verdict::Block, true));
         assert_eq!(ft.src, d.src);
         assert!(ft.request.body.is_empty());
+        // Neither was observed by the chain, so neither carries a group ID.
+        assert_eq!((ft.group_id(), d.group_id()), (None, None));
+    }
+
+    #[test]
+    fn one_source_key_gives_one_group_id() {
+        let p = pipeline();
+        let gid = |ip: &str, t: u64| p.decide(&parts("/", CHROME), b"", Some(ip.parse().unwrap()), t).group_id();
+        // Two addresses of one IPv6 /64 (the default chain.ipv6_prefix).
+        let a = gid("2001:db8:7:7::1", 1_000);
+        assert_eq!(a.as_deref(), Some("2001:db8:7:7::@1000"));
+        assert_eq!(gid("2001:db8:7:7:abcd::2", 2_000), a);
+        // IPv4-mapped IPv6 and the IPv4 address itself.
+        let b = gid("::ffff:198.51.100.9", 1_000);
+        assert_eq!(b.as_deref(), Some("198.51.100.9@1000"));
+        assert_eq!(gid("198.51.100.9", 2_000), b);
+        // No peer, no source, no group.
+        assert_eq!(p.decide(&parts("/", CHROME), b"", None, 3_000).group_id(), None);
     }
 
     #[test]

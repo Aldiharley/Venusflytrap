@@ -208,8 +208,10 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
             let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let ts = now_ms();
             let eid = state.ids.next(ts);
-            state.audit.record(&d.request, &d.judgment, ts, id, &eid);
-            state.ocsf.record(&d.request, &d.judgment, ts, id, &eid);
+            let group = d.group_id();
+            let m = audit::EventMeta { ts_ms: ts, request_id: id, event_id: &eid, group_id: group.as_deref(), enforced: true };
+            state.audit.record(&d.request, &d.judgment, &m);
+            state.ocsf.record(&d.request, &d.judgment, &m);
             return Ok(refusal(d.judgment.verdict));
         }
     }
@@ -236,8 +238,11 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ts = now_ms();
     let eid = state.ids.next(ts);
-    state.audit.record(&decision.request, &decision.judgment, ts, id, &eid);
-    state.ocsf.record(&decision.request, &decision.judgment, ts, id, &eid);
+    // One group ID per source key and episode, computed once for both sinks.
+    let group = decision.group_id();
+    let m = audit::EventMeta { ts_ms: ts, request_id: id, event_id: &eid, group_id: group.as_deref(), enforced: state.enforce };
+    state.audit.record(&decision.request, &decision.judgment, &m);
+    state.ocsf.record(&decision.request, &decision.judgment, &m);
     let j = decision.judgment;
 
     if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {

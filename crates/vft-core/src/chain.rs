@@ -157,9 +157,13 @@ pub struct ChainOutcome {
     pub episode_start_ms: Option<u64>,
 }
 
-/// Stable group ID for one source's episode, `"{ip}@{episode_start_ms}"`.
-pub fn group_id(ip: IpAddr, o: &ChainOutcome) -> Option<String> {
-    o.episode_start_ms.map(|start| format!("{ip}@{start}"))
+/// Stable group ID for one source's episode, `"{key}@{episode_start_ms}"`.
+/// `{key}` is the source key's canonical address ([`SourceKey::ip`]): IPv4 as is,
+/// IPv4-mapped IPv6 folded to IPv4, other IPv6 masked to `chain.ipv6_prefix`.
+/// Episodes and bans are kept per key, so every request of one episode shares
+/// one group ID whichever address in the key sent it.
+pub fn group_id(key: SourceKey, o: &ChainOutcome) -> Option<String> {
+    o.episode_start_ms.map(|start| format!("{}@{start}", key.ip()))
 }
 
 struct SourceState {
@@ -583,7 +587,36 @@ mod tests {
     #[test]
     fn group_id_names_the_source_and_episode() {
         let o = ChainOutcome { episode_start_ms: Some(42), ..Default::default() };
-        assert_eq!(group_id("198.51.100.7".parse().unwrap(), &o).as_deref(), Some("198.51.100.7@42"));
-        assert_eq!(group_id("198.51.100.7".parse().unwrap(), &ChainOutcome::default()), None);
+        let k = SourceKey::new("198.51.100.7".parse().unwrap(), 64);
+        assert_eq!(group_id(k, &o).as_deref(), Some("198.51.100.7@42"));
+        assert_eq!(group_id(k, &ChainOutcome::default()), None);
+    }
+
+    /// One episode of one source key has one group ID, whichever of the key's
+    /// addresses sent the request.
+    fn one_group(a: &str, b: &str, prefix: u8) -> (String, String) {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        let ka = SourceKey::new(a.parse().unwrap(), prefix);
+        let kb = SourceKey::new(b.parse().unwrap(), prefix);
+        let oa = t.observe(ka, Event::Benign, 1_000, true);
+        let ob = t.observe(kb, Event::Benign, 2_000, true);
+        (group_id(ka, &oa).unwrap(), group_id(kb, &ob).unwrap())
+    }
+
+    #[test]
+    fn an_ipv6_prefix_shares_one_group_id() {
+        let (a, b) = one_group("2001:db8:1:2::1", "2001:db8:1:2:ffff::9", 64);
+        assert_eq!(a, b);
+        assert_eq!(a, "2001:db8:1:2::@1000");
+        // A narrower prefix keeps the two apart.
+        let (a, b) = one_group("2001:db8:1:2::1", "2001:db8:1:2:ffff::9", 128);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_and_ipv4_share_one_group_id() {
+        let (a, b) = one_group("::ffff:192.0.2.7", "192.0.2.7", 64);
+        assert_eq!(a, b);
+        assert_eq!(a, "192.0.2.7@1000");
     }
 }

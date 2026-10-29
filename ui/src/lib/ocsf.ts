@@ -2,6 +2,7 @@
 // judgment, plus a Detection Finding (2004) for Challenge and Block. Pinned to the Rust encoder by
 // the shared sample (crates/vft-proxy/tests/fixtures/ocsf-sample.json), which both test suites apply.
 // The "View as OCSF" view prints these records as they are.
+import type { AttackTag } from '../gen/AttackTag';
 import type { RequestDetail, Verdict } from './api/types';
 
 export const OCSF_VERSION = '1.9.0';
@@ -30,52 +31,73 @@ const confidenceId = (c: number) => (c >= 70 ? 3 : c >= 40 ? 2 : 1);
 export interface OcsfOptions {
   /** `metadata.product.version`; defaults to `PRODUCT_VERSION`. */
   version?: string;
-  /** The deciding construct's one-line summary (`firewall_rule.name`). The console has no construct registry; without it the name is the construct id. */
+  /** The deciding construct's one-line summary (`firewall_rule.name`). The console has no construct registry; without it the rule has no name, as Rust omits it for an unregistered construct such as `chain.ban`. */
   summary?: string | null;
+  /** Whether Challenge and Block were enforced; false under `serve --monitor-only`, where every request is forwarded. Defaults to true. */
+  enforced?: boolean;
+}
+
+/** The 4002 action and disposition. Unenforced, every request is Allowed and Logged whatever the verdict. */
+function actionDisposition(v: Verdict, enforced: boolean): [number, number] {
+  if (!enforced) return [ACTION_ALLOWED, DISPOSITION_LOGGED];
+  if (v === 'Allow') return [ACTION_ALLOWED, DISPOSITION_ALLOWED];
+  if (v === 'Monitor') return [ACTION_ALLOWED, DISPOSITION_LOGGED];
+  return [ACTION_DENIED, DISPOSITION_BLOCKED];
+}
+
+/** One OCSF `attack` object: a sub-technique id (`T1595.002`) goes in `sub_technique`, its parent in `technique`; the combined name is split on `": "`. */
+function attackObject(a: AttackTag): Rec {
+  const tactic = { uid: a.tactic_id, name: a.tactic };
+  const dot = a.id.indexOf('.');
+  if (dot < 0) return { tactic, technique: { uid: a.id, name: a.name } };
+  const sep = a.name.indexOf(': ');
+  const [technique, sub] = sep < 0 ? [a.name, a.name] : [a.name.slice(0, sep), a.name.slice(sep + 2)];
+  return { tactic, technique: { uid: a.id.slice(0, dot), name: technique }, sub_technique: { uid: a.id, name: sub } };
 }
 
 type Rec = Record<string, unknown>;
 
-/** The OCSF records for one request: a 4002, plus a 2004 for Challenge and Block. */
+/**
+ * The OCSF records for one request: a 4002, plus a 2004 for Challenge and Block. Only the 4002 has
+ * `metadata.uid`; the 2004 links to it through `finding_info.uid`. Unenforced, the 2004 is still
+ * written for Challenge and Block (the detection happened).
+ */
 export function encodeOcsf(detail: RequestDetail, eventId: string, opts: OcsfOptions = {}): Rec[] {
   const { row, judgment: j } = detail;
-  const metadata: Rec = {
-    version: OCSF_VERSION,
-    uid: eventId,
-    profiles: ['security_control'],
-    product: { name: 'Venusflytrap', vendor_name: 'Venusflytrap', version: opts.version ?? PRODUCT_VERSION },
+  const metadata = (uid: string | null): Rec => {
+    const m: Rec = { version: OCSF_VERSION };
+    if (uid !== null) m.uid = uid;
+    m.profiles = ['security_control'];
+    m.product = { name: 'Venusflytrap', vendor_name: 'Venusflytrap', version: opts.version ?? PRODUCT_VERSION };
+    // The row's group id exists exactly when the chain observed the request (`key@episode_start_ms`).
+    if (row.group_id !== null) m.correlation_uid = row.group_id;
+    return m;
   };
-  // The row's group id exists exactly when the chain observed the request (`ip@episode_start_ms`).
-  if (row.group_id !== null) metadata.correlation_uid = row.group_id;
   const msg = j.decided_by.msg;
-  const base = (): Rec => ({ time: row.ts_ms, metadata: structuredClone(metadata), message: msg });
+  const base = (uid: string | null): Rec => ({ time: row.ts_ms, metadata: metadata(uid), message: msg });
 
   const severity = SEVERITY.get(j.verdict);
-  const stopped = j.verdict === 'Challenge' || j.verdict === 'Block';
+  const detected = j.verdict === 'Challenge' || j.verdict === 'Block';
   const activity = activityId(row.method);
   const srcEndpoint = detail.ip ? { ip: detail.ip } : null;
   const httpRequest = { http_method: row.method, url: { path: row.path } };
 
   const http: Rec = {
     class_uid: 4002, category_uid: 4, activity_id: activity, type_uid: 400200 + activity, severity_id: severity,
-    ...base(),
+    ...base(eventId),
   };
   if (srcEndpoint) http.src_endpoint = srcEndpoint;
   http.http_request = httpRequest;
-  http.action_id = stopped ? ACTION_DENIED : ACTION_ALLOWED;
-  http.disposition_id = j.verdict === 'Allow' ? DISPOSITION_ALLOWED : j.verdict === 'Monitor' ? DISPOSITION_LOGGED : DISPOSITION_BLOCKED;
+  [http.action_id, http.disposition_id] = actionDisposition(j.verdict, opts.enforced ?? true);
   const construct = j.decided_by.construct;
-  if (construct !== null) http.firewall_rule = { uid: construct, name: opts.summary ?? construct };
+  if (construct !== null) http.firewall_rule = opts.summary ? { uid: construct, name: opts.summary } : { uid: construct };
   const out: Rec[] = [http];
 
-  if (stopped) {
-    const attacks = j.attack.map((a) => ({
-      tactic: { uid: a.tactic_id, name: a.tactic },
-      technique: { uid: a.id, name: a.name },
-    }));
+  if (detected) {
+    const attacks = j.attack.map(attackObject);
     const f: Rec = {
       class_uid: 2004, category_uid: 2, activity_id: 1, type_uid: 200401, severity_id: severity,
-      ...base(),
+      ...base(null),
       is_alert: true,
       finding_info: { uid: eventId, title: msg, attacks },
       attacks,

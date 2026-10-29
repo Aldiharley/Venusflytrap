@@ -32,7 +32,7 @@ struct AttackLine<'a> {
 #[derive(Serialize)]
 struct AuditLine<'a> {
     event_id: &'a str,
-    group_id: Option<String>,
+    group_id: Option<&'a str>,
     confidence: Option<u8>,
     attack: Vec<AttackLine<'a>>,
     ts_ms: u64,
@@ -49,6 +49,27 @@ struct AuditLine<'a> {
     reason: &'a str,
     cause: String,
     option_key: &'a str,
+}
+
+/// What the proxy knows about one event beyond the request and its judgment;
+/// every sink receives the same values.
+#[derive(Debug, Clone, Copy)]
+pub struct EventMeta<'a> {
+    pub ts_ms: u64,
+    pub request_id: u64,
+    pub event_id: &'a str,
+    /// The episode group ID from the decision's source key (`Decision::group_id`).
+    pub group_id: Option<&'a str>,
+    /// Whether Challenge and Block were enforced (false under `serve --monitor-only`,
+    /// where they are forwarded).
+    pub enforced: bool,
+}
+
+impl<'a> EventMeta<'a> {
+    /// An enforced event without a group ID.
+    pub fn new(ts_ms: u64, request_id: u64, event_id: &'a str) -> Self {
+        EventMeta { ts_ms, request_id, event_id, group_id: None, enforced: true }
+    }
 }
 
 /// What a sink writes per judgment.
@@ -152,18 +173,18 @@ impl AuditSink {
         }
     }
 
-    pub fn record(&self, req: &Request, j: &Judgment, ts_ms: u64, request_id: u64, event_id: &str) {
+    pub fn record(&self, req: &Request, j: &Judgment, m: &EventMeta) {
         let Some(tx) = self.tx.as_ref().filter(|_| self.enabled) else {
             return;
         };
         match self.format {
             Format::Jsonl => {
-                if let Some(json) = jsonl_line(req, j, ts_ms, request_id, event_id) {
+                if let Some(json) = jsonl_line(req, j, m) {
                     self.send(tx, json);
                 }
             }
             Format::Ocsf => {
-                for rec in crate::ocsf::encode(req, j, ts_ms, event_id) {
+                for rec in crate::ocsf::encode(req, j, m.ts_ms, m.event_id, m.group_id, m.enforced) {
                     match serde_json::to_string(&rec) {
                         Ok(json) => self.send(tx, json),
                         // An encoding failure is a write error on this sink only.
@@ -199,21 +220,18 @@ impl AuditSink {
 }
 
 /// The JSONL audit line for one judgment; `None` if it does not serialize.
-fn jsonl_line(req: &Request, j: &Judgment, ts_ms: u64, request_id: u64, event_id: &str) -> Option<String> {
+fn jsonl_line(req: &Request, j: &Judgment, m: &EventMeta) -> Option<String> {
     let line = AuditLine {
-        event_id,
-        group_id: req
-            .src_ip
-            .zip(j.chain.as_ref())
-            .and_then(|(ip, o)| vft_core::chain::group_id(ip, o)),
+        event_id: m.event_id,
+        group_id: m.group_id,
         confidence: j.confidence,
         attack: j
             .attack
             .iter()
             .map(|a| AttackLine { tactic_id: &a.tactic_id, id: &a.id })
             .collect(),
-        ts_ms,
-        request_id,
+        ts_ms: m.ts_ms,
+        request_id: m.request_id,
         method: &req.method,
         path: &req.path,
         src_ip: req.src_ip.map(|i| i.to_string()),
@@ -287,7 +305,7 @@ mod tests {
         let mut req = Request::get("/x");
         req.query.push(("id".into(), "1 union select a".into()));
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1_700_000_000_000, 7, "019000000000-7000-8000-000000000001");
+        sink.record(&req, &j, &EventMeta::new(1_700_000_000_000, 7, "019000000000-7000-8000-000000000001"));
         sink.close();
         let line = std::fs::read_to_string(&p).unwrap();
         let v: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
@@ -312,7 +330,7 @@ mod tests {
         req.query.push(("id".into(), "1 union select a,b".into()));
         let mut j = Shield::new(Config::default()).inspect(&req);
         j.verdict = vft_core::Verdict::Block;
-        sink.record(&req, &j, 1_700_000_000_000, 7, "e");
+        sink.record(&req, &j, &EventMeta::new(1_700_000_000_000, 7, "e"));
         sink.close();
         let text = std::fs::read_to_string(&p).unwrap();
         let classes: Vec<u64> = text
@@ -324,13 +342,36 @@ mod tests {
     }
 
     #[test]
+    fn both_sinks_write_the_group_id_they_are_given() {
+        let (pj, po) = (tmp("gid.jsonl"), tmp("gid.ocsf.jsonl"));
+        let jsonl = AuditSink::new(Some(pj.clone()), 10 * 1024 * 1024);
+        let ocsf = AuditSink::with_format(Some(po.clone()), 10 * 1024 * 1024, Format::Ocsf);
+        let mut req = Request::get("/x");
+        req.src_ip = Some("2001:db8:1:2::9".parse().unwrap());
+        let j = Shield::new(Config::default()).inspect(&req);
+        let m = EventMeta { group_id: Some("2001:db8:1:2::@5"), ..EventMeta::new(1, 1, "e") };
+        jsonl.record(&req, &j, &m);
+        ocsf.record(&req, &j, &m);
+        jsonl.close();
+        ocsf.close();
+        let line: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&pj).unwrap().trim()).unwrap();
+        assert_eq!(line["group_id"], "2001:db8:1:2::@5", "{line}");
+        // The JSONL line keeps the client address; only the group ID uses the key.
+        assert_eq!(line["src_ip"], "2001:db8:1:2::9", "{line}");
+        let rec: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&po).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(rec["metadata"]["correlation_uid"], "2001:db8:1:2::@5", "{rec}");
+        let _ = std::fs::remove_file(&pj);
+        let _ = std::fs::remove_file(&po);
+    }
+
+    #[test]
     fn rotates_at_max_bytes() {
         let p = tmp("rot.jsonl");
         let sink = AuditSink::new(Some(p.clone()), 300);
         let req = Request::get("/rotate");
         let j = Shield::new(Config::default()).inspect(&req);
         for i in 0..20 {
-            sink.record(&req, &j, i, i, "e");
+            sink.record(&req, &j, &EventMeta::new(i, i, "e"));
         }
         sink.close();
         assert!(p.with_extension("1").exists(), "rotated file missing");
@@ -345,7 +386,7 @@ mod tests {
         let sink = AuditSink::off();
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1, "e");
+        sink.record(&req, &j, &EventMeta::new(1, 1, "e"));
         assert_eq!(sink.dropped(), 0);
         assert_eq!(sink.write_errors(), 0);
         sink.close();
@@ -361,7 +402,7 @@ mod tests {
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
         for i in 0..10 {
-            sink.record(&req, &j, i, i, "e");
+            sink.record(&req, &j, &EventMeta::new(i, i, "e"));
         }
         assert_eq!(sink.dropped(), 0);
         let errs = sink.write_errors.clone();
@@ -377,11 +418,11 @@ mod tests {
         let sink = AuditSink::new(Some(p.clone()), 1024 * 1024);
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1, "e"); // lost: directory missing
+        sink.record(&req, &j, &EventMeta::new(1, 1, "e")); // lost: directory missing
         std::thread::sleep(Duration::from_millis(100));
         std::fs::create_dir_all(&dir).unwrap();
         std::thread::sleep(Duration::from_millis(600)); // let the idle tick retry
-        sink.record(&req, &j, 2, 2, "e");
+        sink.record(&req, &j, &EventMeta::new(2, 2, "e"));
         let errs = sink.write_errors.clone();
         sink.close();
         let text = std::fs::read_to_string(&p).unwrap();

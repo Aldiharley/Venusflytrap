@@ -68,7 +68,17 @@ changing a single detection:
   event after the source has been idle for a full chain window (3,600 s) or was
   never seen.
 - `ChainOutcome` gains `episode_start_ms: u64`. The group ID is
-  `"{src_ip}@{episode_start_ms}"`; requests with no source IP have none.
+  `"{key}@{episode_start_ms}"`, where `{key}` is the chain's source key as an
+  address (`SourceKey::ip`): IPv4 as is, IPv4-mapped IPv6 folded to IPv4, other
+  IPv6 masked to `chain.ipv6_prefix` (/64 by default, e.g. `2001:db8:1:2::@…`).
+  Episodes and bans are per key, so every address of one key shares one group
+  ID. The proxy computes it once per request from the decision's source key
+  (`Decision::group_id`) and hands it to every sink. Requests with no source IP,
+  and fast-tracked requests from a banned source (the chain does not observe
+  them), have none.
+- A new episode, and so a new group ID, also starts when the tracker evicted
+  the source at capacity, or when a ban outlasts the window and the source's
+  first request after it is observed.
 - Tests: two events within the window share an episode; an event after a gap of
   one full window starts a new one; the existing chain and ban tests stay green.
 
@@ -98,14 +108,24 @@ changing a single detection:
   (Allowed for Allow and Monitor, Denied for Challenge and Block) and
   `disposition_id` (Allowed, Logged for Monitor, Blocked for Challenge and Block;
   numeric values from the fixture), `firewall_rule {uid = construct, name = summary}` when a
-  construct decided.
+  construct decided (no `name` when the construct is not registered, e.g. `chain.ban`).
+- Enforcement: `encode` takes whether the decision was enforced. Under
+  `serve --monitor-only` every request is forwarded, so the 4002 says
+  `action_id` Allowed (1) and `disposition_id` Logged (17) for every verdict;
+  `severity_id` still follows the verdict, and Challenge and Block still get
+  their 2004, since the detection happened. Enforced, the mapping above applies.
 - Per Challenge or Block, one **Detection Finding** record: `class_uid 2004`,
   `category_uid 2`, `activity_id 1` (Create), `type_uid 200401`, `time`,
   `severity_id`, `confidence_score` and `confidence_id` (1–39 Low 1, 40–69
   Medium 2, 70–100 High 3), `finding_info {uid = event_id, title = decided_by
   msg, attacks [{tactic {uid, name}, technique {uid, name}}]}`, the same
   `attacks` at top level (the Security Control profile), `metadata` as above with
-  `correlation_uid = group_id`, `is_alert true`.
+  `correlation_uid = group_id` but without `uid` (only the 4002 has
+  `metadata.uid = event_id`; the finding links to it through `finding_info.uid`),
+  `is_alert true`. A sub-technique id goes in `sub_technique`: `T1595.002` gives
+  `technique {uid "T1595", name "Active Scanning"}` and `sub_technique {uid
+  "T1595.002", name "Vulnerability Scanning"}`, the combined name split on `": "`
+  (1.9.0 `attack` object). JSONL and the console keep the combined form.
 - Exact enum values are taken from the 1.9.0 schema JSON fetched at
   implementation time and committed as a test fixture
   (`crates/vft-proxy/tests/fixtures/ocsf-1.9.0-*.json`). Tests check every
