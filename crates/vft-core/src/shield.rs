@@ -2094,7 +2094,7 @@ mod exception_tests {
             hooks.inspect(&r).exceptions
         };
         assert_eq!(at("/hooks/a"), vec!["hooks-sql".to_string()]);
-        for p in ["/admin/..%2fhooks", "/admin/%252e%252e/hooks", "/hooks;x", "/hooks/./a", "/HOOKS%2F", "/hooks%2Fa", "/admin/../hooks", "/hooks\\a"] {
+        for p in ["/admin/..%2fhooks", "/admin/%252e%252e/hooks", "/hooks;x", "/hooks%3bx/a", "/hooks/./a", "/hooks%2F", "/hooks%2Fa", "/admin/../hooks", "/hooks\\a"] {
             assert!(at(p).is_empty(), "{p}: a /hooks exception applies only when the raw path is plain");
         }
         let everywhere = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]);

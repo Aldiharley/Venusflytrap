@@ -234,12 +234,12 @@ fn prefix_matches(prefix: &str, path: &str) -> bool {
 }
 
 /// Whether canonicalisation cannot move the raw request path between segments:
-/// no encoded `/`, `\`, `.` or `%` (ASCII case-insensitive), no `\` or `;`,
-/// and no `.` or `..` segment. Only a plain path is matched against a prefix
-/// other than `/`, so decoding can never carry a request into a scope.
+/// no encoded `/`, `\`, `.`, `;` or `%` (ASCII case-insensitive), no `\` or
+/// `;`, and no `.` or `..` segment. Only a plain path is matched against a
+/// prefix other than `/`, so decoding can never carry a request into a scope.
 fn plain_path(raw: &str) -> bool {
     let lower = raw.to_ascii_lowercase();
-    !["%2f", "%5c", "%2e", "%25"].iter().any(|t| lower.contains(t))
+    !["%2f", "%5c", "%2e", "%3b", "%25"].iter().any(|t| lower.contains(t))
         && !raw.contains(['\\', ';'])
         && !raw.split('/').any(|seg| seg == "." || seg == "..")
 }
@@ -620,7 +620,7 @@ mod tests {
         let t = parse_date(AS_OF).unwrap();
         assert!(!hooks.select("GET", "/hooks/a", t).is_empty());
         assert!(!hooks.select("GET", "/hooks//a/", t).is_empty(), "empty segments are plain");
-        for p in ["/admin/..%2fhooks", "/admin/%252e%252e/hooks", "/hooks;x", "/hooks/./a", "/HOOKS%2F", "/hooks%2Fa", "/hooks%5Ca", "/hooks/%2E%2E/hooks", "/hooks\\a", "/a/../hooks"] {
+        for p in ["/admin/..%2fhooks", "/admin/%252e%252e/hooks", "/hooks;x", "/hooks%3bx/a", "/hooks%3Bx/a", "/hooks/./a", "/hooks%2F", "/hooks%2Fa", "/hooks%5Ca", "/hooks/%2E%2E/hooks", "/hooks\\a", "/a/../hooks"] {
             assert!(hooks.select("GET", p, t).is_empty(), "{p}");
             assert!(!root.select("GET", p, t).is_empty(), "{p}: / keeps matching every path");
         }

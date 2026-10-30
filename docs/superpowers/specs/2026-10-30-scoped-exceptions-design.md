@@ -66,8 +66,8 @@ exceptions:
 - `path_prefix` matches on segment boundaries against the canonical request
   path: `/api` matches `/api` and `/api/x`, not `/apix`. `/` matches every path.
   Any other prefix also needs the raw request path to be **plain**: it contains
-  none of `%2f`, `%5c`, `%2e`, `%25` (ASCII case-insensitive), no `\`, no `;`,
-  and no `.` or `..` segment. A request whose raw path is not plain gets no
+  none of `%2f`, `%5c`, `%2e`, `%3b`, `%25` (ASCII case-insensitive), no `\`,
+  no `;`, and no `.` or `..` segment. A request whose raw path is not plain gets no
   exception except those scoped to `/` (fail closed: canonicalisation can never
   carry a request such as `/admin/..%2fhooks` into a `/hooks` scope).
 - Dates are `YYYY-MM-DD`, read as 00:00 UTC.
