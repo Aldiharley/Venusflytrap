@@ -29,6 +29,7 @@ use vft_core::{Judgment, Shield, Verdict};
 
 pub mod adapt;
 pub mod audit;
+pub mod bus;
 pub mod config_handle;
 pub mod ids;
 pub mod ocsf;
@@ -109,6 +110,8 @@ pub struct ProxyState {
     request_seq: std::sync::atomic::AtomicU64,
     /// If true, Block/Challenge are stopped; otherwise everything is forwarded.
     pub enforce: bool,
+    /// Where decisions and bans are published; `None` does no event work.
+    pub bus: Option<bus::EventBus>,
     client: Client<HttpConnector, Full<Bytes>>,
     limits: LimitsConfig,
     decision_headers: DecisionHeaders,
@@ -144,10 +147,59 @@ impl ProxyState {
             ids: ids::EventIds::new(),
             request_seq: std::sync::atomic::AtomicU64::new(0),
             enforce,
+            bus: None,
             client,
             limits,
             decision_headers,
         }
+    }
+
+    /// Publish decisions and bans on `bus`.
+    pub fn with_bus(mut self, bus: bus::EventBus) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+}
+
+/// Publish one request's `Decision`, then a `BanChanged` when it set a ban.
+/// Consumes the decision (the judgment moves into the event, no clone); only
+/// called with a bus attached.
+fn publish_decision(
+    bus: &bus::EventBus,
+    d: pipeline::Decision,
+    event_id: String,
+    ts_ms: u64,
+    start: std::time::Instant,
+    upstream_status: Option<u16>,
+) {
+    let group_id = d.group_id();
+    let src_key = d.src.map(|k| k.ip().to_string());
+    let new_ban = d.judgment.chain.as_ref().and_then(|c| c.new_ban);
+    let host = d
+        .request
+        .headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let ev = bus::DecisionEvent {
+        event_id,
+        group_id,
+        ts_ms,
+        src_key: src_key.clone(),
+        ip: d.request.src_ip,
+        method: d.request.method,
+        host,
+        path: d.request.path,
+        judgment: d.judgment,
+        latency_us: u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        upstream_status,
+        config_rev: d.config_rev,
+        snippets: Vec::new(),
+    };
+    bus.publish(bus::BusEvent::Decision(Arc::new(ev)));
+    if let (Some(key), Some(ban)) = (src_key, new_ban) {
+        bus.publish(bus::BusEvent::BanChanged { key, ban: Some(ban), lifted: false });
     }
 }
 
@@ -209,6 +261,7 @@ fn wants_upgrade(h: &HeaderMap) -> bool {
 }
 
 async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming>) -> Result<Response<Body>, hyper::Error> {
+    let start = std::time::Instant::now();
     let lim = &state.limits;
     let (parts, body) = req.into_parts();
     if parts.headers.len() > lim.max_headers {
@@ -228,7 +281,11 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
             let m = audit::EventMeta { ts_ms: ts, request_id: id, event_id: &eid, group_id: group.as_deref(), enforced: true };
             state.audit.record(&d.request, &d.judgment, &m);
             state.ocsf.record(&d.request, &d.judgment, &m);
-            return Ok(refusal(d.judgment.verdict));
+            let resp = refusal(d.judgment.verdict);
+            if let Some(bus) = &state.bus {
+                publish_decision(bus, d, eid, ts, start, None);
+            }
+            return Ok(resp);
         }
     }
     let declared_len = parts
@@ -259,15 +316,27 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     let m = audit::EventMeta { ts_ms: ts, request_id: id, event_id: &eid, group_id: group.as_deref(), enforced: state.enforce };
     state.audit.record(&decision.request, &decision.judgment, &m);
     state.ocsf.record(&decision.request, &decision.judgment, &m);
-    let j = decision.judgment;
 
-    if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {
-        return Ok(refusal(j.verdict));
+    let (resp, upstream_status) = if state.enforce && matches!(decision.judgment.verdict, Verdict::Block | Verdict::Challenge) {
+        (refusal(decision.judgment.verdict), None)
+    } else {
+        forward(&state, &parts, collected, peer, &decision.judgment).await
+    };
+    if let Some(bus) = &state.bus {
+        publish_decision(bus, decision, eid, ts, start, upstream_status);
     }
-    Ok(forward(&state, &parts, collected, peer, &j).await)
+    Ok(resp)
 }
 
-async fn forward(state: &ProxyState, parts: &http::request::Parts, body: Bytes, peer: SocketAddr, j: &Judgment) -> Response<Body> {
+/// Forward to the upstream. The status is the one the upstream sent; the
+/// 502/504 the proxy answers with itself carry `None`.
+async fn forward(
+    state: &ProxyState,
+    parts: &http::request::Parts,
+    body: Bytes,
+    peer: SocketAddr,
+    j: &Judgment,
+) -> (Response<Body>, Option<u16>) {
     let path_q = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let url = format!("{}{}", state.upstream.trim_end_matches('/'), path_q);
     let mut headers = parts.headers.clone();
@@ -302,19 +371,20 @@ async fn forward(state: &ProxyState, parts: &http::request::Parts, body: Bytes, 
     }
     let mut out = match HyperReq::builder().method(parts.method.clone()).uri(url).body(Full::new(body)) {
         Ok(r) => r,
-        Err(_) => return text(StatusCode::BAD_GATEWAY, "Bad gateway.\n"),
+        Err(_) => return (text(StatusCode::BAD_GATEWAY, "Bad gateway.\n"), None),
     };
     *out.headers_mut() = headers;
 
     let wait = Duration::from_millis(state.limits.upstream_response_timeout_ms);
     match tokio::time::timeout(wait, state.client.request(out)).await {
-        Err(_) => text(StatusCode::GATEWAY_TIMEOUT, "Gateway timeout.\n"),
-        Ok(Err(_)) => text(StatusCode::BAD_GATEWAY, "Bad gateway.\n"),
+        Err(_) => (text(StatusCode::GATEWAY_TIMEOUT, "Gateway timeout.\n"), None),
+        Ok(Err(_)) => (text(StatusCode::BAD_GATEWAY, "Bad gateway.\n"), None),
         Ok(Ok(resp)) => {
             let (mut rp, rb) = resp.into_parts();
             strip_hop_by_hop(&mut rp.headers);
             let idle = Duration::from_millis(state.limits.response_idle_timeout_ms);
-            Response::from_parts(rp, IdleTimeout::new(rb, idle).boxed())
+            let status = rp.status.as_u16();
+            (Response::from_parts(rp, IdleTimeout::new(rb, idle).boxed()), Some(status))
         }
     }
 }
@@ -414,5 +484,186 @@ mod tests {
             j.verdict,
             j.score
         );
+    }
+
+    mod events {
+        use super::*;
+        use crate::bus::{BusEvent, DecisionEvent, EventBus};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::broadcast::Receiver;
+
+        /// Upstream stub answering every request `200 ok` (or `status`).
+        async fn stub(status: u16) -> SocketAddr {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = l.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 65536];
+                        let _ = s.read(&mut buf).await;
+                        let resp = format!("HTTP/1.1 {status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                        let _ = s.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+            addr
+        }
+
+        /// A proxy with a bus attached, over `upstream`.
+        async fn proxy(upstream: &str, enforce: bool) -> (SocketAddr, EventBus) {
+            let bus = EventBus::new();
+            let st = ProxyState::new(
+                Shield::new(Config::default()),
+                format!("http://{upstream}"),
+                audit::AuditSink::off(),
+                audit::AuditSink::off(),
+                enforce,
+            )
+            .with_bus(bus.clone());
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(serve_listener(Arc::new(st), l));
+            (addr, bus)
+        }
+
+        async fn get(addr: SocketAddr, target: &str) -> String {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let raw = format!("GET {target} HTTP/1.1\r\nHost: shop.test\r\nConnection: close\r\n\r\n");
+            s.write_all(raw.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out)).await;
+            String::from_utf8_lossy(&out).into_owned()
+        }
+
+        async fn next(rx: &mut Receiver<BusEvent>) -> BusEvent {
+            tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("event in time").expect("bus open")
+        }
+
+        async fn next_decision(rx: &mut Receiver<BusEvent>) -> Arc<DecisionEvent> {
+            match next(rx).await {
+                BusEvent::Decision(d) => d,
+                other => panic!("expected Decision, got {other:?}"),
+            }
+        }
+
+        async fn quiet(rx: &mut Receiver<BusEvent>) {
+            let r = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+            assert!(r.is_err(), "unexpected extra event: {r:?}");
+        }
+
+        #[tokio::test]
+        async fn forwarded_allow_publishes_one_decision_with_upstream_status_and_latency() {
+            let up = stub(200).await;
+            let (addr, bus) = proxy(&up.to_string(), true).await;
+            let mut rx = bus.subscribe();
+            let resp = get(addr, "/products?page=2").await;
+            assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+            let d = next_decision(&mut rx).await;
+            assert_eq!(d.judgment.verdict, Verdict::Allow);
+            assert_eq!(d.upstream_status, Some(200));
+            assert!(d.latency_us > 0);
+            assert_eq!((d.method.as_str(), d.host.as_str(), d.path.as_str()), ("GET", "shop.test", "/products"));
+            assert_eq!(d.ip, Some("127.0.0.1".parse().unwrap()));
+            assert_eq!(d.src_key.as_deref(), Some("127.0.0.1"));
+            assert_eq!(d.config_rev, 1);
+            assert!(!d.event_id.is_empty());
+            assert!(d.ts_ms > 0);
+            assert!(d.snippets.is_empty());
+            quiet(&mut rx).await;
+        }
+
+        #[tokio::test]
+        async fn upstream_error_status_is_reported_as_the_upstream_sent_it() {
+            let up = stub(502).await;
+            let (addr, bus) = proxy(&up.to_string(), true).await;
+            let mut rx = bus.subscribe();
+            let _ = get(addr, "/").await;
+            assert_eq!(next_decision(&mut rx).await.upstream_status, Some(502));
+        }
+
+        #[tokio::test]
+        async fn a_gateway_error_the_proxy_produced_is_not_an_upstream_status() {
+            let (addr, bus) = proxy("127.0.0.1:1", true).await;
+            let mut rx = bus.subscribe();
+            let resp = get(addr, "/").await;
+            assert!(resp.starts_with("HTTP/1.1 502"), "{resp}");
+            assert_eq!(next_decision(&mut rx).await.upstream_status, None);
+        }
+
+        #[tokio::test]
+        async fn block_publishes_a_decision_without_an_upstream_status() {
+            let up = stub(200).await;
+            let (addr, bus) = proxy(&up.to_string(), true).await;
+            let mut rx = bus.subscribe();
+            let resp = get(addr, "/x?id=1%20union%20select%20a,b").await;
+            assert!(resp.starts_with("HTTP/1.1 403"), "{resp}");
+            let d = next_decision(&mut rx).await;
+            assert_eq!(d.judgment.verdict, Verdict::Block);
+            assert_eq!(d.upstream_status, None);
+            assert_eq!(d.path, "/x");
+        }
+
+        #[tokio::test]
+        async fn monitor_mode_forwards_a_block_and_reports_the_upstream_status() {
+            let up = stub(200).await;
+            let (addr, bus) = proxy(&up.to_string(), false).await;
+            let mut rx = bus.subscribe();
+            let _ = get(addr, "/x?id=1%20union%20select%20a,b").await;
+            let d = next_decision(&mut rx).await;
+            assert_eq!(d.judgment.verdict, Verdict::Block);
+            assert_eq!(d.upstream_status, Some(200));
+        }
+
+        #[tokio::test]
+        async fn a_ban_publishes_decision_then_ban_changed_and_the_fast_track_only_a_decision() {
+            let up = stub(200).await;
+            let (addr, bus) = proxy(&up.to_string(), true).await;
+            let mut rx = bus.subscribe();
+            assert!(get(addr, "/.git/config").await.starts_with("HTTP/1.1 403"));
+            let d = next_decision(&mut rx).await;
+            assert!(d.judgment.chain.as_ref().is_some_and(|c| c.new_ban.is_some()), "{:?}", d.judgment.chain);
+            match next(&mut rx).await {
+                BusEvent::BanChanged { key, ban, lifted } => {
+                    assert_eq!(key, "127.0.0.1");
+                    assert!(!lifted);
+                    assert_eq!(ban.map(|b| b.offences), Some(1));
+                }
+                other => panic!("expected BanChanged, got {other:?}"),
+            }
+            quiet(&mut rx).await;
+            // The next request is answered from the head: a Decision, no new ban.
+            assert!(get(addr, "/").await.starts_with("HTTP/1.1 403"));
+            let d = next_decision(&mut rx).await;
+            assert!(d.judgment.banned());
+            assert_eq!(d.upstream_status, None);
+            assert_eq!(d.src_key.as_deref(), Some("127.0.0.1"));
+            quiet(&mut rx).await;
+        }
+
+        #[tokio::test]
+        async fn a_bus_with_no_subscriber_never_disturbs_a_request() {
+            let up = stub(200).await;
+            let (addr, _bus) = proxy(&up.to_string(), true).await;
+            assert!(get(addr, "/").await.starts_with("HTTP/1.1 200"));
+            assert!(get(addr, "/.git/config").await.starts_with("HTTP/1.1 403"));
+        }
+
+        #[tokio::test]
+        async fn without_a_bus_requests_behave_as_before() {
+            let up = stub(200).await;
+            let st = ProxyState::new(
+                Shield::new(Config::default()),
+                format!("http://{up}"),
+                audit::AuditSink::off(),
+                audit::AuditSink::off(),
+                true,
+            );
+            assert!(st.bus.is_none());
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(serve_listener(Arc::new(st), l));
+            assert!(get(addr, "/").await.starts_with("HTTP/1.1 200"));
+        }
     }
 }
