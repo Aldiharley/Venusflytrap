@@ -2104,6 +2104,61 @@ mod exception_tests {
     }
 
     #[test]
+    fn a_construct_already_in_shadow_keeps_its_shadow_form_and_credits_no_exception() {
+        let mut cfg = Config::default();
+        cfg.shield.shadow = vec!["sqli.union-select".into()];
+        let y = format!("version: 1
+exceptions:
+{}", entry("referer-union", "log-only", "sqli.union-select", REFERER_SCOPE));
+        let ex = Exceptions::from_yaml_str(&y, parse_date(AS_OF).unwrap()).unwrap();
+        let req = referer_req();
+        let j = Shield::new(cfg.clone()).with_exceptions(ex, ExceptionClock::Fixed).inspect(&req);
+        let union: Vec<_> = j.contributions.iter().filter(|c| c.construct.as_deref() == Some("sqli.union-select")).collect();
+        assert!(!union.is_empty(), "{j:?}");
+        assert!(union.iter().all(|c| c.shadow && c.points == 0.0 && c.exception.is_none()), "the global shadow form: {union:?}");
+        assert!(j.exceptions.is_empty(), "the construct was already off globally, so the exception is not credited");
+        let plain = Shield::new(cfg).inspect(&req);
+        assert_eq!((j.score, j.verdict), (plain.score, plain.verdict));
+    }
+
+    #[test]
+    fn skipping_the_path_drops_only_the_path_graph() {
+        let path = "/.git/config/1'%20union%20select%20password%20from%20users--";
+        let base = Shield::new(Config::default()).inspect(&Request::get(path));
+        let path_graph = |j: &Judgment| j.contributions.iter().any(|c| c.engine == "graph-taint" && c.field == Some(FieldRef::path()));
+        assert!(path_graph(&base), "{base:?}");
+        let s = shield_with(&[entry("skip-path", "skip-inspection", "", "      path_prefix: /
+      field: { loc: path, name: \"<path>\" }
+")]);
+        let j = s.inspect(&Request::get(path));
+        assert_eq!(j.skipped, vec![FieldRef::path()]);
+        assert!(!path_graph(&j), "{j:?}");
+        assert_eq!(j.exceptions, vec!["skip-path".to_string()]);
+        let has = |id: &str| j.contributions.iter().any(|c| c.construct.as_deref() == Some(id));
+        assert!(has("honeypot.decoy-hit") && has("recon.sensitive-path-probe"), "request-level checks still judge the path: {j:?}");
+        assert_eq!(j.decided_by.kind, CauseKind::Honeypot);
+    }
+
+    #[test]
+    fn a_skipped_field_is_not_charged_to_the_byte_budget() {
+        let mut cfg = Config::default();
+        cfg.shield.max_inspect_bytes = 1024;
+        let mut req = Request::get("/upload");
+        req.headers.push(("X-Blob".into(), "a".repeat(4096)));
+        let truncated = |j: &Judgment| j.contributions.iter().any(|c| c.construct.as_deref() == Some(sinks::LIMIT_PAYLOAD_TRUNCATED.id));
+        assert!(truncated(&Shield::new(cfg.clone()).inspect(&req)), "without the skip the header alone exceeds the budget");
+        let y = format!("version: 1
+exceptions:
+{}", entry("skip-blob", "skip-inspection", "", "      path_prefix: /
+      field: { loc: header, name: x-blob }
+"));
+        let ex = Exceptions::from_yaml_str(&y, parse_date(AS_OF).unwrap()).unwrap();
+        let j = Shield::new(cfg).with_exceptions(ex, ExceptionClock::Fixed).inspect(&req);
+        assert!(!truncated(&j), "{j:?}");
+        assert_eq!(j.skipped, vec![FieldRef { loc: crate::request::Location::Header, name: "X-Blob".into() }]);
+    }
+
+    #[test]
     fn cache_gives_the_same_judgment() {
         let payload = "1' union select password from users--";
         let mut req = Request::get("/search");
