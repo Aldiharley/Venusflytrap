@@ -91,16 +91,18 @@ async fn handle(state: Arc<AdminState>, method: Method, path: &str) -> Response<
             .insert("Allow", hyper::header::HeaderValue::from_static(allowed));
         return r;
     }
-    match path {
-        "/api/v1/health" => json(StatusCode::OK, &serde_json::json!({"ok": true})),
-        "/api/v1/status" => match serde_json::to_vec(&state.status.snapshot()) {
+    // Every route needs an explicit arm; a route in `ROUTES` without one gets
+    // the 404 default and never reaches the reload handler.
+    match (allowed, path) {
+        ("GET", "/api/v1/health") => json(StatusCode::OK, &serde_json::json!({"ok": true})),
+        ("GET", "/api/v1/status") => match serde_json::to_vec(&state.status.snapshot()) {
             Ok(body) => respond(StatusCode::OK, "application/json", body),
             Err(_) => json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &serde_json::json!({"error": "internal error"}),
             ),
         },
-        "/metrics" => {
+        ("GET", "/metrics") => {
             let text = state.metrics.render(&state.status.snapshot());
             respond(
                 StatusCode::OK,
@@ -108,7 +110,7 @@ async fn handle(state: Arc<AdminState>, method: Method, path: &str) -> Response<
                 text.into_bytes(),
             )
         }
-        _ => {
+        ("POST", "/api/v1/reload") => {
             // POST /api/v1/reload does file and parse work: keep it off the
             // async worker threads.
             let reload = state.reload.clone();
@@ -124,6 +126,10 @@ async fn handle(state: Arc<AdminState>, method: Method, path: &str) -> Response<
                 ),
             }
         }
+        _ => json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error": "not found"}),
+        ),
     }
 }
 
@@ -410,6 +416,43 @@ mod tests {
                 assert_eq!(r.status, 404, "{method} {path}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn each_route_in_the_table_gets_its_own_handler_and_reload_runs_once() {
+        let s = start(false).await;
+        let mut reload_routes = 0;
+        for (method, path) in ROUTES {
+            let r = request(s.addr, method, path).await;
+            assert_eq!(r.status, 200, "{method} {path}");
+            match (*method, *path) {
+                ("GET", "/api/v1/health") => {
+                    assert_eq!(r.header("content-type"), Some("application/json"));
+                    assert_eq!(r.body, r#"{"ok":true}"#);
+                }
+                ("GET", "/api/v1/status") => {
+                    assert_eq!(r.header("content-type"), Some("application/json"));
+                    let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+                    assert!(v["components"].is_array(), "{}", r.body);
+                }
+                ("GET", "/metrics") => {
+                    assert_eq!(r.header("content-type"), Some("text/plain; version=0.0.4"));
+                    assert!(r.body.contains("# TYPE"), "{}", r.body);
+                }
+                ("POST", "/api/v1/reload") => {
+                    reload_routes += 1;
+                    assert_eq!(r.body, r#"{"rev":4}"#);
+                }
+                other => panic!("route {other:?} has no expectation here: add one"),
+            }
+            assert_security_headers(&r);
+        }
+        assert_eq!(reload_routes, 1);
+        assert_eq!(
+            s.stub.calls.load(Ordering::SeqCst),
+            1,
+            "exactly one route may run a reload"
+        );
     }
 
     #[test]
