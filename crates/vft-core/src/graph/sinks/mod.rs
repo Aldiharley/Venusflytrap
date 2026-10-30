@@ -171,6 +171,13 @@ impl Disabled {
     pub fn has(&self, id: &str) -> bool {
         self.0.contains(id)
     }
+
+    /// This set plus `ids` (scoped exceptions add their constructs per field).
+    pub fn with_ids(&self, ids: impl IntoIterator<Item = &'static str>) -> Disabled {
+        let mut s = self.0.clone();
+        s.extend(ids);
+        Disabled(s)
+    }
 }
 
 /// Sink output for one field: reachable and latent patterns, de-duplicated,

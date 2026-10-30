@@ -1,0 +1,43 @@
+{
+  "_comment": "Shared by crates/vft-core/tests/exceptions_shared.rs and ui/src/lib/exceptions.test.ts. Each case = base + patch (top-level merge; scope merges into base.scope). codes = sorted issue codes of validate_entry at as_of.",
+  "as_of": "2026-10-30",
+  "base": {
+    "id": "referer-sql", "action": "ignore", "constructs": ["sqli.*"],
+    "scope": { "methods": ["GET"], "path_prefix": "/", "field": { "loc": "header", "name": "referer" } },
+    "owner": "dennis", "reason": "Search referers carry SQL-looking text",
+    "created": "2026-10-30", "modified": "2026-10-30", "expires": "2026-11-30"
+  },
+  "cases": [
+    { "name": "base is valid", "patch": {}, "codes": [] },
+    { "name": "log-only is valid", "patch": { "action": "log-only" }, "codes": [] },
+    { "name": "skip with exact field is valid", "patch": { "action": "skip-inspection", "constructs": [] }, "codes": [] },
+    { "name": "explicit construct", "patch": { "constructs": ["sqli.union-select", "sig.classic-or"] }, "codes": [] },
+    { "name": "no field, no methods", "patch": { "scope": { "methods": [], "field": null } }, "codes": [] },
+    { "name": "glob field name", "patch": { "scope": { "field": { "loc": "query", "name": "utm_*" } } }, "codes": [] },
+    { "name": "bad id", "patch": { "id": "Referer SQL" }, "codes": ["id-format"] },
+    { "name": "empty owner", "patch": { "owner": "  " }, "codes": ["required"] },
+    { "name": "empty reason", "patch": { "reason": "" }, "codes": ["required"] },
+    { "name": "bad date", "patch": { "expires": "2026-02-30" }, "codes": ["date"] },
+    { "name": "bad date format", "patch": { "created": "30/10/2026" }, "codes": ["date"] },
+    { "name": "modified before created", "patch": { "created": "2026-10-31", "modified": "2026-10-30" }, "codes": ["modified-order"] },
+    { "name": "expires not after modified", "patch": { "expires": "2026-10-30" }, "codes": ["expired", "expires-order"] },
+    { "name": "expires too far", "patch": { "expires": "2027-10-31" }, "codes": ["expires-too-far"] },
+    { "name": "expires exactly 365 days", "patch": { "expires": "2027-10-30" }, "codes": [] },
+    { "name": "already expired", "patch": { "created": "2026-09-01", "modified": "2026-09-01", "expires": "2026-10-30" }, "codes": ["expired"] },
+    { "name": "bad method", "patch": { "scope": { "methods": ["GE T"] } }, "codes": ["method"] },
+    { "name": "path prefix without slash", "patch": { "scope": { "path_prefix": "api" } }, "codes": ["path-prefix"] },
+    { "name": "empty field name", "patch": { "scope": { "field": { "loc": "header", "name": "" } } }, "codes": ["field-name"] },
+    { "name": "unknown construct", "patch": { "constructs": ["sqli.nope"] }, "codes": ["unknown-construct"] },
+    { "name": "unknown wildcard", "patch": { "constructs": ["ssrf.*"] }, "codes": ["unknown-construct"] },
+    { "name": "limit is forbidden", "patch": { "constructs": ["limit.payload-truncated"] }, "codes": ["forbidden-target"] },
+    { "name": "deny list is forbidden", "patch": { "constructs": ["intel.deny-listed"] }, "codes": ["forbidden-target"] },
+    { "name": "ban is forbidden", "patch": { "constructs": ["chain.ban"] }, "codes": ["forbidden-target"] },
+    { "name": "decoder is not a detection", "patch": { "constructs": ["decode.entity"] }, "codes": ["not-a-detection"] },
+    { "name": "gate is not a detection", "patch": { "constructs": ["gate.cmd-position"] }, "codes": ["not-a-detection"] },
+    { "name": "intel wildcard drops the deny list", "patch": { "constructs": ["intel.*"] }, "codes": [] },
+    { "name": "constructs missing", "patch": { "constructs": [] }, "codes": ["constructs-missing"] },
+    { "name": "constructs on skip", "patch": { "action": "skip-inspection" }, "codes": ["constructs-on-skip"] },
+    { "name": "skip needs a field", "patch": { "action": "skip-inspection", "constructs": [], "scope": { "field": null } }, "codes": ["skip-needs-field"] },
+    { "name": "skip with a glob", "patch": { "action": "skip-inspection", "constructs": [], "scope": { "field": { "loc": "header", "name": "x-*" } } }, "codes": ["skip-wildcard"] }
+  ]
+}
