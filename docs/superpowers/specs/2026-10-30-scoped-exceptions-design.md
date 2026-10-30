@@ -134,11 +134,12 @@ it. A shield without exceptions takes exactly today's code path.
    if those constructs were disabled for those fields: score, lattice,
    corroboration, verdict, `decided_by`, ATT&CK tags and confidence all come
    from this pass.
-4. **Observe pass:** when any ignore or log-only exception matched, the request
-   is inspected again with only `shield.disabled` off (the mechanism
-   `shield.shadow` uses today, with skipped fields still skipped). For each
-   contribution of that pass whose construct an exception removed for that
-   field:
+4. **Observe pass:** when an ignore or log-only exception added constructs to
+   the off-set of at least one field (or of the request-level checks), or
+   `shield.shadow` is set, the request is inspected again with only
+   `shield.disabled` off (the mechanism `shield.shadow` uses today, with
+   skipped fields still skipped). For each contribution of that pass whose
+   construct an exception removed for that field:
    - log-only: append it with `points: 0.0`, `shadow: true` and the new
      `exception: Some(id)`;
    - ignore: keep no contribution; record only the id.

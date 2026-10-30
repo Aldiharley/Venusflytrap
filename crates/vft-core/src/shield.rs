@@ -16,7 +16,7 @@ use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{decode, fold, fold_unless_cut, Decoded, Normalized, Options};
 use crate::request::Request;
 use crate::score::{arbitrate, Scored};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -41,6 +41,9 @@ pub struct Shield {
     /// Compute every exception off-set afresh instead of caching it.
     #[cfg(test)]
     bypass_off_cache: bool,
+    /// Exception observe passes run so far.
+    #[cfg(test)]
+    observe_passes: std::sync::atomic::AtomicUsize,
 }
 
 impl Shield {
@@ -82,6 +85,8 @@ impl Shield {
             clock: ExceptionClock::Fixed,
             #[cfg(test)]
             bypass_off_cache: false,
+            #[cfg(test)]
+            observe_passes: Default::default(),
         }
     }
 
@@ -159,9 +164,14 @@ impl Shield {
             }
             return (j, work);
         };
-        let (mut j, work) = self.inspect_view(req, &self.view(&self.disabled, Some(&sel), true));
+        let judged = self.view(&self.disabled, Some(&sel), true);
+        let (mut j, work) = self.inspect_view(req, &judged);
         let mut touched: Vec<&str> = j.skipped.iter().filter_map(|f| sel.skip_for(f)).collect();
-        if sel.has_removers() || self.observe.is_some() {
+        // Nothing to attribute unless some field (or the request-level set)
+        // had a construct removed; shadow evidence still needs the pass.
+        if judged.removed.get() || self.observe.is_some() {
+            #[cfg(test)]
+            self.observe_passes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (seen, _) = self.inspect_view(req, &self.view(&self.base_observe, Some(&sel), false));
             for c in seen.contributions {
                 if c.construct.as_deref().is_some_and(|id| self.shadow.has(id)) {
@@ -185,6 +195,7 @@ impl Shield {
             base,
             sel,
             remove,
+            removed: Cell::new(false),
             cache: RefCell::default(),
             #[cfg(test)]
             bypass_cache: self.bypass_off_cache,
@@ -613,6 +624,8 @@ struct View<'a> {
     base: &'a Disabled,
     sel: Option<&'a Selection<'a>>,
     remove: bool,
+    /// Set once any off-set had an exception's constructs added.
+    removed: Cell<bool>,
     /// Off-sets by the indexes of the exceptions that built them; most fields
     /// share one (usually the empty key).
     cache: RefCell<HashMap<Vec<usize>, Rc<Disabled>>>,
@@ -627,6 +640,9 @@ impl View<'_> {
             return Off::Base(self.base);
         };
         let key = sel.removers_for(f);
+        if !key.is_empty() {
+            self.removed.set(true);
+        }
         #[cfg(test)]
         if self.bypass_cache {
             return Off::Scoped(Rc::new(self.base.with_ids(sel.removed_ids(&key))));
@@ -2035,6 +2051,19 @@ mod exception_tests {
             let j = s.inspect_stateful(&req, &mut chain, parse_date(AS_OF).unwrap() + i * 1000);
             assert!(!j.banned(), "round {i}: {j:?}");
         }
+    }
+
+    #[test]
+    fn a_scope_that_removes_nothing_skips_the_observe_pass() {
+        use std::sync::atomic::Ordering;
+        let mut req = Request::get("/search");
+        req.query.push(("q".into(), "1 union select password from users".into()));
+        let s = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]);
+        let base = serde_json::to_value(Shield::new(Config::default()).inspect(&req)).unwrap();
+        assert_eq!(serde_json::to_value(s.inspect(&req)).unwrap(), base, "no Referer: the same judgment");
+        assert_eq!(s.observe_passes.load(Ordering::Relaxed), 0, "no field got a remover, so no observe pass");
+        assert_eq!(s.inspect(&referer_req()).exceptions, vec!["referer-sql".to_string()]);
+        assert_eq!(s.observe_passes.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -496,10 +496,6 @@ impl<'a> Selection<'a> {
         self.entries.iter().copied().find(|c| c.action == ExceptionAction::SkipInspection && c.field_matches(Some(f))).map(|c| c.id.as_str())
     }
 
-    pub(crate) fn has_removers(&self) -> bool {
-        self.entries.iter().any(|c| c.action != ExceptionAction::SkipInspection)
-    }
-
     /// Indexes of the ignore/log-only exceptions that apply to `f` (None = the
     /// request-level constructs, which only field-less exceptions reach).
     pub(crate) fn removers_for(&self, f: Option<&FieldRef>) -> Vec<usize> {
@@ -632,7 +628,7 @@ mod tests {
         let e = ex(body);
         let sel = e.select("POST", "/hook", parse_date(AS_OF).unwrap());
         assert_eq!(sel.skip_for(&FieldRef::header("X-Signature")), Some("skip-token"));
-        assert!(!sel.has_removers());
+        assert!(sel.removers_for(None).is_empty() && sel.removers_for(Some(&FieldRef::header("X-Signature"))).is_empty(), "a skip removes no constructs");
         assert_eq!(e.warnings().len(), 1);
         assert!(e.warnings()[0].contains("skip-token") && e.warnings()[0].contains("2026-11-30"));
     }
