@@ -214,3 +214,137 @@ for (const scheme of ['light', 'dark'] as const) {
     await expectNoAxe(page);
   });
 }
+
+// --- exceptions (sub-project C) ---
+
+// A Monitor row an exception touched, found by its marker rather than by a hard-coded id.
+const TOUCHED_QUERY = '/monitor?static&q=path%3A%2Fapi%2Fsearch';
+const touchedRow = (page: Page) => page.locator('tbody tr').filter({ has: page.getByLabel('Exception applied') }).first();
+
+// A touched detection (not an Allow, whose ignored evidence leaves no construct to pre-fill): which touched
+// rows the fixture window holds depends on the wall clock.
+const touchedDetection = (page: Page) => page.locator('tbody tr').filter({ has: page.getByLabel('Exception applied') })
+  .filter({ hasNot: page.locator('td.c-verdict', { hasText: 'Allow' }) }).first();
+
+async function openTouched(page: Page) {
+  await page.goto(TOUCHED_QUERY);
+  await expect(page.getByRole('grid')).toBeVisible();
+  await touchedDetection(page).locator('td[data-c="0"] a').click();
+  await expect(page.getByRole('region', { name: 'Exceptions' })).toBeVisible();
+  await page.waitForLoadState('networkidle');
+}
+
+test('exceptions: the tabs switch, a row opens its details and Copy YAML copies the entry', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/exceptions?static');
+  await expect(page.getByRole('heading', { level: 1, name: 'Exceptions' })).toBeVisible();
+  const active = page.getByRole('tab', { name: /^Active/ });
+  const expired = page.getByRole('tab', { name: /^Expired/ });
+  await expect(active).toHaveAttribute('aria-selected', 'true');
+  await expect(active).toContainText('3');
+  await expect(expired).toContainText('1');
+  const panel = page.getByRole('tabpanel');
+  await expect(panel.getByRole('button', { name: 'referer-sql' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'legacy-search' })).toHaveCount(0);
+
+  await expired.click();
+  await expect(expired).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel').getByRole('button', { name: 'legacy-search' })).toBeVisible();
+  await active.click();
+
+  const row = page.getByRole('button', { name: 'hook-signature' });
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByText('Skips inspection').first()).toBeVisible();
+  await row.click();
+  await expect(row).toHaveAttribute('aria-expanded', 'true');
+  const detail = page.getByRole('region', { name: /^Exception hook-signature/ });
+  await expect(detail).toBeVisible();
+  await detail.getByRole('button', { name: 'Copy YAML' }).click();
+  await expect(page.getByText('Copied YAML.')).toBeVisible();
+  const yaml = await page.evaluate(() => navigator.clipboard.readText());
+  expect(yaml).toContain('id: hook-signature');
+  expect(yaml).toContain('action: skip-inspection');
+});
+
+test('exceptions: ?id opens that row', async ({ page }) => {
+  await page.goto('/exceptions?static&id=hook-signature');
+  await expect(page.getByRole('button', { name: 'hook-signature' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('region', { name: /^Exception hook-signature/ })).toBeVisible();
+});
+
+test('monitor: a row an exception touched carries the marker after its verdict chip', async ({ page }) => {
+  await page.goto(TOUCHED_QUERY);
+  await expect(page.getByRole('grid')).toBeVisible();
+  const marker = page.getByLabel('Exception applied');
+  await expect(marker.first()).toBeVisible();
+  expect(await marker.count()).toBeLessThan(await page.locator('tbody tr').count());
+  await expect(touchedRow(page).locator('td.c-verdict .chip + [aria-label="Exception applied"]')).toHaveCount(1);
+});
+
+test('request details: a touched request lists its exceptions and the Create exception form yields YAML', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await openTouched(page);
+  const section = page.getByRole('region', { name: 'Exceptions' });
+  const link = section.getByRole('link').first();
+  await expect(link).toHaveAttribute('href', /^\/exceptions\?id=/);
+
+  await page.getByRole('button', { name: 'Create exception' }).click();
+  const form = page.getByRole('region', { name: 'Create exception' });
+  await expect(form).toBeVisible();
+  await expect(form.locator('pre')).toHaveCount(0);
+  await expect(form.getByRole('button', { name: 'Copy YAML' })).toHaveCount(0);
+  await form.getByLabel('Owner').fill('platform-team');
+  await form.getByLabel('Reason').fill('UTM tags carry markup from the campaign tool');
+  await expect(form.locator('pre')).toContainText('owner: "platform-team"');
+  await expect(form.locator('pre')).toContainText('reason: "UTM tags carry markup from the campaign tool"');
+  await expect(form).toContainText('Paste this under exceptions: in your exceptions file. It takes effect after a restart with --exceptions.');
+  await form.getByRole('button', { name: 'Copy YAML' }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('owner: "platform-team"');
+
+  // Following an exception link lands on that row, open.
+  const id = await link.textContent();
+  await link.click();
+  await expect(page).toHaveURL(/\/exceptions\?.*id=/);
+  await expect(page.getByRole('button', { name: id!.trim() })).toHaveAttribute('aria-expanded', 'true');
+});
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`exceptions screen in ${scheme}: no axe violations, list and open row`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto('/exceptions?static');
+    await expect(page.getByRole('table')).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await expectScheme(page, scheme);
+    await expectNoAxe(page);
+    await page.getByRole('button', { name: 'hook-signature' }).click();
+    await expect(page.getByRole('region', { name: /^Exception hook-signature/ })).toBeVisible();
+    await expectNoAxe(page);
+    await page.getByRole('tab', { name: /^Expired/ }).click();
+    await expect(page.getByRole('button', { name: 'legacy-search' })).toBeVisible();
+    await expectNoAxe(page);
+  });
+
+  test(`touched request details in ${scheme}: no axe violations, with the create form closed, empty and filled`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await openTouched(page);
+    await expectScheme(page, scheme);
+    await expectNoAxe(page);
+    await page.getByRole('button', { name: 'Create exception' }).click();
+    const form = page.getByRole('region', { name: 'Create exception' });
+    await expect(form).toBeVisible();
+    await expectNoAxe(page); // with the required-field issues showing
+    await form.getByLabel('Owner').fill('platform-team');
+    await form.getByLabel('Reason').fill('UTM tags carry markup from the campaign tool');
+    await expect(form.locator('pre')).toBeVisible();
+    await expectNoAxe(page);
+  });
+
+  test(`monitor with an exception marker in ${scheme}: no axe violations`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto(TOUCHED_QUERY);
+    await expect(page.getByLabel('Exception applied').first()).toBeVisible();
+    await page.waitForLoadState('networkidle');
+    await expectScheme(page, scheme);
+    await expectNoAxe(page);
+  });
+}

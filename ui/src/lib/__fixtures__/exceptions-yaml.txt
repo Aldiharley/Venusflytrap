@@ -1,0 +1,46 @@
+  - id: referer-sql
+    action: ignore
+    constructs: [sqli.*]
+    scope:
+      methods: [GET]
+      path_prefix: /api/search
+      field: { loc: header, name: referer }
+    owner: "dennis"
+    reason: "Search results link back with SQL-looking text in the Referer"
+    created: 2026-10-19
+    modified: 2026-10-26
+    expires: 2026-11-18
+  - id: utm-xss
+    action: log-only
+    constructs: [xss.*]
+    scope:
+      path_prefix: /
+      field: { loc: query, name: utm_* }
+    owner: "marketing"
+    reason: "Campaign tags carry markup: watch them for a month before deciding"
+    created: 2026-10-23
+    modified: 2026-10-23
+    expires: 2026-11-22
+  - id: hook-signature
+    action: skip-inspection
+    scope:
+      methods: [POST]
+      path_prefix: /hooks
+      field: { loc: header, name: x-signature }
+    owner: "dennis"
+    reason: "Webhook signatures are base64 blobs the partner verifies itself"
+    created: 2026-09-28
+    modified: 2026-09-28
+    expires: 2026-12-27
+  - id: legacy-search
+    action: ignore
+    constructs: [sqli.sql-keyword]
+    scope:
+      methods: [GET]
+      path_prefix: /legacy/search
+      field: { loc: query, name: q }
+    owner: "dennis"
+    reason: "The old search form sends raw SQL fragments until it is retired"
+    created: 2026-06-30
+    modified: 2026-07-20
+    expires: 2026-10-25

@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { SourceError } from '../lib/api/errors';
   import { Latest } from '../lib/api/latest';
-  import type { RequestDetail } from '../lib/api/types';
+  import type { ExceptionEntry, FieldRef, RequestDetail } from '../lib/api/types';
   import AttackChip from '../lib/components/AttackChip.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import ErrorCard from '../lib/components/ErrorCard.svelte';
@@ -12,11 +12,12 @@
   import VerdictChip from '../lib/components/VerdictChip.svelte';
   import { toasts } from '../lib/components/toasts.svelte';
   import { fmtClock } from '../lib/format';
-  import { Copy } from '../lib/icons';
+  import { Copy, FilePlus, TriangleAlert } from '../lib/icons';
   import { encodeOcsf } from '../lib/ocsf';
   import { app } from '../lib/state/app.svelte';
+  import CreateException from './request/CreateException.svelte';
   import ScoreGauge from './request/ScoreGauge.svelte';
-  import { constructHref, contributionRows, fieldLabel, settingHref, whyParts } from './request/why';
+  import { constructHref, contributionRows, excludedNote, fieldLabel, settingHref, skippingIds, whyParts } from './request/why';
 
   let { title, param }: { title: string; param: string | null } = $props();
   const id = $derived(param ?? '');
@@ -38,7 +39,30 @@
   const parts = $derived(d ? whyParts(d) : []);
   const contribs = $derived(d ? contributionRows(d.judgment.contributions, d.judgment.score) : null);
   const cause = $derived(d?.judgment.decided_by);
-  const shadowCount = $derived(d ? d.judgment.contributions.filter((c) => c.shadow).length : 0);
+  const excluded = $derived(d ? excludedNote(d.judgment.contributions) : '');
+  const touched = $derived(d ? d.judgment.exceptions.length > 0 || d.judgment.skipped.length > 0 : false);
+  const skippedBy = (f: FieldRef) => skippingIds(f, d?.judgment.exceptions ?? [], entries).join(', ');
+  const exceptionHref = (eid: string) => `/exceptions?id=${encodeURIComponent(eid)}`;
+
+  // A skipped field does not say which exception skipped it: the exceptions file tells, by the field each
+  // skip-inspection entry names. Until it loads (or if it cannot, or nothing matches) no id is named.
+  let entries = $state<ExceptionEntry[] | null>(null);
+  $effect(() => {
+    const src = app.src;
+    if (!src || !d || d.judgment.skipped.length === 0) return;
+    const ctl = new AbortController();
+    src.exceptions({ signal: ctl.signal }).then((r) => { entries = r; }, () => { entries = null; });
+    return () => ctl.abort();
+  });
+
+  // The inline "Create exception" panel: closing it hands focus back to the button that opened it.
+  let creating = $state(false);
+  let createBtn: HTMLButtonElement | undefined = $state();
+  async function closeCreate() {
+    creating = false;
+    await tick();
+    createBtn?.focus();
+  }
   const fmtTime = (ms: number) => `${new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${fmtClock(ms)}`;
   const fmtPoints = (n: number) => n.toFixed(1);
   const sourceHref = (key: string) => `/sources/${encodeURIComponent(key)}`;
@@ -94,7 +118,8 @@
       <div><dt class="label-caps">Upstream</dt><dd class="num">{d.row.upstream_status ?? 'not forwarded'}</dd></div>
       <div><dt class="label-caps">Config</dt><dd class="num">rev {d.row.config_rev}</dd></div>
       <div><dt class="label-caps">Event ID</dt><dd class="idrow"><span class="mono">{eventId}</span>
-        <button class="btn btn-ghost btn-sm icon" aria-label="Copy event ID" onclick={() => copy(eventId, 'event ID')}><Copy size={14} aria-hidden="true" /></button></dd></div>
+        <button class="btn btn-ghost btn-sm icon" aria-label="Copy event ID" onclick={() => copy(eventId, 'event ID')}><Copy size={14} aria-hidden="true" /></button>
+        <button bind:this={createBtn} class="btn btn-sm" aria-expanded={creating} aria-controls="ce-panel" onclick={() => (creating = true)}><FilePlus size={14} aria-hidden="true" />Create exception</button></dd></div>
       <div><dt class="label-caps">Group ID</dt><dd class="idrow">
         {#if d.row.group_id !== null}
           {@const group = d.row.group_id}
@@ -116,6 +141,8 @@
   <div class="card skeleton" aria-busy="true" aria-label="Loading request"></div>
 {:else if cause && contribs}
   {#if d.row.sampled}<p class="banner card" role="note">Sampled request (1 % of Allows).</p>{/if}
+
+  {#if creating}<div id="ce-panel"><CreateException {d} onclose={closeCreate} /></div>{/if}
 
   <div class="tabs" role="tablist" aria-label="Request view">
     {#each TABS as t, i (t.key)}
@@ -177,27 +204,42 @@
           <thead><tr><th scope="col">Engine</th><th scope="col">Field</th><th scope="col">Construct</th><th scope="col">Evidence</th><th scope="col" class="n">Weight</th><th scope="col" class="n">Points</th></tr></thead>
           <tbody>
             {#each contribs.items as { c, top }, i (i)}
-              <tr class:top class:shadow={c.shadow}>
+              <tr class:top class:shadow={c.shadow && c.exception === null} class:suppressed={c.exception !== null}>
                 <td>{c.engine}</td>
                 <td class="mono">{c.field ? fieldLabel(c.field) : '—'}</td>
-                <td><span class="mono">{c.construct ?? '—'}</span>{#if c.shadow} <span class="tag">Shadow · not scored</span>{/if}</td>
+                <td><span class="mono">{c.construct ?? '—'}</span>{#if c.exception !== null}<span class="tag">suppressed by <Link href={exceptionHref(c.exception)} class="mono">{c.exception}</Link></span>{:else if c.shadow}<span class="tag">Shadow · not scored</span>{/if}</td>
                 <td><EvidenceChip value={c.value} /></td>
                 <td class="n">{c.weight.toFixed(2)}</td>
-                <td class="n">{fmtPoints(c.points)}{#if top} <span class="tag">top</span>{/if}</td>
+                <td class="n">{fmtPoints(c.points)}{#if top}<span class="tag">top</span>{/if}</td>
               </tr>
             {:else}
               <tr><td colspan="6" class="secondary">No evidence was recorded for this request.</td></tr>
             {/each}
           </tbody>
           <tfoot>
-            <tr><th scope="row" colspan="5">Σ points{shadowCount ? ' (shadow rows excluded)' : ''}</th><td class="n num">{`${fmtPoints(contribs.sum)} ${contribs.exact ? '=' : '≈'} score ${d.judgment.score}`}</td></tr>
+            <tr><th scope="row" colspan="5">Σ points{excluded}</th><td class="n num">{`${fmtPoints(contribs.sum)} ${contribs.exact ? '=' : '≈'} score ${d.judgment.score}`}</td></tr>
           </tfoot>
         </table>
       </div>
-      {#if shadowCount}
+      {#if d.judgment.contributions.some((c) => c.shadow && c.exception === null)}
         <p class="secondary small">Shadow contributions come from constructs in <code class="mono">shield.shadow</code>: they fired but were judged as disabled, so they add no points and never decide a verdict.</p>
       {/if}
     </section>
+
+    {#if touched}
+      <section class="card touched" aria-labelledby="touched-h">
+        <h2 id="touched-h" class="title">Exceptions</h2>
+        <p class="secondary small">These exceptions changed how this request was judged.</p>
+        <ul>
+          {#each d.judgment.exceptions as eid (eid)}
+            <li><Link href={exceptionHref(eid)} class="mono">{eid}</Link></li>
+          {/each}
+          {#each d.judgment.skipped as f, i (i)}
+            <li class="skipped"><TriangleAlert size={14} strokeWidth={1.5} aria-hidden="true" /><span class="mono">{fieldLabel(f)}</span> <span>Not inspected (skip-inspection {skippedBy(f) || 'exception'})</span></li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
 
     <section class="card chain" aria-labelledby="chain-h">
       <h2 id="chain-h" class="title">Chain outcome</h2>
@@ -289,6 +331,9 @@
   .why { grid-column: 1 / 8; }
   .gauge { grid-column: 8 / 13; }
   .contribs { grid-column: 1 / 13; }
+  .touched { grid-column: 1 / 13; }
+  .touched ul { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--vf-space-2); }
+  .skipped { display: flex; align-items: center; gap: var(--vf-space-2); color: var(--vf-health-warn-fg); }
   .chain { grid-column: 1 / 7; }
   .timeline { grid-column: 7 / 13; }
   .fields { grid-column: 1 / 13; }
@@ -304,7 +349,9 @@
   .small { font-size: var(--vf-fs-xs); }
   .scroll { overflow-x: auto; }
   tr.top td { background: var(--vf-row-selected); }
-  .tag { font-size: var(--vf-fs-xs); color: var(--vf-text-secondary); font-weight: 600; }
+  tr.suppressed td { color: var(--vf-text-muted); }
+  /* The gap before a tag is its margin: Svelte drops a space at the start of an {#if} block. */
+  .tag { margin-left: var(--vf-space-1); font-size: var(--vf-fs-xs); color: var(--vf-text-secondary); font-weight: 600; }
   tfoot th { text-align: right; text-transform: none; letter-spacing: 0; font-size: var(--vf-fs-sm); }
   tfoot td { font-weight: 600; }
   .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--vf-space-3); }

@@ -1,19 +1,24 @@
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { beforeAll, expect, test, vi } from 'vitest';
+import { formatDate, toYaml, validateEntry } from '../../lib/exceptions';
 import { FixtureSource } from '../../lib/api/source';
 import type { RequestDetail } from '../../lib/api/types';
 import { toasts } from '../../lib/components/toasts.svelte';
 import { app } from '../../lib/state/app.svelte';
 import RequestDetails from '../RequestDetails.svelte';
+import { prefillException, slotOf } from './exception-form';
 
 const call = () => ({ signal: new AbortController().signal });
 let details: RequestDetail[] = [];
 
 beforeAll(async () => {
+  // The fixture clock every console test uses: which rows the last hour holds depends on it.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.UTC(2026, 9, 28, 14, 5, 0));
   const src = new FixtureSource({ live: false });
   await app.start(src);
   const now = Date.now();
-  const page = await src.history({ q: '', from: now - 3_600_000, to: now, limit: 200 }, call());
+  const page = await src.history({ q: '', from: now - 3_600_000, to: now, limit: 1000 }, call());
   details = await Promise.all(page.rows.map((r) => src.request(r.id, call())));
 });
 
@@ -59,13 +64,24 @@ test('contributions are sorted by points and their scored points sum to the scor
   expect(pts.reduce((a, b) => a + b, 0)).toBeCloseTo(d.judgment.score, 0);
 });
 
+test('a tag in the contributions table is set off from the text before it', async () => {
+  const d = find(logOnly);
+  await show(d);
+  const table = within(screen.getByRole('region', { name: 'Contributions' })).getByRole('table');
+  const tags = [...table.querySelectorAll<HTMLElement>('td .tag')];
+  expect(tags.map((t) => t.textContent!.trim())).toEqual(expect.arrayContaining(['top', 'suppressed by utm-xss']));
+  // Svelte drops the space before a tag at the start of a block, so the gap is the tag's margin
+  // (vite.config.ts lets this component's styles through to jsdom).
+  for (const t of tags) expect(getComputedStyle(t).marginLeft, t.textContent!).not.toMatch(/^(0(px)?)?$/);
+});
+
 test('shadow contributions are shown, marked as not scored, with 0 points, after the scored ones', async () => {
-  const d = find((x) => x.judgment.contributions.some((c) => c.shadow));
+  const d = find((x) => x.judgment.contributions.some((c) => c.shadow && !c.exception));
   await show(d);
   const region = screen.getByRole('region', { name: 'Contributions' });
   const rows = within(within(region).getByRole('table')).getAllByRole('row').slice(1, -1);
   const shadow = rows.filter((r) => r.textContent!.includes('Shadow · not scored'));
-  expect(shadow.length).toBe(d.judgment.contributions.filter((c) => c.shadow).length);
+  expect(shadow.length).toBe(d.judgment.contributions.filter((c) => c.shadow && !c.exception).length);
   for (const r of shadow) expect(r.lastElementChild!.textContent!.trim()).toBe('0.0');
   expect(rows.indexOf(shadow[0])).toBe(rows.length - shadow.length);
   expect(region.textContent).toContain('(shadow rows excluded)');
@@ -193,4 +209,193 @@ test('the tabs follow the arrow, Home and End keys', async () => {
   expect(document.activeElement).toBe(ocsf);
   await fireEvent.keyDown(ocsf, { key: 'Home' });
   expect(document.activeElement).toBe(evidence);
+});
+
+// --- exceptions (sub-project C) ---
+
+const logOnly = (x: RequestDetail) => x.judgment.exceptions.includes('utm-xss');
+const section = () => screen.queryByRole('region', { name: 'Exceptions' });
+
+test('a touched request lists its exceptions as links to the Exceptions screen', async () => {
+  const d = find(logOnly);
+  await show(d);
+  const sec = section()!;
+  expect(sec).toBeTruthy();
+  expect(within(sec).getByRole('heading', { name: 'Exceptions' })).toBeTruthy();
+  expect(within(sec).getByRole('link', { name: 'utm-xss' }).getAttribute('href')).toBe('/exceptions?id=utm-xss');
+});
+
+test('an untouched request has no Exceptions section', async () => {
+  const d = find((x) => !x.row.excepted);
+  await show(d);
+  expect(section()).toBeNull();
+});
+
+test('a log-only contribution is greyed with "suppressed by <id>" and stays out of the total', async () => {
+  const d = find(logOnly);
+  await show(d);
+  const region = screen.getByRole('region', { name: 'Contributions' });
+  const rows = within(within(region).getByRole('table')).getAllByRole('row').slice(1, -1);
+  const sup = rows.filter((r) => r.textContent!.includes('suppressed by utm-xss'));
+  expect(sup).toHaveLength(d.judgment.contributions.filter((c) => c.exception === 'utm-xss').length);
+  for (const r of sup) {
+    expect(r.classList.contains('suppressed')).toBe(true);
+    expect(r.textContent).not.toContain('Shadow · not scored');
+    expect(r.lastElementChild!.textContent!.trim()).toBe('0.0');
+  }
+  expect(rows.indexOf(sup[0])).toBe(rows.length - sup.length);
+  const foot = within(within(region).getByRole('table')).getAllByRole('row').at(-1)!;
+  expect(foot.textContent).toContain(`= score ${d.judgment.score}`);
+});
+
+const skipDetail = (exceptions: string[], skipped: RequestDetail['judgment']['skipped']): RequestDetail => {
+  const d = find((x) => !x.row.excepted);
+  return { ...d, row: { ...d.row, excepted: true }, judgment: { ...d.judgment, exceptions, skipped } };
+};
+const skipEntry = (id: string, loc: 'header' | 'query', name: string, action: 'skip-inspection' | 'log-only' = 'skip-inspection') => ({
+  id, action, constructs: action === 'skip-inspection' ? [] : ['xss.*'], scope: { methods: [], path_prefix: '/', field: { loc, name } },
+  owner: 'o', reason: 'r', created: '2026-10-01', modified: '2026-10-01', expires: '2027-10-01',
+});
+
+test('a skipped field is listed with a warning and "Not inspected (skip-inspection <id>)"', async () => {
+  const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  await show(skipped);
+  const sec = section()!;
+  expect(within(sec).getByRole('link', { name: 'hook-signature' }).getAttribute('href')).toBe('/exceptions?id=hook-signature');
+  const li = (await within(sec).findByText('Not inspected (skip-inspection hook-signature)')).closest('li')!;
+  expect(li.textContent).toContain('header:X-Signature');
+  expect(li.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+});
+
+test('each skipped field names only the skip-inspection exception that matches it, not a log-only one', async () => {
+  const skipped = skipDetail(['utm-xss', 'sig-a', 'sig-b'], [{ loc: 'Header', name: 'X-Sig-A' }, { loc: 'Query', name: 'token' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockResolvedValueOnce([
+    skipEntry('utm-xss', 'query', 'token', 'log-only'), skipEntry('sig-a', 'header', 'x-sig-a'), skipEntry('sig-b', 'query', 'token'),
+  ]);
+  await show(skipped);
+  const sec = section()!;
+  const items = () => within(sec).getAllByText(/^Not inspected/).map((e) => [e.closest('li')!.querySelector('.mono')!.textContent, e.textContent]);
+  await vi.waitFor(() => expect(items()).toEqual([
+    ['header:X-Sig-A', 'Not inspected (skip-inspection sig-a)'],
+    ['query:token', 'Not inspected (skip-inspection sig-b)'],
+  ]));
+});
+
+test('a field listed twice in skipped renders twice instead of failing', async () => {
+  const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }, { loc: 'Header', name: 'X-Signature' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockResolvedValueOnce([skipEntry('hook-signature', 'header', 'x-signature')]);
+  await show(skipped);
+  await vi.waitFor(() => expect(within(section()!).getAllByText('Not inspected (skip-inspection hook-signature)')).toHaveLength(2));
+});
+
+test('a skipped field names no id while the exceptions file is unavailable or has no match', async () => {
+  const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockRejectedValueOnce(new Error('down'));
+  await show(skipped);
+  expect(await within(section()!).findByText('Not inspected (skip-inspection exception)')).toBeTruthy();
+  document.body.innerHTML = '';
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockResolvedValueOnce([skipEntry('hook-signature', 'header', 'x-other')]);
+  await show(skipped);
+  expect(await within(section()!).findByText('Not inspected (skip-inspection exception)')).toBeTruthy();
+});
+
+test('the pre-fill follows the deciding construct, the path and the request', async () => {
+  const d = find(logOnly);
+  const now = Date.UTC(2026, 9, 30, 12);
+  const e = prefillException(d, now);
+  expect(d.judgment.decided_by.construct).toBe('xss.event-handler');
+  expect(e).toEqual({
+    id: 'xss-search', action: 'log-only', constructs: ['xss.event-handler'],
+    scope: { methods: ['GET'], path_prefix: '/api/search', field: { loc: 'query', name: d.judgment.decided_by.field!.name } },
+    owner: '', reason: '', created: '2026-10-30', modified: '2026-10-30', expires: '2026-11-29',
+  });
+  const none = prefillException({ ...d, judgment: { ...d.judgment, decided_by: { ...d.judgment.decided_by, construct: null, field: null } } }, now);
+  expect(none.id).toBe('exception');
+  expect(none.constructs).toEqual([]);
+  expect(none.scope.field).toBeNull();
+});
+
+test('a request decided by a request-level construct pre-fills no field, so the exception can apply', () => {
+  const now = Date.UTC(2026, 9, 30, 12);
+  const hp = find((x) => x.judgment.decided_by.construct === 'honeypot.decoy-hit');
+  const recon = { ...hp, judgment: { ...hp.judgment, decided_by: { ...hp.judgment.decided_by, construct: 'recon.sensitive-path-probe', field: { loc: 'Path' as const, name: '<path>' } } } };
+  for (const d of [hp, recon]) {
+    const e = prefillException(d, now);
+    expect(e.constructs).toEqual([d.judgment.decided_by.construct]);
+    expect(e.scope.field).toBeNull();
+    expect(validateEntry({ ...e, owner: 'o', reason: 'r' }, now)).toEqual([]);
+  }
+  expect(slotOf({ code: 'field-unreachable', msg: '' })).toBe('field');
+});
+
+const open = async (d: RequestDetail) => {
+  await show(d);
+  await fireEvent.click(screen.getByRole('button', { name: 'Create exception' }));
+  return screen.getByRole('region', { name: 'Create exception' });
+};
+const input = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
+
+test('Create exception opens an inline panel with every input labelled and pre-filled', async () => {
+  const d = find(logOnly);
+  const panel = await open(d);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(input('ID').value).toBe('xss-search');
+  expect(input('Constructs').value).toBe('xss.event-handler');
+  expect(input('Methods').value).toBe('GET');
+  expect(input('Path prefix').value).toBe('/api/search');
+  expect((screen.getByLabelText('Field location') as HTMLSelectElement).value).toBe('query');
+  expect(input('Field name').value).toBe(d.judgment.decided_by.field!.name);
+  expect(input('Owner').value).toBe('');
+  expect(input('Reason').value).toBe('');
+  expect(input('Expires').value).toBe(formatDate(app.now + 30 * 86_400_000));
+  const group = within(panel).getByRole('group', { name: 'Action' });
+  const radios = within(group).getAllByRole('radio') as HTMLInputElement[];
+  expect(radios.map((r) => r.value)).toEqual(['ignore', 'log-only', 'skip-inspection']);
+  expect(radios.map((r) => r.checked)).toEqual([false, true, false]);
+  for (const r of radios) expect(document.getElementById(r.getAttribute('aria-describedby')!)!.textContent!.length).toBeGreaterThan(10);
+});
+
+test('an empty owner shows its required message and hides the YAML', async () => {
+  const panel = await open(find(logOnly));
+  const owner = input('Owner');
+  const ids = owner.getAttribute('aria-describedby')!.split(' ');
+  expect(ids.map((i) => document.getElementById(i)?.textContent).join(' ')).toContain('owner is required');
+  expect(owner.getAttribute('aria-invalid')).toBe('true');
+  expect(screen.queryByRole('button', { name: 'Copy YAML' })).toBeNull();
+  expect(panel.querySelector('pre')).toBeNull();
+});
+
+test('a valid form shows the YAML of the entry, the restart note and a Copy YAML button', async () => {
+  const d = find(logOnly);
+  const panel = await open(d);
+  await fireEvent.input(input('Owner'), { target: { value: 'platform-team' } });
+  await fireEvent.input(input('Reason'), { target: { value: 'UTM tags carry markup from the campaign tool' } });
+  const want = { ...prefillException(d, app.now), owner: 'platform-team', reason: 'UTM tags carry markup from the campaign tool' };
+  expect(panel.querySelector('pre')!.textContent).toBe(toYaml(want));
+  expect(panel.textContent).toContain('Paste this under exceptions: in your exceptions file. It takes effect after a restart with --exceptions.');
+  const write = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+  await fireEvent.click(screen.getByRole('button', { name: 'Copy YAML' }));
+  expect(write).toHaveBeenCalledWith(toYaml(want));
+  // Breaking an input hides it again.
+  await fireEvent.input(input('Path prefix'), { target: { value: 'api' } });
+  expect(panel.querySelector('pre')).toBeNull();
+  expect(input('Path prefix').getAttribute('aria-invalid')).toBe('true');
+});
+
+test('skip-inspection clears the constructs and warns that nothing is inspected', async () => {
+  const panel = await open(find(logOnly));
+  expect(within(panel).queryByText('Matching fields will not be inspected at all.')).toBeNull();
+  await fireEvent.click(within(panel).getByRole('radio', { name: 'skip-inspection' }));
+  expect(within(panel).getByText('Matching fields will not be inspected at all.')).toBeTruthy();
+  expect(panel.querySelector<HTMLInputElement>('#ce-constructs')?.value ?? '').toBe('');
+  await fireEvent.input(input('Owner'), { target: { value: 'o' } });
+  await fireEvent.input(input('Reason'), { target: { value: 'r' } });
+  expect(panel.querySelector('pre')!.textContent).toContain('action: skip-inspection');
+  expect(panel.querySelector('pre')!.textContent).not.toContain('constructs:');
 });

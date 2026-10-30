@@ -8,12 +8,13 @@ mod eval;
 
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use vft_core::{Config, Request, Shield};
+use vft_core::exceptions::{format_date, parse_date, ExceptionsFile, DAY_MS};
+use vft_core::{Config, ExceptionClock, Exceptions, Request, Shield};
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum EvalMode {
@@ -75,6 +76,9 @@ enum Command {
         /// Only log, don't actually block (observation mode) when set.
         #[arg(long)]
         monitor_only: bool,
+        /// Scoped exceptions file (see `exceptions check`); expiry is checked per request.
+        #[arg(long)]
+        exceptions: Option<PathBuf>,
     },
     /// Evaluate on a raw labeled corpus (*.white benign, *.black malicious).
     Eval {
@@ -115,6 +119,12 @@ enum Command {
         /// file in eval/parse_corpus.py's schema (plus `rel`), for eval/baselines.py.
         #[arg(long)]
         dump_requests: Option<PathBuf>,
+        /// Scoped exceptions file applied to every shield of the run.
+        #[arg(long)]
+        exceptions: Option<PathBuf>,
+        /// The date (YYYY-MM-DD) the exceptions file is validated and judged at; default today (UTC).
+        #[arg(long, requires = "exceptions")]
+        as_of: Option<String>,
     },
     /// Leave-one-out ablation in library mode; writes a TSV.
     Ablate {
@@ -134,6 +144,23 @@ enum Command {
     Config {
         #[command(subcommand)]
         action: ConfigCmd,
+    },
+    /// Scoped-exception file tools.
+    Exceptions {
+        #[command(subcommand)]
+        action: ExceptionsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExceptionsCmd {
+    /// Parse an exceptions file, list each entry as live or expired and print every issue;
+    /// exit 1 if there is any.
+    Check {
+        file: PathBuf,
+        /// The date (YYYY-MM-DD) to check at; default today (UTC).
+        #[arg(long)]
+        as_of: Option<String>,
     },
 }
 
@@ -162,6 +189,68 @@ fn check_ocsf_path(audit: Option<&str>, ocsf: Option<&str>) -> anyhow::Result<()
 
 fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Config> {
     Config::load_or_default(path.map(|p| p.as_path())).context("loading config")
+}
+
+/// The current time in ms since the epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Midnight UTC of today, in ms.
+fn today_ms() -> u64 {
+    let ms = now_ms();
+    ms - ms % DAY_MS
+}
+
+/// `--as-of`, or today; a malformed date is an error.
+fn as_of_ms(as_of: Option<&str>) -> anyhow::Result<u64> {
+    match as_of {
+        None => Ok(today_ms()),
+        Some(s) => parse_date(s).ok_or_else(|| anyhow::anyhow!("--as-of {s:?} is not a YYYY-MM-DD date")),
+    }
+}
+
+/// Load an exceptions file at `as_of_ms`; every issue is printed to stderr and ends the process with `code`.
+fn load_exceptions(path: &Path, as_of_ms: u64, code: i32) -> Exceptions {
+    match Exceptions::load(path, as_of_ms) {
+        Ok(ex) => ex,
+        Err(issues) => {
+            for i in &issues {
+                eprintln!("{}: {i}", path.display());
+            }
+            std::process::exit(code);
+        }
+    }
+}
+
+/// The body of `exceptions check`: one line per entry
+/// (id, action, `live` or `expired`, expanded constructs or `-`), then every issue.
+/// Returns whether the file is clean (no issues); the caller exits 1 if not.
+fn exceptions_check(path: &Path, as_of_ms: u64, out: &mut impl Write) -> anyhow::Result<bool> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let file = match ExceptionsFile::parse(&text) {
+        Ok(f) => f,
+        Err(issues) => {
+            for i in &issues {
+                writeln!(out, "{i}")?;
+            }
+            return Ok(false);
+        }
+    };
+    for e in &file.exceptions {
+        let action = serde_json::to_value(e.action)?;
+        let state = if parse_date(&e.expires).is_some_and(|x| x <= as_of_ms) { "expired" } else { "live" };
+        let constructs = match vft_core::exceptions::expand_constructs(&e.constructs) {
+            Ok(ids) if !ids.is_empty() => ids.join(","),
+            _ => "-".to_string(),
+        };
+        writeln!(out, "{}\t{}\t{state}\t{constructs}", e.id, action.as_str().unwrap_or("?"))?;
+    }
+    let issues = vft_core::exceptions::validate_file(&file, as_of_ms);
+    for i in &issues {
+        writeln!(out, "{i}")?;
+    }
+    Ok(issues.is_empty())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -210,10 +299,18 @@ fn main() -> anyhow::Result<()> {
             audit_max_mb,
             ocsf,
             monitor_only,
+            exceptions,
         } => {
             check_ocsf_path(audit.as_deref(), ocsf.as_deref())?;
             let cfg = load_config(cli.config.as_ref())?;
-            let shield = Shield::new(cfg);
+            let mut shield = Shield::new(cfg);
+            if let Some(path) = &exceptions {
+                let ex = load_exceptions(path, now_ms(), 1);
+                for w in ex.warnings() {
+                    eprintln!("{w}");
+                }
+                shield = shield.with_exceptions(ex, ExceptionClock::PerRequest);
+            }
             let max_bytes = audit_max_mb.saturating_mul(1024 * 1024);
             let sink = vft_proxy::audit::AuditSink::new(audit.map(std::path::PathBuf::from), max_bytes);
             let ocsf_sink = match ocsf {
@@ -236,7 +333,7 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
             rt.block_on(vft_proxy::serve(state, bind))?;
         }
-        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable, shadow, promotion, dump_requests } => {
+        Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable, shadow, promotion, dump_requests, exceptions, as_of } => {
             let mut cfg = load_config(cli.config.as_ref())?;
             cfg.shield.disabled.extend(disable);
             cfg.shield.shadow.extend(shadow);
@@ -244,6 +341,15 @@ fn main() -> anyhow::Result<()> {
             if promotion && cfg.shield.shadow.is_empty() {
                 anyhow::bail!("--promotion needs construct ids in shield.shadow (config file or --shadow)");
             }
+            let ex = match &exceptions {
+                Some(path) => {
+                    let at = as_of_ms(as_of.as_deref())?;
+                    let ex = load_exceptions(path, at, 2);
+                    eprintln!("exceptions: {} as of {} ({} entries)", path.display(), format_date(at), ex.entries().len());
+                    ex
+                }
+                None => Exceptions::default(),
+            };
             let sources: eval::Sources = sources.parse().map_err(anyhow::Error::msg)?;
             let mut samples = eval::load_corpus(&corpus)?;
             if let (Some(m), Some(s)) = (manifest.as_ref(), side.as_deref()) {
@@ -253,14 +359,14 @@ fn main() -> anyhow::Result<()> {
                 if promotion || dump_requests.is_some() {
                     anyhow::bail!("--promotion and --dump-requests need --mode library or serve");
                 }
-                let r = eval::run_tcp(cfg, &samples, limit)?;
+                let r = eval::run_tcp(cfg, &ex, &samples, limit)?;
                 println!("{}", serde_json::to_string_pretty(&r)?);
                 if r.mismatched > 0 {
                     std::process::exit(3);
                 }
                 return Ok(());
             }
-            let report = eval::run(cfg, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref(), promotion, dump: dump_requests.as_deref() })?;
+            let report = eval::run(cfg, &ex, &samples, mode == EvalMode::Serve, sources, step_ms, eval::Outputs { csv: out.as_deref(), promotion, dump: dump_requests.as_deref() })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if let Some(rows) = &report.promotion {
                 eprintln!("construct\twould_tp\twould_fp\talready\tpromote");
@@ -300,6 +406,15 @@ fn main() -> anyhow::Result<()> {
                 writeln!(f, "{}\t{}\t{}\t{}\t{}\t{}\t{}", r.id, r.kind, r.tp, r.fp, r.d_tp, r.d_fp, r.d_tp - r.d_fp)?;
             }
         }
+        Command::Exceptions { action: ExceptionsCmd::Check { file, as_of } } => {
+            let at = as_of_ms(as_of.as_deref())?;
+            let mut out = std::io::stdout().lock();
+            let clean = exceptions_check(&file, at, &mut out)?;
+            out.flush()?;
+            if !clean {
+                std::process::exit(1);
+            }
+        }
         Command::Config { action: ConfigCmd::Validate { file, overrides } } => {
             let base = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let ov = match overrides.as_ref() {
@@ -327,7 +442,8 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_ocsf_path;
+    use super::{check_ocsf_path, exceptions_check};
+    use vft_core::exceptions::parse_date;
 
     #[test]
     fn ocsf_path_must_differ_from_audit_path() {
@@ -337,5 +453,52 @@ mod tests {
         assert!(check_ocsf_path(None, Some("o.jsonl")).is_ok());
         assert!(check_ocsf_path(Some("a.jsonl"), None).is_ok());
         assert!(check_ocsf_path(None, None).is_ok());
+    }
+
+    const VALID: &str = "  - id: referer-sql\n    action: ignore\n    constructs: [\"sqli.*\"]\n    scope:\n      path_prefix: /\n      field: { loc: header, name: referer }\n    owner: o\n    reason: r\n    created: 2026-10-30\n    modified: 2026-10-30\n    expires: 2026-11-30\n";
+    const EXPIRED: &str = "  - id: old-skip\n    action: skip-inspection\n    scope:\n      path_prefix: /\n      field: { loc: header, name: x-sig }\n    owner: o\n    reason: r\n    created: 2026-01-01\n    modified: 2026-01-01\n    expires: 2026-02-01\n";
+
+    fn tmp(name: &str, body: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("vft-cli-exc-{}-{name}.yaml", std::process::id()));
+        std::fs::write(&p, format!("version: 1\nexceptions:\n{body}")).unwrap();
+        p
+    }
+
+    fn run_check(name: &str, body: &str) -> (bool, String) {
+        let p = tmp(name, body);
+        let mut out = Vec::new();
+        let ok = exceptions_check(&p, parse_date("2026-10-30").unwrap(), &mut out).unwrap();
+        let _ = std::fs::remove_file(&p);
+        (ok, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn exceptions_check_lists_live_and_expired_and_fails_on_issues() {
+        let (ok, text) = run_check("mixed", &format!("{VALID}{EXPIRED}"));
+        assert!(!ok, "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("referer-sql\tignore\tlive\t"), "{text}");
+        assert!(lines[0].contains("sqli.union-select"), "wildcard is expanded: {text}");
+        assert_eq!(lines[1], "old-skip\tskip-inspection\texpired\t-", "{text}");
+        assert!(lines[2..].iter().any(|l| l.starts_with("old-skip: expired on 2026-02-01")), "{text}");
+    }
+
+    #[test]
+    fn exceptions_check_passes_a_valid_file() {
+        let (ok, text) = run_check("valid", VALID);
+        assert!(ok, "{text}");
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("\tlive\t"), "{text}");
+    }
+
+    #[test]
+    fn exceptions_check_reports_unparseable_files_and_errors_on_missing_ones() {
+        let p = std::env::temp_dir().join(format!("vft-cli-exc-{}-bad.yaml", std::process::id()));
+        std::fs::write(&p, "version: [").unwrap();
+        let mut out = Vec::new();
+        assert!(!exceptions_check(&p, 0, &mut out).unwrap());
+        assert!(!out.is_empty());
+        let _ = std::fs::remove_file(&p);
+        assert!(exceptions_check(&p, 0, &mut Vec::new()).is_err());
     }
 }

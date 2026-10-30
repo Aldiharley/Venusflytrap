@@ -5,7 +5,7 @@ import { addTerm, matches, parse, tokenAt } from './query';
 const row: HistoryRow = {
   id: 'R1', ts_ms: 0, verdict: 'Block', score: 94, src_key: '203.0.113.7', method: 'GET', host: 'shop.example',
   path: '/api/items', construct: 'sqli.union-select', technique: 'T1190', confidence: 17, group_id: null, stage: 'Exploitation', cause: 'Detection',
-  decided_option: 'scoring.block_at', config_rev: 12, latency_us: 200, upstream_status: null, sampled: false,
+  decided_option: 'scoring.block_at', config_rev: 12, latency_us: 200, upstream_status: null, sampled: false, excepted: false,
 };
 const hit = (q: string) => {
   const p = parse(q);

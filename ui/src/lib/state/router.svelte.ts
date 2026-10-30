@@ -1,12 +1,13 @@
 export type RouteName =
   | 'dashboard' | 'topology' | 'monitor' | 'chains' | 'honeypot' | 'settings' | 'keys'
-  | 'request' | 'source' | 'notfound';
+  | 'request' | 'source' | 'exceptions' | 'notfound';
 export interface Route { name: RouteName; param: string | null }
 
 const TABLE: [RegExp, RouteName][] = [
   [/^\/$/, 'dashboard'],
   [/^\/topology$/, 'topology'],
   [/^\/monitor$/, 'monitor'],
+  [/^\/exceptions$/, 'exceptions'],
   [/^\/chains$/, 'chains'],
   [/^\/honeypot$/, 'honeypot'],
   [/^\/settings$/, 'settings'],
@@ -34,6 +35,7 @@ export const NAV: { name: RouteName; href: string; label: string; adminOnly?: bo
   { name: 'dashboard', href: '/', label: 'Dashboard' },
   { name: 'topology', href: '/topology', label: 'Traffic topology' },
   { name: 'monitor', href: '/monitor', label: 'Monitor' },
+  { name: 'exceptions', href: '/exceptions', label: 'Exceptions' },
   { name: 'chains', href: '/chains', label: 'Attack chains' },
   { name: 'honeypot', href: '/honeypot', label: 'Honeypot & bans' },
   { name: 'settings', href: '/settings', label: 'Settings' },

@@ -358,6 +358,7 @@ mod tests {
             weight: 0.8,
             points: 0.0,
             shadow: false,
+            exception: None,
         }
     }
 
@@ -381,6 +382,7 @@ mod tests {
             weight: 0.7,
             points: 0.0,
             shadow: false,
+            exception: None,
         };
         assert_eq!(event_for(&judgment(Verdict::Allow, vec![recon.clone()])), Event::Benign);
         assert_eq!(event_for(&judgment(Verdict::Monitor, vec![recon.clone()])), Event::Recon);
@@ -556,6 +558,7 @@ mod tests {
             weight: 0.95,
             points: 0.0,
             shadow: true,
+            exception: None,
         };
         assert_eq!(event_for(&judgment(Verdict::Block, vec![sqli.clone()])), Event::Benign);
         let mut ua = scanner_ua();

@@ -178,7 +178,7 @@ impl Pipeline {
     pub fn decide(&self, parts: &Parts, body: &[u8], peer: Option<IpAddr>, now_ms: u64) -> Decision {
         let Some(peer) = peer else {
             let request = adapt::from_parts(parts, body, None);
-            let judgment = self.shield.inspect(&request);
+            let judgment = self.shield.inspect_at(&request, now_ms);
             return Decision { request, judgment, src: None };
         };
         let src = self.source(peer, &parts.headers);
@@ -186,7 +186,7 @@ impl Pipeline {
         if let Some(judgment) = self.banned(&src, now_ms) {
             return Decision { request, judgment, src: Some(src.key) };
         }
-        let judgment = self.shield.inspect(&request);
+        let judgment = self.shield.inspect_at(&request, now_ms);
         let outcome = self.chain.observe(src.key, event_for(&judgment), now_ms, src.may_ban);
         let judgment = self.shield.finalize(judgment, &outcome);
         Decision { request, judgment, src: Some(src.key) }
@@ -235,6 +235,38 @@ mod tests {
 
     fn pipeline() -> Pipeline {
         Pipeline::new(Arc::new(Shield::new(Config::default())))
+    }
+
+    #[test]
+    fn per_request_exceptions_follow_the_decision_time() {
+        use vft_core::exceptions::{parse_date, ExceptionClock, Exceptions};
+        let y = "version: 1
+exceptions:
+  - id: referer-sql
+    action: ignore
+    constructs: [\"sqli.*\"]
+    scope:
+      path_prefix: /
+      field: { loc: header, name: referer }
+    owner: o
+    reason: r
+    created: 2026-10-30
+    modified: 2026-10-30
+    expires: 2026-11-30
+";
+        let ex = Exceptions::from_yaml_str(y, parse_date("2026-10-30").unwrap()).unwrap();
+        let shield = Shield::new(Config::default()).with_exceptions(ex, ExceptionClock::PerRequest);
+        let p = Pipeline::new(Arc::new(shield));
+        let referer = [("referer", "https://x.test/?q=1' union select password from users--")];
+        let peer: IpAddr = "198.51.100.7".parse().unwrap();
+        let before = p.decide(&parts("/search", &referer), b"", Some(peer), parse_date("2026-11-29").unwrap());
+        assert_eq!(before.judgment.exceptions, vec!["referer-sql".to_string()]);
+        let after = p.decide(&parts("/search", &referer), b"", Some(IpAddr::from([198, 51, 100, 8])), parse_date("2026-11-30").unwrap());
+        assert!(after.judgment.exceptions.is_empty(), "{:?}", after.judgment.exceptions);
+        assert!(after.judgment.score > before.judgment.score);
+        // The no-peer path takes the same clock.
+        let nopeer = p.decide(&parts("/search", &referer), b"", None, parse_date("2026-11-29").unwrap());
+        assert_eq!(nopeer.judgment.exceptions, vec!["referer-sql".to_string()]);
     }
 
     #[test]

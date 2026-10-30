@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use vft_core::{event_for, Config, Event, Shield, SourceKey, Verdict};
+use vft_core::{event_for, Config, Event, ExceptionClock, Exceptions, Shield, SourceKey, Verdict};
 use vft_proxy::http::{self, HeaderName, HeaderValue, Method, Uri};
 use vft_proxy::{adapt, pipeline::Pipeline};
 
@@ -415,14 +415,14 @@ fn top_contribution(cs: &[vft_core::Contribution]) -> Option<&vft_core::Contribu
     best
 }
 
-pub fn run(cfg: Config, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, out: Outputs<'_>) -> anyhow::Result<Report> {
+pub fn run(cfg: Config, exceptions: &Exceptions, samples: &[Sample], serve: bool, sources: Sources, step_ms: u64, out: Outputs<'_>) -> anyhow::Result<Report> {
     let mut promo: BTreeMap<String, PromotionRow> = cfg
         .shield
         .shadow
         .iter()
         .map(|id| (id.clone(), PromotionRow { construct: id.clone(), ..Default::default() }))
         .collect();
-    let shield = Arc::new(Shield::new(cfg));
+    let shield = Arc::new(Shield::new(cfg).with_exceptions(exceptions.clone(), ExceptionClock::Fixed));
     let pipeline = Pipeline::new(shield.clone());
     let mut csv_out = match out.csv {
         Some(p) => {
@@ -812,7 +812,7 @@ async fn send_and_read(addr: std::net::SocketAddr, raw: &[u8], limit: std::time:
     }
 }
 
-pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<TcpReport> {
+pub fn run_tcp(cfg: Config, exceptions: &Exceptions, samples: &[Sample], limit: usize) -> anyhow::Result<TcpReport> {
     let mut cfg = cfg;
     cfg.proxy.trusted_proxies = vec!["127.0.0.1".into()];
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -825,7 +825,7 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
             }
         });
         let state = Arc::new(vft_proxy::ProxyState::new(
-            Shield::new(cfg.clone()),
+            Shield::new(cfg.clone()).with_exceptions(exceptions.clone(), ExceptionClock::Fixed),
             format!("http://{up_addr}"),
             vft_proxy::audit::AuditSink::off(),
             vft_proxy::audit::AuditSink::off(),
@@ -834,7 +834,7 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let proxy_addr = l.local_addr()?;
         tokio::spawn(vft_proxy::serve_listener(state, l));
-        let local = Pipeline::new(Arc::new(Shield::new(cfg)));
+        let local = Pipeline::new(Arc::new(Shield::new(cfg).with_exceptions(exceptions.clone(), ExceptionClock::Fixed)));
         let loopback: IpAddr = "127.0.0.1".parse()?;
 
         let mut r = TcpReport::default();
@@ -883,7 +883,7 @@ pub struct AblationRow {
 pub fn ablate(cfg: &Config, samples: &[Sample], ids: &[&'static str]) -> anyhow::Result<Vec<AblationRow>> {
     let lib = |c: Config| -> anyhow::Result<Metrics> {
         let sources: Sources = "distinct".parse().map_err(anyhow::Error::msg)?;
-        Ok(run(c, samples, false, sources, 100, Outputs::default())?.library)
+        Ok(run(c, &Exceptions::default(), samples, false, sources, 100, Outputs::default())?.library)
     };
     let base = lib(cfg.clone())?;
     let mut rows = Vec::new();
@@ -989,7 +989,7 @@ Host: x
 
 "),
         ];
-        let r = run_tcp(Config::default(), &samples, 10).unwrap();
+        let r = run_tcp(Config::default(), &Exceptions::default(), &samples, 10).unwrap();
         assert_eq!((r.matched_allow, r.matched_block, r.mismatched, r.proxy_rejected), (1, 1, 0, 0), "{r:?}");
     }
 
@@ -1161,6 +1161,7 @@ Host: x
             weight: 1.0,
             points,
             shadow: false,
+            exception: None,
         };
         assert!(top_contribution(&[]).is_none());
         assert!(top_contribution(&[mk("test.zero", "a", 0.0)]).is_none(), "a contribution with no points is never top");
@@ -1175,7 +1176,7 @@ Host: x
         let attack = Sample { rel: "a.black".into(), label: 1, raw: b"GET /?q=1%20union%20select%20a,b HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
         let benign = Sample { rel: "b.white".into(), label: 0, raw: b"GET /?q=hello HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
         let p = std::env::temp_dir().join(format!("vft-eval-csv-{}.csv", std::process::id()));
-        run(Config::default(), &[attack, benign], false, Sources::Distinct, 100, Outputs { csv: Some(&p), ..Default::default() }).unwrap();
+        run(Config::default(), &Exceptions::default(), &[attack, benign], false, Sources::Distinct, 100, Outputs { csv: Some(&p), ..Default::default() }).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let _ = std::fs::remove_file(&p);
         let mut lines = text.lines();
@@ -1194,6 +1195,37 @@ Host: x
     }
 
     #[test]
+    fn exceptions_apply_to_every_shield_of_a_run() {
+        use vft_core::exceptions::parse_date;
+        let y = "version: 1
+exceptions:
+  - id: referer-sql
+    action: ignore
+    constructs: [\"sqli.*\"]
+    scope:
+      path_prefix: /
+      field: { loc: header, name: referer }
+    owner: o
+    reason: r
+    created: 2026-10-30
+    modified: 2026-10-30
+    expires: 2026-11-30
+";
+        let ex = Exceptions::from_yaml_str(y, parse_date("2026-10-30").unwrap()).unwrap();
+        let raw = b"GET /search HTTP/1.1
+Host: x
+Referer: https://x.test/?q=1' union select password from users--
+
+".to_vec();
+        let s = Sample { rel: "r.white".into(), label: 0, raw, unreadable: None };
+        let without = run(Config::default(), &Exceptions::default(), std::slice::from_ref(&s), true, Sources::Distinct, 100, Outputs::default()).unwrap();
+        let with = run(Config::default(), &ex, std::slice::from_ref(&s), true, Sources::Distinct, 100, Outputs::default()).unwrap();
+        assert!(without.library.fp + without.serve.as_ref().unwrap().metrics.fp > 0, "baseline must flag the referer: {without:?}");
+        assert_eq!((with.library.fp, with.library.tn), (0, 1), "{with:?}");
+        assert_eq!(with.serve.as_ref().unwrap().metrics.fp, 0, "{with:?}");
+    }
+
+    #[test]
     fn promotion_counts_shadow_hits_by_class_and_the_csv_lists_them() {
         let mk = |rel: &str, label, raw: &str| Sample { rel: rel.into(), label, raw: raw.as_bytes().to_vec(), unreadable: None };
         let samples = vec![
@@ -1205,7 +1237,7 @@ Host: x
         let mut cfg = Config::default();
         cfg.shield.shadow = vec!["intel.scanner-ua".into()];
         let p = std::env::temp_dir().join(format!("vft-eval-promo-{}.csv", std::process::id()));
-        let r = run(cfg, &samples, false, Sources::Distinct, 100, Outputs { csv: Some(&p), promotion: true, dump: None }).unwrap();
+        let r = run(cfg, &Exceptions::default(), &samples, false, Sources::Distinct, 100, Outputs { csv: Some(&p), promotion: true, dump: None }).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let _ = std::fs::remove_file(&p);
         assert_eq!(
@@ -1225,7 +1257,7 @@ Host: x
     #[test]
     fn reports_without_promotion_omit_the_field() {
         let s = Sample { rel: "a.white".into(), label: 0, raw: b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(), unreadable: None };
-        let r = run(Config::default(), &[s], false, Sources::Distinct, 100, Outputs::default()).unwrap();
+        let r = run(Config::default(), &Exceptions::default(), &[s], false, Sources::Distinct, 100, Outputs::default()).unwrap();
         assert!(r.promotion.is_none());
         assert!(!serde_json::to_string(&r).unwrap().contains("\"promotion\""));
     }
@@ -1291,7 +1323,7 @@ Host: x
                 unreadable: None,
             })
             .collect();
-        let r = run_tcp(Config::default(), &samples, 100).unwrap();
+        let r = run_tcp(Config::default(), &Exceptions::default(), &samples, 100).unwrap();
         assert_eq!((r.mismatch_upstream_5xx, r.mismatch_io, r.mismatched), (0, 0, 0), "{r:?}");
         assert_eq!(r.matched_allow, 60, "{r:?}");
     }
@@ -1313,7 +1345,7 @@ Host: x
             Sample { rel: "d/c.black".into(), label: 1, raw: Vec::new(), unreadable: Some("denied".into()) },
         ];
         let p = std::env::temp_dir().join(format!("vft-eval-dump-{}.jsonl", std::process::id()));
-        let r = run(Config::default(), &samples, false, Sources::Distinct, 100, Outputs { dump: Some(&p), ..Default::default() }).unwrap();
+        let r = run(Config::default(), &Exceptions::default(), &samples, false, Sources::Distinct, 100, Outputs { dump: Some(&p), ..Default::default() }).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let _ = std::fs::remove_file(&p);
         assert_eq!((r.parse_failures, r.read_failures), (1, 1));

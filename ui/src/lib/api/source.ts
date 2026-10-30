@@ -4,7 +4,7 @@ import { BASE_RPS, makeFixtures, type Fixtures } from './fixtures';
 import { makeHistory, type History } from './history';
 import { mulberry32 } from './rng';
 import type {
-  BanEntry, Counters, Dashboard, HistoryPage, HistoryQuery, LiveFrame, RequestDetail, Session, SourceView, StatusRecord,
+  BanEntry, Counters, Dashboard, ExceptionEntry, HistoryPage, HistoryQuery, LiveFrame, RequestDetail, Session, SourceView, StatusRecord,
 } from './types';
 
 /** Every call carries the caller's AbortSignal; aborting rejects it with a SourceError of kind 'aborted'. */
@@ -22,6 +22,8 @@ export interface DataSource {
   board(call: Call): Promise<SourceView[]>;
   bans(call: Call): Promise<BanEntry[]>;
   decoys(call: Call): Promise<string[]>;
+  /** The exceptions file's entries, expired ones included (the file does not drop them). */
+  exceptions(call: Call): Promise<ExceptionEntry[]>;
   /** A history query; a syntax error rejects as `bad_request` with the token's `pos`/`len`. */
   history(q: HistoryQuery, call: Call): Promise<HistoryPage>;
   /** One stored request with its full judgment; an unknown or expired id rejects as `not_found`. */
@@ -88,6 +90,7 @@ export class FixtureSource implements DataSource {
   board(call: Call) { return this.reply('board', call, () => this.board_); }
   bans(call: Call) { return this.reply('bans', call, () => this.f.bans); }
   decoys(call: Call) { return this.reply('decoys', call, () => this.f.decoys); }
+  exceptions(call: Call) { return this.reply('exceptions', call, () => this.f.exceptions); }
   request(id: string, call: Call) {
     return this.reply('request', call, () => {
       const d = this.h.detail(id);

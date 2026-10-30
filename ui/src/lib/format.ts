@@ -38,3 +38,16 @@ export function banText(ban: { until_ms: number | null }, now: number): string {
   if (min < 60) return `Banned · ${min} min left`;
   return `Banned · ${Math.floor(min / 60)} h ${min % 60} min left`;
 }
+
+const DAY_MS = 86_400_000;
+
+/**
+ * An exception's expiry as whole days from `now`: "in 12 days" while live (a started day counts, so it
+ * never reads "in 0 days"), "expired 3 days ago" after. The engine stops selecting at now >= expires.
+ */
+export function fmtExpiry(expiresMs: number, now: number): string {
+  const plural = (n: number) => `${n} ${n === 1 ? 'day' : 'days'}`;
+  if (expiresMs > now) return `in ${plural(Math.ceil((expiresMs - now) / DAY_MS))}`;
+  const ago = Math.floor((now - expiresMs) / DAY_MS);
+  return ago === 0 ? 'expired today' : `expired ${plural(ago)} ago`;
+}

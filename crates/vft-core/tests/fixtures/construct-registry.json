@@ -1,0 +1,237 @@
+[
+  {
+    "family": "Sqli",
+    "id": "sqli.union-select",
+    "kind": "Sink"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.boolean-tautology",
+    "kind": "Sink"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.quote-breakout",
+    "kind": "Sink"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.stacked-query",
+    "kind": "Sink"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.sql-keyword",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.fn-sleep",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.fn-benchmark",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.fn-updatexml",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.fn-extractvalue",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.fn-load-file",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sqli.fn-pg-sleep",
+    "kind": "Latent"
+  },
+  {
+    "family": "Xss",
+    "id": "xss.script-tag",
+    "kind": "Sink"
+  },
+  {
+    "family": "Xss",
+    "id": "xss.event-handler",
+    "kind": "Sink"
+  },
+  {
+    "family": "Xss",
+    "id": "xss.dangerous-proto",
+    "kind": "Sink"
+  },
+  {
+    "family": "Xss",
+    "id": "xss.tag-with-handler",
+    "kind": "Sink"
+  },
+  {
+    "family": "Xss",
+    "id": "xss.html-tag",
+    "kind": "Latent"
+  },
+  {
+    "family": "CommandInjection",
+    "id": "cmd.cmd-substitution",
+    "kind": "Sink"
+  },
+  {
+    "family": "CommandInjection",
+    "id": "cmd.chained-command",
+    "kind": "Sink"
+  },
+  {
+    "family": "CommandInjection",
+    "id": "cmd.shell-meta",
+    "kind": "Latent"
+  },
+  {
+    "family": "PathTraversal",
+    "id": "path.directory-traversal",
+    "kind": "Sink"
+  },
+  {
+    "family": "PathTraversal",
+    "id": "path.dotdot-segment",
+    "kind": "Latent"
+  },
+  {
+    "family": "Sqli",
+    "id": "sig.union-all-select",
+    "kind": "Signature"
+  },
+  {
+    "family": "Sqli",
+    "id": "sig.classic-or",
+    "kind": "Signature"
+  },
+  {
+    "family": "Sqli",
+    "id": "sig.schema-enum",
+    "kind": "Signature"
+  },
+  {
+    "family": "Xss",
+    "id": "sig.alert-script",
+    "kind": "Signature"
+  },
+  {
+    "family": "Xss",
+    "id": "sig.onerror",
+    "kind": "Signature"
+  },
+  {
+    "family": "PathTraversal",
+    "id": "sig.etc-passwd",
+    "kind": "Signature"
+  },
+  {
+    "family": "CommandInjection",
+    "id": "sig.cat-subst",
+    "kind": "Signature"
+  },
+  {
+    "family": "Sqli",
+    "id": "api.type-violation",
+    "kind": "Signature"
+  },
+  {
+    "family": "Anomaly",
+    "id": "api.oversized-header",
+    "kind": "Signature"
+  },
+  {
+    "family": "Anomaly",
+    "id": "ai.anomaly-score",
+    "kind": "Signature"
+  },
+  {
+    "family": "Recon",
+    "id": "recon.sensitive-path-probe",
+    "kind": "Signature"
+  },
+  {
+    "family": "Honeypot",
+    "id": "honeypot.decoy-hit",
+    "kind": "Signature"
+  },
+  {
+    "family": "Intel",
+    "id": "intel.scanner-ua",
+    "kind": "Signature"
+  },
+  {
+    "family": "Intel",
+    "id": "intel.deny-listed",
+    "kind": "Signature"
+  },
+  {
+    "family": "Limit",
+    "id": "limit.header-non-utf8",
+    "kind": "Limit"
+  },
+  {
+    "family": "Limit",
+    "id": "limit.body-non-utf8",
+    "kind": "Limit"
+  },
+  {
+    "family": "Limit",
+    "id": "limit.body-unparsed",
+    "kind": "Limit"
+  },
+  {
+    "family": "Limit",
+    "id": "limit.graph-truncated",
+    "kind": "Limit"
+  },
+  {
+    "family": "Limit",
+    "id": "limit.payload-truncated",
+    "kind": "Limit"
+  },
+  {
+    "family": null,
+    "id": "decode.percent-lossy",
+    "kind": "Decoder"
+  },
+  {
+    "family": null,
+    "id": "decode.entity",
+    "kind": "Decoder"
+  },
+  {
+    "family": null,
+    "id": "decode.esc-hex",
+    "kind": "Decoder"
+  },
+  {
+    "family": null,
+    "id": "decode.b64-whole",
+    "kind": "Decoder"
+  },
+  {
+    "family": null,
+    "id": "decode.keep-comments",
+    "kind": "Decoder"
+  },
+  {
+    "family": null,
+    "id": "parse.body-json",
+    "kind": "Decoder"
+  },
+  {
+    "family": null,
+    "id": "gate.cmd-position",
+    "kind": "Gate"
+  }
+]

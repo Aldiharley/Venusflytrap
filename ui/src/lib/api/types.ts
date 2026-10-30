@@ -7,8 +7,14 @@ export type { Cause } from '../../gen/Cause';
 export type { CauseKind } from '../../gen/CauseKind';
 export type { ChainOutcome } from '../../gen/ChainOutcome';
 export type { Contribution } from '../../gen/Contribution';
+export type { ExceptionAction } from '../../gen/ExceptionAction';
+export type { ExceptionEntry } from '../../gen/ExceptionEntry';
+export type { ExceptionScope } from '../../gen/ExceptionScope';
+export type { ExceptionsFile } from '../../gen/ExceptionsFile';
 export type { Expertise } from '../../gen/Expertise';
 export type { Family } from '../../gen/Family';
+export type { FieldLoc } from '../../gen/FieldLoc';
+export type { FieldMatch } from '../../gen/FieldMatch';
 export type { FieldRef } from '../../gen/FieldRef';
 export type { FourValued } from '../../gen/FourValued';
 export type { Judgment } from '../../gen/Judgment';
@@ -116,6 +122,8 @@ export interface HistoryRow {
   upstream_status: number | null;
   /** A 1 % sample of Allows; every non-Allow is stored. */
   sampled: boolean;
+  /** `judgment.exceptions` or `judgment.skipped` is non-empty: an exception removed or skipped something. */
+  excepted: boolean;
 }
 
 /** The group-by chips of UX §5. */

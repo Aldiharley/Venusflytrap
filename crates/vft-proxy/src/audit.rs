@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde::Serialize;
-use vft_core::{Judgment, Request};
+use vft_core::{FieldRef, Judgment, Request};
 
 #[derive(Serialize)]
 struct ContribLine<'a> {
@@ -34,6 +34,8 @@ struct AuditLine<'a> {
     event_id: &'a str,
     group_id: Option<&'a str>,
     confidence: Option<u8>,
+    exceptions: &'a [String],
+    skipped: Vec<String>,
     attack: Vec<AttackLine<'a>>,
     ts_ms: u64,
     request_id: u64,
@@ -225,6 +227,8 @@ fn jsonl_line(req: &Request, j: &Judgment, m: &EventMeta) -> Option<String> {
         event_id: m.event_id,
         group_id: m.group_id,
         confidence: j.confidence,
+        exceptions: &j.exceptions,
+        skipped: j.skipped.iter().map(FieldRef::label).collect(),
         attack: j
             .attack
             .iter()
@@ -320,6 +324,21 @@ mod tests {
         assert!(v["attack"].is_array(), "{v}");
         assert!(v.get("group_id").is_some() && v["group_id"].is_null(), "{v}");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn lines_carry_exceptions_and_skipped_fields() {
+        let req = Request::get("/x");
+        let mut j = Judgment::allow();
+        j.exceptions = vec!["referer-sql".into()];
+        j.skipped = vec![vft_core::FieldRef::header("X-Sig")];
+        let line = jsonl_line(&req, &j, &EventMeta::new(1, 1, "e")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["exceptions"], serde_json::json!(["referer-sql"]), "{v}");
+        assert_eq!(v["skipped"], serde_json::json!(["header:x-sig"]), "{v}");
+        let plain: serde_json::Value = serde_json::from_str(&jsonl_line(&req, &Judgment::allow(), &EventMeta::new(1, 1, "e")).unwrap()).unwrap();
+        assert_eq!(plain["exceptions"], serde_json::json!([]), "{plain}");
+        assert_eq!(plain["skipped"], serde_json::json!([]), "{plain}");
     }
 
     #[test]

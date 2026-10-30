@@ -208,3 +208,16 @@ test('the Time link carries the full stamp as its title', async () => {
   const { grid } = await mount('/monitor');
   expect(cell(grid, 0, 0).querySelector('a')!.getAttribute('title')).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{2}:\d{2}:\d{2}$/);
 });
+
+test('the verdict cell marks rows an exception touched, and only those', async () => {
+  const { grid } = await mount('/monitor?q=path%3A%2Fapi%2Fsearch');
+  const rows = [...grid.querySelectorAll('tbody tr')];
+  const marked = grid.querySelectorAll('td.c-verdict [aria-label="Exception applied"]');
+  expect(marked.length).toBeGreaterThan(0);
+  expect(marked.length).toBeLessThan(rows.length);
+  expect(rows.filter((tr) => tr.querySelector('[aria-label="Exception applied"]'))).toHaveLength(marked.length);
+  for (const m of marked) {
+    expect(m.getAttribute('title')).toBe('An exception changed how this request was judged');
+    expect(m.previousElementSibling?.classList.contains('chip')).toBe(true); // after the verdict chip
+  }
+});

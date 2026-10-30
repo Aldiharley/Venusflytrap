@@ -3,6 +3,7 @@ import type { AttackTag } from "./AttackTag";
 import type { Cause } from "./Cause";
 import type { ChainOutcome } from "./ChainOutcome";
 import type { Contribution } from "./Contribution";
+import type { FieldRef } from "./FieldRef";
 import type { Verdict } from "./Verdict";
 
 /**
@@ -20,4 +21,12 @@ attack: Array<AttackTag>,
 /**
  * Measured precision on dev of the deciding construct, 1-100; never affects score or verdict.
  */
-confidence: number | null, };
+confidence: number | null, 
+/**
+ * Ids of the exceptions that removed a construct or skipped a field on this request (sorted, unique).
+ */
+exceptions: Array<string>, 
+/**
+ * Fields a skip-inspection exception kept from inspection.
+ */
+skipped: Array<FieldRef>, };

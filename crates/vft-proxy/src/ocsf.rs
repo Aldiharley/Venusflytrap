@@ -141,6 +141,10 @@ pub fn encode(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str, group_id:
         }
         http.insert("firewall_rule".into(), rule);
     }
+    if !j.exceptions.is_empty() || !j.skipped.is_empty() {
+        let skipped: Vec<String> = j.skipped.iter().map(|f| f.label()).collect();
+        http.insert("unmapped".into(), json!({ "vft": { "exceptions": j.exceptions, "skipped_fields": skipped } }));
+    }
     let mut out = vec![Value::Object(http)];
 
     if detected {
@@ -174,7 +178,7 @@ pub fn encode(req: &Request, j: &Judgment, ts_ms: u64, event_id: &str, group_id:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vft_core::{Config, Shield, SourceKey};
+    use vft_core::{Config, FieldRef, Shield, SourceKey};
 
     const HTTP: &str = include_str!("../tests/fixtures/ocsf-1.9.0-http_activity.json");
     const FINDING: &str = include_str!("../tests/fixtures/ocsf-1.9.0-detection_finding.json");
@@ -429,6 +433,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unmapped_block_only_when_a_list_is_non_empty() {
+        let req = Request::get("/x");
+        let plain = encode(&req, &Judgment::allow(), 1, EID, None, true);
+        assert!(plain[0].get("unmapped").is_none(), "{}", plain[0]);
+        let mut j = Judgment::allow();
+        j.skipped = vec![vft_core::FieldRef::header("X-Sig")];
+        let recs = encode(&req, &j, 1, EID, None, true);
+        assert_eq!(recs[0]["unmapped"], json!({ "vft": { "exceptions": [], "skipped_fields": ["header:x-sig"] } }), "{}", recs[0]);
+        // Detection Finding records never carry it.
+        j.verdict = Verdict::Block;
+        j.exceptions = vec!["referer-sql".into()];
+        let recs = encode(&req, &j, 1, EID, None, true);
+        assert!(recs[1].get("unmapped").is_none(), "{}", recs[1]);
+        // The committed 4002 schema allows `unmapped`.
+        let http: Value = serde_json::from_str(HTTP).unwrap();
+        assert_valid(&http, &recs[0], "4002");
+    }
+
     /// The Judgment a shared-sample case describes.
     fn sample_judgment(name: &str, i: &Value) -> Judgment {
         let s = |k: &str| i[k].as_str().map(str::to_string);
@@ -449,6 +472,23 @@ mod tests {
         j.decided_by.construct = construct;
         j.decided_by.msg = s("msg").unwrap();
         j.confidence = i["confidence"].as_u64().map(|c| c as u8);
+        j.exceptions = i["exceptions"].as_array().map_or_else(Vec::new, |a| a.iter().map(|e| e.as_str().unwrap().to_string()).collect());
+        j.skipped = i["skipped_fields"].as_array().map_or_else(Vec::new, |a| {
+            a.iter()
+                .map(|l| {
+                    let (loc, name) = l.as_str().unwrap().split_once(':').unwrap();
+                    let loc = match loc {
+                        "path" => vft_core::Location::Path,
+                        "query" => vft_core::Location::Query,
+                        "header" => vft_core::Location::Header,
+                        "cookie" => vft_core::Location::Cookie,
+                        "body" => vft_core::Location::Body,
+                        other => panic!("{name}: unknown location {other}"),
+                    };
+                    FieldRef { loc, name: name.to_string() }
+                })
+                .collect()
+        });
         j.attack = i["attack"]
             .as_array()
             .unwrap()

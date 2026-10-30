@@ -1,7 +1,8 @@
 import { mulberry32 } from './rng';
 import type {
-  BanCause, BanEntry, BanRecord, Counters, Dashboard, Family, Session, SourceView, Stage, StatusRecord,
+  BanCause, BanEntry, BanRecord, Counters, Dashboard, ExceptionEntry, Family, Session, SourceView, Stage, StatusRecord,
 } from './types';
+import { formatDate } from '../exceptions';
 import { STAGES } from './types';
 import { banEntry, banView } from './views';
 
@@ -65,6 +66,43 @@ const DECOY_HITS: [number, number | null, string | null][] = [
 
 export const BASE_RPS: Counters['rps_by_verdict'] = [412.3, 18.6, 4.1, 38.2];
 
+const DAY = 24 * HOUR;
+
+/**
+ * The exceptions file as the fixture source serves it, dated relative to the fixture clock: three live
+ * (one of each action) and one that lapsed three days ago. `hook-signature` is listed only: the fixture
+ * traffic has no POST under `/hooks`.
+ */
+export function makeExceptions(now: number): ExceptionEntry[] {
+  const day = (offset: number) => formatDate(now + offset * DAY);
+  return [
+    {
+      id: 'referer-sql', action: 'ignore', constructs: ['sqli.*'],
+      scope: { methods: ['GET'], path_prefix: '/api/search', field: { loc: 'header', name: 'referer' } },
+      owner: 'dennis', reason: 'Search results link back with SQL-looking text in the Referer',
+      created: day(-9), modified: day(-2), expires: day(21),
+    },
+    {
+      id: 'utm-xss', action: 'log-only', constructs: ['xss.*'],
+      scope: { methods: [], path_prefix: '/', field: { loc: 'query', name: 'utm_*' } },
+      owner: 'marketing', reason: 'Campaign tags carry markup: watch them for a month before deciding',
+      created: day(-5), modified: day(-5), expires: day(25),
+    },
+    {
+      id: 'hook-signature', action: 'skip-inspection', constructs: [],
+      scope: { methods: ['POST'], path_prefix: '/hooks', field: { loc: 'header', name: 'x-signature' } },
+      owner: 'dennis', reason: 'Webhook signatures are base64 blobs the partner verifies itself',
+      created: day(-30), modified: day(-30), expires: day(60),
+    },
+    {
+      id: 'legacy-search', action: 'ignore', constructs: ['sqli.sql-keyword'],
+      scope: { methods: ['GET'], path_prefix: '/legacy/search', field: { loc: 'query', name: 'q' } },
+      owner: 'dennis', reason: 'The old search form sends raw SQL fragments until it is retired',
+      created: day(-120), modified: day(-100), expires: day(-3),
+    },
+  ];
+}
+
 export interface Fixtures {
   /** The engine's ban records, keyed by source. */
   banRecords: Map<string, BanRecord>;
@@ -74,6 +112,7 @@ export interface Fixtures {
   board: SourceView[];
   bans: BanEntry[];
   decoys: string[];
+  exceptions: ExceptionEntry[];
   dashboard(from: number, to: number): Dashboard;
 }
 
@@ -152,6 +191,7 @@ export function makeFixtures(now: number): Fixtures {
     board,
     bans,
     decoys: DECOYS,
+    exceptions: makeExceptions(now),
     dashboard,
   };
 }

@@ -1,15 +1,15 @@
 import { expect, test } from 'vitest';
 import type { Cause, Contribution, RequestDetail } from '../../lib/api/types';
-import { arc, contributionRows, gaugeSentence, pointAt, whyParts } from './why';
+import { arc, contributionRows, excludedNote, gaugeSentence, pointAt, whyParts } from './why';
 
 const BANDS = { monitor_at: 40, challenge_at: 70, block_at: 90 };
 function detail(cause: Partial<Cause>, over: Partial<RequestDetail> = {}, verdict: RequestDetail['row']['verdict'] = 'Block', score = 94): RequestDetail {
   const decided_by: Cause = { kind: 'Detection', option_key: 'scoring.block_at', construct: 'sqli.union-select', field: { loc: 'Query', name: 'id' }, msg: 'm', ...cause };
   return {
-    row: { id: 'R1', ts_ms: 0, verdict, score, src_key: '203.0.113.7', method: 'GET', host: 'h', path: '/api/items', construct: decided_by.construct, technique: null, confidence: null, group_id: null, stage: null, cause: decided_by.kind, decided_option: decided_by.option_key, config_rev: 12, latency_us: 1, upstream_status: null, sampled: false },
+    row: { id: 'R1', ts_ms: 0, verdict, score, src_key: '203.0.113.7', method: 'GET', host: 'h', path: '/api/items', construct: decided_by.construct, technique: null, confidence: null, group_id: null, stage: null, cause: decided_by.kind, decided_option: decided_by.option_key, config_rev: 12, latency_us: 1, upstream_status: null, sampled: false, excepted: false },
     ip: '203.0.113.7', query: '', bands: BANDS, ban: null, timeline: [], fields: null,
     setting: { key: decided_by.option_key, value: '90', source: 'override', rev: 12 },
-    judgment: { verdict, score, contributions: [], decided_by, chain: null, normalized_layers: 0, attack: [], confidence: null },
+    judgment: { verdict, score, contributions: [], decided_by, chain: null, normalized_layers: 0, attack: [], confidence: null, exceptions: [], skipped: [] },
     ...over,
   };
 }
@@ -44,7 +44,7 @@ test('each other kind reads as its UX sentence', () => {
 });
 
 const c = (points: number, over: Partial<Contribution> = {}): Contribution => ({
-  engine: 'graph-taint', field: null, construct: null, family: null, value: 'Dangerous', weight: 1, points, shadow: false, ...over,
+  engine: 'graph-taint', field: null, construct: null, family: null, value: 'Dangerous', weight: 1, points, shadow: false, exception: null, ...over,
 });
 
 test('contributions sort by points, shadow rows last, and the scored points sum to the score', () => {
@@ -69,4 +69,15 @@ test('the gauge maps 0..100 onto a left-to-right semicircle', () => {
 
 test('the gauge has a sentence alternative', () => {
   expect(gaugeSentence(94, BANDS, 12)).toBe('Score 94 of 100. Bands at rev 12: Monitor ≥ 40, Challenge ≥ 70, Block ≥ 90.');
+});
+
+test('a log-only contribution is excluded from the sum, sorts with the shadow ones and is named in the footer note', () => {
+  const cs = [c(0, { shadow: true, exception: 'utm-xss' }), c(90), c(4)];
+  const rows = contributionRows(cs, 94);
+  expect(rows.items.map((r) => r.c.points)).toEqual([90, 4, 0]);
+  expect(rows.sum).toBe(94);
+  expect(excludedNote(cs)).toBe(' (suppressed rows excluded)');
+  expect(excludedNote([...cs, c(0, { shadow: true })])).toBe(' (shadow and suppressed rows excluded)');
+  expect(excludedNote([c(0, { shadow: true })])).toBe(' (shadow rows excluded)');
+  expect(excludedNote([c(4)])).toBe('');
 });

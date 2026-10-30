@@ -1,6 +1,6 @@
 // The "why" panel of Request details (UX §6), as pure functions so the sentence, the
 // contributions order and the gauge geometry are testable without rendering.
-import type { Bands, Contribution, FieldRef, RequestDetail, Verdict } from '../../lib/api/types';
+import type { Bands, Contribution, ExceptionEntry, FieldRef, RequestDetail, Verdict } from '../../lib/api/types';
 
 /** One run of the why sentence: plain text, inline code, or a link. */
 export interface Part { text: string; code?: boolean; href?: string }
@@ -45,6 +45,19 @@ export function whyParts(d: RequestDetail): Part[] {
   }
 }
 
+/**
+ * The skip-inspection exceptions of a request that name this skipped field: entries in `ids` (the request's
+ * exceptions) whose `scope.field` is the field's location and name (skip-inspection names are exact; ASCII
+ * case-insensitive). Empty while the exceptions file is not loaded: no id is guessed.
+ */
+export function skippingIds(f: FieldRef, ids: string[], entries: ExceptionEntry[] | null): string[] {
+  return ids.filter((id) => {
+    const e = entries?.find((x) => x.id === id);
+    const m = e?.scope.field;
+    return e?.action === 'skip-inspection' && !!m && m.loc === f.loc.toLowerCase() && m.name.toLowerCase() === f.name.toLowerCase();
+  });
+}
+
 export interface ContributionRow { c: Contribution; top: boolean }
 
 /** Scored contributions by points (largest first), then shadow ones; `sum` covers scored points only. */
@@ -57,6 +70,16 @@ export function contributionRows(cs: Contribution[], score: number): { items: Co
     sum,
     exact: Math.abs(sum - score) < 0.05,
   };
+}
+
+/**
+ * What the Σ points footer says was left out. A log-only exception turns a contribution into a shadow
+ * one (`exception` names it), so the two kinds are told apart here and `contributionRows` needs no change.
+ */
+export function excludedNote(cs: Contribution[]): string {
+  const shadow = cs.some((c) => c.shadow && c.exception === null);
+  const suppressed = cs.some((c) => c.exception !== null);
+  return shadow && suppressed ? ' (shadow and suppressed rows excluded)' : shadow ? ' (shadow rows excluded)' : suppressed ? ' (suppressed rows excluded)' : '';
 }
 
 // Gauge: a 180° arc in a 200 × 120 viewBox, score 0 at the left, 100 at the right.
