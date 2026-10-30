@@ -238,8 +238,11 @@ impl Shield {
         'fields: for field in fields {
             let fref = FieldRef::of(&field);
             if view.skip(&fref).is_some() {
-                // skip-inspection: not normalized, not charged to the budget.
-                skipped.push(fref);
+                // skip-inspection: not normalized, not charged to the budget;
+                // a repeated field is listed once.
+                if !skipped.contains(&fref) {
+                    skipped.push(fref);
+                }
                 continue;
             }
             let field_off = view.off(Some(&fref));
@@ -2032,6 +2035,25 @@ mod exception_tests {
             let j = s.inspect_stateful(&req, &mut chain, parse_date(AS_OF).unwrap() + i * 1000);
             assert!(!j.banned(), "round {i}: {j:?}");
         }
+    }
+
+    #[test]
+    fn a_repeated_field_is_skipped_once() {
+        let mut req = Request::get("/hook");
+        req.query.push(("token".into(), "a".into()));
+        req.query.push(("token".into(), "b".into()));
+        req.headers.push(("X-Sig".into(), "1".into()));
+        req.headers.push(("X-Sig".into(), "2".into()));
+        let s = shield_with(&[
+            entry("skip-token", "skip-inspection", "", "      path_prefix: /
+      field: { loc: query, name: token }
+"),
+            entry("skip-sig", "skip-inspection", "", "      path_prefix: /
+      field: { loc: header, name: x-sig }
+"),
+        ]);
+        let j = s.inspect(&req);
+        assert_eq!(j.skipped, vec![FieldRef { loc: crate::request::Location::Query, name: "token".into() }, FieldRef { loc: crate::request::Location::Header, name: "X-Sig".into() }], "first-seen order, no duplicates");
     }
 
     #[test]

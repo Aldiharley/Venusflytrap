@@ -234,7 +234,7 @@
           {#each d.judgment.exceptions as eid (eid)}
             <li><Link href={exceptionHref(eid)} class="mono">{eid}</Link></li>
           {/each}
-          {#each d.judgment.skipped as f (fieldLabel(f))}
+          {#each d.judgment.skipped as f, i (i)}
             <li class="skipped"><TriangleAlert size={14} strokeWidth={1.5} aria-hidden="true" /><span class="mono">{fieldLabel(f)}</span> <span>Not inspected (skip-inspection {skippedBy(f) || 'exception'})</span></li>
           {/each}
         </ul>

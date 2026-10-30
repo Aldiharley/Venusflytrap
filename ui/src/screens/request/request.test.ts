@@ -269,6 +269,14 @@ test('each skipped field names only the skip-inspection exception that matches i
   ]));
 });
 
+test('a field listed twice in skipped renders twice instead of failing', async () => {
+  const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }, { loc: 'Header', name: 'X-Signature' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockResolvedValueOnce([skipEntry('hook-signature', 'header', 'x-signature')]);
+  await show(skipped);
+  await vi.waitFor(() => expect(within(section()!).getAllByText('Not inspected (skip-inspection hook-signature)')).toHaveLength(2));
+});
+
 test('a skipped field names no id while the exceptions file is unavailable or has no match', async () => {
   const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }]);
   vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
