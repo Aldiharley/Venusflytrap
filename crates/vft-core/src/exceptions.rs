@@ -115,6 +115,13 @@ pub struct ExceptionsFile {
     pub exceptions: Vec<ExceptionEntry>,
 }
 
+impl ExceptionsFile {
+    /// Parse YAML text without validating it (for tools that report per entry).
+    pub fn parse(s: &str) -> Result<ExceptionsFile, Vec<Issue>> {
+        serde_yaml::from_str(s).map_err(|e| vec![issue(None, "parse", e.to_string())])
+    }
+}
+
 /// One validation problem; `code` is a stable string shared with the console.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Issue {
@@ -393,8 +400,7 @@ pub struct Exceptions {
 
 impl Exceptions {
     pub fn from_yaml_str(s: &str, as_of_ms: u64) -> Result<Exceptions, Vec<Issue>> {
-        let file: ExceptionsFile = serde_yaml::from_str(s).map_err(|e| vec![issue(None, "parse", e.to_string())])?;
-        Self::compile(file, as_of_ms)
+        Self::compile(ExceptionsFile::parse(s)?, as_of_ms)
     }
 
     pub fn load(path: &Path, as_of_ms: u64) -> Result<Exceptions, Vec<Issue>> {
@@ -515,6 +521,15 @@ mod tests {
 
     fn ex(body: &str) -> Exceptions {
         Exceptions::from_yaml_str(&yaml(body), parse_date(AS_OF).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn parse_reads_a_file_without_validating_it() {
+        let f = ExceptionsFile::parse(&yaml(&REFERER.replace("2026-11-30", "2020-01-01"))).unwrap();
+        assert_eq!(f.exceptions.len(), 1);
+        assert!(!validate_file(&f, parse_date(AS_OF).unwrap()).is_empty(), "expired and ordered wrongly, still parsed");
+        let bad = ExceptionsFile::parse("version: [").unwrap_err();
+        assert_eq!(bad[0].code, "parse");
     }
 
     #[test]

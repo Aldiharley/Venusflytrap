@@ -405,6 +405,69 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Allow with an applied exception: the 4002 carries unmapped.vft, no finding",
+      "input": {
+        "method": "GET",
+        "path": "/search",
+        "src_ip": "192.0.2.7",
+        "verdict": "Allow",
+        "enforced": true,
+        "construct": null,
+        "construct_summary": null,
+        "msg": "no evidence",
+        "score": 0,
+        "ts_ms": 1700000300000,
+        "event_id": "018bcfe5-b280-7abc-8def-0123456789af",
+        "group_id": null,
+        "confidence": null,
+        "attack": [],
+        "exceptions": [
+          "referer-sql"
+        ]
+      },
+      "expected": [
+        {
+          "class_uid": 4002,
+          "category_uid": 4,
+          "activity_id": 3,
+          "type_uid": 400203,
+          "severity_id": 1,
+          "time": 1700000300000,
+          "metadata": {
+            "version": "1.9.0",
+            "uid": "018bcfe5-b280-7abc-8def-0123456789af",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            }
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.7"
+          },
+          "message": "no evidence",
+          "http_request": {
+            "http_method": "GET",
+            "url": {
+              "path": "/search"
+            }
+          },
+          "action_id": 1,
+          "disposition_id": 1,
+          "unmapped": {
+            "vft": {
+              "exceptions": [
+                "referer-sql"
+              ],
+              "skipped_fields": []
+            }
+          }
+        }
+      ]
     }
   ]
 }
