@@ -75,7 +75,7 @@ exceptions:
 ### 3.2 Validation
 
 The file is validated at load. Any error stops `serve` from starting and makes
-`eval`/`bench` exit non-zero, the same as an invalid `shield.yaml`. Errors:
+`eval` exit non-zero, the same as an invalid `shield.yaml`. Errors:
 
 - unknown `version`, unknown keys, a missing required key, a bad date or glob;
 - a duplicate `id`;
@@ -86,6 +86,9 @@ The file is validated at load. Any error stops `serve` from starting and makes
   one directly is an error);
 - `constructs` present on `skip-inspection`, or absent or empty on the others;
 - `skip-inspection` without `field`, or with a wildcard in `field.name`;
+- an ignore or log-only entry with a `field` whose expanded constructs are all
+  request-level (§3.3), which could never apply (`field-unreachable`: "constructs
+  <list> are request-level; remove scope.field so the exception can apply");
 - `expires` not after `modified`, or more than 365 days after it;
 - `modified` before `created`;
 - an entry already expired at load (`expires <= as_of`).
@@ -97,8 +100,8 @@ naming its id, scope and expiry.
 
 - An exception is **live** when `as_of < expires`. Serve evaluates it per request
   with the proxy clock (`now_ms`), so an entry stops applying at its expiry
-  without a restart. `eval` and `bench` take `--as-of <date>` (default: the run
-  date, printed in the run header) and use it for every row, so runs are
+  without a restart. `eval` takes `--as-of <date>` (default: the run date,
+  printed in the run header) and uses it for every row, so runs are
   reproducible.
 - A live exception applies to a **field** when its method list (if any) contains
   the request method, its `path_prefix` matches (§3.1: a prefix other than `/`
@@ -113,9 +116,12 @@ naming its id, scope and expiry.
 ### 4.1 Module
 
 New `exceptions.rs`: the file model (serde), `validate`, and a compiled
-`Exceptions` value (globs compiled once, wildcards expanded to registry ids,
-entries indexed by action). `Shield::with_exceptions(ex: Exceptions)` attaches
-it. A shield without exceptions takes exactly today's code path.
+`Exceptions` value (wildcards expanded to registry ids).
+`Shield::with_exceptions(ex, clock)` attaches it; `clock` is
+`ExceptionClock::Fixed` (eval: every request is checked against the `as_of` the
+file was validated at) or `ExceptionClock::PerRequest` (serve: the `now_ms`
+passed to `Shield::inspect_at`). A shield without exceptions takes exactly
+today's code path.
 
 ### 4.2 Inspection
 
@@ -144,7 +150,8 @@ it. A shield without exceptions takes exactly today's code path.
      `exception: Some(id)`;
    - ignore: keep no contribution; record only the id.
    Contributions that global `shield.shadow` would have produced keep their
-   current form (`exception: None`).
+   current form (`exception: None`), and a construct already off through
+   `shield.shadow` credits no exception.
 5. `Judgment.exceptions: Vec<String>`: the sorted, unique ids of every exception
    that removed at least one construct in the observe pass or skipped at least
    one field. An exception that matched but changed nothing is not listed.
@@ -153,7 +160,9 @@ Requests no exception's method and path scope touches pay nothing extra.
 
 ### 4.3 Invariants (tested)
 
-- With no exceptions, judgments are byte-identical to main.
+- With no exceptions, judgments make the same decisions as main (verdict,
+  score, contributions, `decided_by`); the judgment JSON gains empty
+  `exceptions`, `skipped` and `exception: null`.
 - An exception never raises a request's score or verdict (property test over
   generated requests and exceptions).
 - An expired exception has no effect.
@@ -175,9 +184,10 @@ Requests no exception's method and path scope touches pay nothing extra.
   The console's TypeScript encoder follows the same rule, kept identical by the
   shared fixture.
 - **CLI:** `eval` and `serve` take `--exceptions <file>`; `eval` also takes
-  `--as-of <YYYY-MM-DD>`. `bench` (the synthetic smoke test) takes neither. New `vft exceptions check <file>
-  [--as-of <date>]` validates the file and prints each entry with its live or
-  expired state and expanded construct list; it exits non-zero on any error.
+  `--as-of <YYYY-MM-DD>`. `bench` (the synthetic smoke test) takes neither.
+  New `vft exceptions check <file> [--as-of <date>]` validates the file and
+  prints each entry with its live or expired state and expanded construct
+  list; it exits non-zero on any error.
 - `eval/ab_dev.sh` already takes per-side flags, so a measurement passes
   `--exceptions` on side B only.
 

@@ -146,22 +146,22 @@ before and is an Allow after (score 40 to 39). It was a miss in both runs and is
 ## What the exception costs in recall
 
 Ignoring `sqli.*` in the `Referer` header removes four true positives out of the 656 malicious rows
-across both halves (1 of 328 on dev, 3 of 328 on held-out), and removes 69 false positives out of
-189 (43 of 100 on dev, 26 of 89 on held-out). The lost TPs are DVWA requests in which the attack URL
-appears as the `Referer` of the next request; the corpus recorded those requests with the previous page
-in the `Referer`, and nothing in the request's own query or body is flagged. They are caught only
-because of the `Referer`. A real deployment sees the same pattern whenever an attacker sends a payload
-in a `Referer` header, and that detection is gone for as long as the exception is live. The scope is
-every path and every method, so this holds on all routes, not only search pages. The recall change on
-held-out (-0.91 points, p = 0.25) is not statistically significant on 3 rows; the false-positive
-change is (p = 2.98e-08 on held-out). The two halves point the same way. The exception does not touch
-`xss.*`, `cmd.*` or any other family in the `Referer`.
+across both halves (1 of 328 on dev, 3 of 328 on held-out), and removes 69 false positives out of 189
+(43 of 100 on dev, 26 of 89 on held-out). The lost TPs are the corpus's test-application rows in which
+the attack URL appears as the `Referer` of the next request; the corpus recorded those requests with the
+previous page in the `Referer`, and nothing in the request's own query or body is flagged. They are
+caught only because of the `Referer`. A real deployment sees the same pattern whenever an attacker sends
+a payload in a `Referer` header, and that detection is gone for as long as the exception is live. The
+scope is every path and every method, so this holds on all routes, not only search pages. The recall
+change on held-out (-0.91 points, p = 0.25) is not statistically significant on 3 rows; the
+false-positive change is (p = 2.98e-08 on held-out). The two halves point the same way. The exception
+does not touch `xss.*`, `cmd.*` or any other family in the `Referer`.
 
 ## What this does not show
 
 - It is measured on one corpus, in which benign `Referer` headers were recorded with SQL-looking
-  search URLs; the corpus's malicious DVWA rows carry the previous attack URL in the `Referer`. A
-  different deployment can have a different ratio, in either direction.
+  search URLs; the corpus's malicious test-application rows carry the previous attack URL in the
+  `Referer`. A different deployment can have a different ratio, in either direction.
 - It is library mode only. The serve path (chains, bans) was checked for no-change, not measured with
   the exception on.
 - The 4-row recall cost is a count, not an estimate for other traffic.
