@@ -1,6 +1,6 @@
 // The "why" panel of Request details (UX §6), as pure functions so the sentence, the
 // contributions order and the gauge geometry are testable without rendering.
-import type { Bands, Contribution, FieldRef, RequestDetail, Verdict } from '../../lib/api/types';
+import type { Bands, Contribution, ExceptionEntry, FieldRef, RequestDetail, Verdict } from '../../lib/api/types';
 
 /** One run of the why sentence: plain text, inline code, or a link. */
 export interface Part { text: string; code?: boolean; href?: string }
@@ -43,6 +43,19 @@ export function whyParts(d: RequestDetail): Part[] {
     case 'Allowlisted': return [{ text: 'Source allow-listed.' }];
     case 'NoEvidence': return [{ text: 'No evidence; allowed.' }];
   }
+}
+
+/**
+ * The skip-inspection exceptions of a request that name this skipped field: entries in `ids` (the request's
+ * exceptions) whose `scope.field` is the field's location and name (skip-inspection names are exact; ASCII
+ * case-insensitive). Empty while the exceptions file is not loaded: no id is guessed.
+ */
+export function skippingIds(f: FieldRef, ids: string[], entries: ExceptionEntry[] | null): string[] {
+  return ids.filter((id) => {
+    const e = entries?.find((x) => x.id === id);
+    const m = e?.scope.field;
+    return e?.action === 'skip-inspection' && !!m && m.loc === f.loc.toLowerCase() && m.name.toLowerCase() === f.name.toLowerCase();
+  });
 }
 
 export interface ContributionRow { c: Contribution; top: boolean }

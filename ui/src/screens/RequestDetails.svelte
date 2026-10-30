@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import type { SourceError } from '../lib/api/errors';
   import { Latest } from '../lib/api/latest';
-  import type { ExceptionEntry, RequestDetail } from '../lib/api/types';
+  import type { ExceptionEntry, FieldRef, RequestDetail } from '../lib/api/types';
   import AttackChip from '../lib/components/AttackChip.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import ErrorCard from '../lib/components/ErrorCard.svelte';
@@ -17,7 +17,7 @@
   import { app } from '../lib/state/app.svelte';
   import CreateException from './request/CreateException.svelte';
   import ScoreGauge from './request/ScoreGauge.svelte';
-  import { constructHref, contributionRows, excludedNote, fieldLabel, settingHref, whyParts } from './request/why';
+  import { constructHref, contributionRows, excludedNote, fieldLabel, settingHref, skippingIds, whyParts } from './request/why';
 
   let { title, param }: { title: string; param: string | null } = $props();
   const id = $derived(param ?? '');
@@ -41,22 +41,18 @@
   const cause = $derived(d?.judgment.decided_by);
   const excluded = $derived(d ? excludedNote(d.judgment.contributions) : '');
   const touched = $derived(d ? d.judgment.exceptions.length > 0 || d.judgment.skipped.length > 0 : false);
+  const skippedBy = (f: FieldRef) => skippingIds(f, d?.judgment.exceptions ?? [], entries).join(', ');
   const exceptionHref = (eid: string) => `/exceptions?id=${encodeURIComponent(eid)}`;
 
-  // A skipped field does not say which exception skipped it: name the skip-inspection ones among the
-  // request's exceptions (from the exceptions file), or all of them while the file is not loaded.
+  // A skipped field does not say which exception skipped it: the exceptions file tells, by the field each
+  // skip-inspection entry names. Until it loads (or if it cannot, or nothing matches) no id is named.
   let entries = $state<ExceptionEntry[] | null>(null);
   $effect(() => {
     const src = app.src;
     if (!src || !d || d.judgment.skipped.length === 0) return;
     const ctl = new AbortController();
-    src.exceptions({ signal: ctl.signal }).then((r) => { entries = r; }, () => {});
+    src.exceptions({ signal: ctl.signal }).then((r) => { entries = r; }, () => { entries = null; });
     return () => ctl.abort();
-  });
-  const skippedBy = $derived.by(() => {
-    const ids = d?.judgment.exceptions ?? [];
-    const skips = ids.filter((x) => entries?.find((e) => e.id === x)?.action === 'skip-inspection');
-    return (skips.length ? skips : ids).join(', ');
   });
 
   // The inline "Create exception" panel: closing it hands focus back to the button that opened it.
@@ -239,7 +235,7 @@
             <li><Link href={exceptionHref(eid)} class="mono">{eid}</Link></li>
           {/each}
           {#each d.judgment.skipped as f (fieldLabel(f))}
-            <li class="skipped"><TriangleAlert size={14} strokeWidth={1.5} aria-hidden="true" /><span class="mono">{fieldLabel(f)}</span> <span>Not inspected (skip-inspection {skippedBy})</span></li>
+            <li class="skipped"><TriangleAlert size={14} strokeWidth={1.5} aria-hidden="true" /><span class="mono">{fieldLabel(f)}</span> <span>Not inspected (skip-inspection {skippedBy(f) || 'exception'})</span></li>
           {/each}
         </ul>
       </section>

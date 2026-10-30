@@ -234,19 +234,52 @@ test('a log-only contribution is greyed with "suppressed by <id>" and stays out 
   expect(foot.textContent).toContain(`= score ${d.judgment.score}`);
 });
 
-test('a skipped field is listed with a warning and "Not inspected (skip-inspection <id>)"', async () => {
+const skipDetail = (exceptions: string[], skipped: RequestDetail['judgment']['skipped']): RequestDetail => {
   const d = find((x) => !x.row.excepted);
-  const skipped: RequestDetail = {
-    ...d, row: { ...d.row, excepted: true },
-    judgment: { ...d.judgment, exceptions: ['hook-signature'], skipped: [{ loc: 'Header', name: 'X-Hub-Signature' }] },
-  };
+  return { ...d, row: { ...d.row, excepted: true }, judgment: { ...d.judgment, exceptions, skipped } };
+};
+const skipEntry = (id: string, loc: 'header' | 'query', name: string, action: 'skip-inspection' | 'log-only' = 'skip-inspection') => ({
+  id, action, constructs: action === 'skip-inspection' ? [] : ['xss.*'], scope: { methods: [], path_prefix: '/', field: { loc, name } },
+  owner: 'o', reason: 'r', created: '2026-10-01', modified: '2026-10-01', expires: '2027-10-01',
+});
+
+test('a skipped field is listed with a warning and "Not inspected (skip-inspection <id>)"', async () => {
+  const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }]);
   vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
   await show(skipped);
   const sec = section()!;
   expect(within(sec).getByRole('link', { name: 'hook-signature' }).getAttribute('href')).toBe('/exceptions?id=hook-signature');
-  const li = within(sec).getByText('Not inspected (skip-inspection hook-signature)').closest('li')!;
-  expect(li.textContent).toContain('header:X-Hub-Signature');
+  const li = (await within(sec).findByText('Not inspected (skip-inspection hook-signature)')).closest('li')!;
+  expect(li.textContent).toContain('header:X-Signature');
   expect(li.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+});
+
+test('each skipped field names only the skip-inspection exception that matches it, not a log-only one', async () => {
+  const skipped = skipDetail(['utm-xss', 'sig-a', 'sig-b'], [{ loc: 'Header', name: 'X-Sig-A' }, { loc: 'Query', name: 'token' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockResolvedValueOnce([
+    skipEntry('utm-xss', 'query', 'token', 'log-only'), skipEntry('sig-a', 'header', 'x-sig-a'), skipEntry('sig-b', 'query', 'token'),
+  ]);
+  await show(skipped);
+  const sec = section()!;
+  const items = () => within(sec).getAllByText(/^Not inspected/).map((e) => [e.closest('li')!.querySelector('.mono')!.textContent, e.textContent]);
+  await vi.waitFor(() => expect(items()).toEqual([
+    ['header:X-Sig-A', 'Not inspected (skip-inspection sig-a)'],
+    ['query:token', 'Not inspected (skip-inspection sig-b)'],
+  ]));
+});
+
+test('a skipped field names no id while the exceptions file is unavailable or has no match', async () => {
+  const skipped = skipDetail(['hook-signature'], [{ loc: 'Header', name: 'X-Signature' }]);
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockRejectedValueOnce(new Error('down'));
+  await show(skipped);
+  expect(await within(section()!).findByText('Not inspected (skip-inspection exception)')).toBeTruthy();
+  document.body.innerHTML = '';
+  vi.spyOn(app.src!, 'request').mockResolvedValueOnce(skipped);
+  vi.spyOn(app.src!, 'exceptions').mockResolvedValueOnce([skipEntry('hook-signature', 'header', 'x-other')]);
+  await show(skipped);
+  expect(await within(section()!).findByText('Not inspected (skip-inspection exception)')).toBeTruthy();
 });
 
 test('the pre-fill follows the deciding construct, the path and the request', async () => {
