@@ -294,6 +294,13 @@ impl ChainTracker {
         rec
     }
 
+    /// Put back a ban record exactly as stored (no TTL or offence change), e.g.
+    /// when loading history at startup. `max_bans` eviction applies as for `ban`.
+    pub fn restore_ban(&mut self, key: SourceKey, rec: BanRecord) {
+        self.bans.insert(key, rec);
+        self.evict();
+    }
+
     pub fn lift(&mut self, key: SourceKey) -> bool {
         self.bans.remove(&key).is_some()
     }
@@ -536,6 +543,39 @@ mod tests {
         }
         assert!(t.tracked_sources() <= 64);
         assert!(t.active_ban(key(7), 2).is_some());
+    }
+
+    #[test]
+    fn restore_ban_keeps_the_record_as_is() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        let rec = BanRecord { since_ms: 1_000, until_ms: 9_000, cause: BanCause::Manual, offences: 3 };
+        t.restore_ban(key(8), rec);
+        assert_eq!(t.active_ban(key(8), 8_999), Some(rec), "the exact record, no TTL recomputation");
+        assert_eq!(t.active_ban(key(8), 9_000), None, "inactive from until_ms on");
+        assert_eq!(t.ban_count(), 1);
+    }
+
+    #[test]
+    fn a_ban_after_a_restore_counts_offences_from_the_restored_record() {
+        let cfg = ChainConfig::default();
+        let mut t = ChainTracker::new(&cfg);
+        let rec = BanRecord { since_ms: 0, until_ms: 1_000, cause: BanCause::Honeypot, offences: 2 };
+        t.restore_ban(key(8), rec);
+        let next = t.ban(key(8), BanCause::Honeypot, 5_000);
+        assert_eq!(next.offences, 3);
+        assert_eq!(next.until_ms, 5_000 + cfg.ban_policy.ttl_secs * 4 * 1000);
+    }
+
+    #[test]
+    fn restore_ban_respects_max_bans() {
+        let mut cfg = ChainConfig::default();
+        cfg.ban_policy.max_bans = 640;
+        let mut t = ChainTracker::new(&cfg);
+        for n in 0..1_000u32 {
+            let k = SourceKey::new(IpAddr::V4(Ipv4Addr::from(0x0C00_0000 | n)), 64);
+            t.restore_ban(k, BanRecord { since_ms: 0, until_ms: 10_000 + u64::from(n), cause: BanCause::Manual, offences: 1 });
+        }
+        assert!(t.ban_count() <= 640);
     }
 
     #[test]

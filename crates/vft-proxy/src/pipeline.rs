@@ -55,6 +55,11 @@ impl ChainStore {
         self.shard(&key).ban(key, cause, now_ms)
     }
 
+    /// Put back a stored ban record unchanged (history restore at startup).
+    pub fn restore_ban(&self, key: SourceKey, rec: BanRecord) {
+        self.shard(&key).restore_ban(key, rec)
+    }
+
     pub fn lift(&self, key: SourceKey) -> bool {
         self.shard(&key).lift(key)
     }
