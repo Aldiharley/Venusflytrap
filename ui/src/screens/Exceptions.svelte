@@ -99,7 +99,9 @@
   }
 </script>
 
-<h1 tabindex="-1">{title}</h1>
+<header class="head">
+  <h1 tabindex="-1">{title}</h1>
+</header>
 <p class="secondary note">Exceptions are read from the file passed with --exceptions. Changes take effect after a restart.</p>
 
 {#if error}
@@ -189,7 +191,8 @@
 {/if}
 
 <style>
-  .note { margin: calc(-1 * var(--vf-space-3)) 0 var(--vf-space-4); }
+  .head { margin-bottom: var(--vf-space-2); }
+  .note { margin: 0 0 var(--vf-space-4); }
   .skeleton { height: 240px; background: var(--vf-surface-sunken); }
   .tabs { display: flex; gap: var(--vf-space-1); margin-bottom: var(--vf-space-4); border-bottom: var(--vf-bw-std) solid var(--vf-border-subtle); }
   .tab {
