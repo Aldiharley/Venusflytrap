@@ -99,6 +99,33 @@ function split(score: number, n: 1 | 2, rnd: () => number): number[] {
   return [top, total - top].map((t) => t / 10);
 }
 
+let exceptionTouch = true;
+/** Test hook: switches the exception-touched shapes off, leaving the rows the generator made before they existed. */
+export const __setExceptionTouch = (on: boolean) => { exceptionTouch = on; };
+
+/**
+ * Rows an exception touched, drawn from their own generator so that every other row, and the random
+ * stream of every row, is what it was before exceptions: a benign `/api/search` query sometimes carries a
+ * Referer whose evidence `referer-sql` removed (no contribution is left to show), and an
+ * `xss.event-handler` detection sometimes carries a `utm_source` that `utm-xss` only logged. There is
+ * no POST under `/hooks` in the fixture traffic, so `hook-signature` is listed but never applies.
+ */
+function touch(k: number, j: Judgment, benign: boolean, path: string, query: string): void {
+  const rnd = mulberry32(Math.imul(k, 40503) ^ 0x2c1b3c6d);
+  const p = rnd();
+  if (benign && query !== '' && path === '/api/search') {
+    if (p < 0.06) j.exceptions = ['referer-sql'];
+  } else if (!benign && j.decided_by.kind === 'Detection' && j.decided_by.construct === 'xss.event-handler') {
+    if (p < 0.15) {
+      j.contributions.push({
+        engine: 'graph-taint', field: q('utm_source'), construct: 'xss.event-handler', family: 'Xss', value: 'Suspicious',
+        weight: 0.5, points: 0, shadow: true, exception: 'utm-xss',
+      });
+      j.exceptions = ['utm-xss'];
+    }
+  }
+}
+
 interface Gen { row: HistoryRow; detail: Omit<RequestDetail, 'timeline' | 'ban'> }
 
 function bandOf(score: number): Verdict {
@@ -167,7 +194,8 @@ export function makeHistory(f: Fixtures, now: () => number): History {
     let judgment: Judgment;
     let fields: RequestDetail['fields'] = [];
 
-    if (rnd() < 0.55) {
+    const benign = rnd() < 0.55;
+    if (benign) {
       const [key, ip] = pick(rnd, BENIGN_SRC);
       src = { key, ip, stage: null };
       [method, path, query] = pick(rnd, BENIGN);
@@ -225,6 +253,7 @@ export function makeHistory(f: Fixtures, now: () => number): History {
       }
     }
 
+    if (exceptionTouch) touch(k, judgment, benign, path, query);
     const c = judgment.decided_by;
     const forwarded = judgment.verdict === 'Allow' || judgment.verdict === 'Monitor';
     const row: HistoryRow = {
@@ -233,6 +262,7 @@ export function makeHistory(f: Fixtures, now: () => number): History {
       group_id: judgment.chain ? groupId(src.key, judgment.chain.episode_start_ms) : null, stage: src.stage, cause: c.kind, decided_option: c.option_key,
       upstream_status: forwarded ? (method === 'POST' && path === '/login' ? 302 : 200) : null,
       sampled: judgment.verdict === 'Allow',
+      excepted: judgment.exceptions.length > 0 || judgment.skipped.length > 0,
     };
     return {
       row,

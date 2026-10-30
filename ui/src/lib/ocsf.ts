@@ -95,6 +95,10 @@ export function encodeOcsf(detail: RequestDetail, eventId: string, opts: OcsfOpt
   // As in Rust: a known summary is the name, even an empty one; no summary, no name.
   const summary = opts.summary ?? null;
   if (construct !== null) http.firewall_rule = summary !== null ? { uid: construct, name: summary } : { uid: construct };
+  // Only the 4002 says which exceptions applied and which fields they skipped, and only when one did (ocsf.rs).
+  if (j.exceptions.length > 0 || j.skipped.length > 0) {
+    http.unmapped = { vft: { exceptions: j.exceptions, skipped_fields: j.skipped.map((f) => `${f.loc.toLowerCase()}:${f.name}`) } };
+  }
   const out: Rec[] = [http];
 
   if (detected) {

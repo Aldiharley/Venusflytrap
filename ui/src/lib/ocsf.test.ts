@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import sample from '../../../crates/vft-proxy/tests/fixtures/ocsf-sample.json';
 import { encodeOcsf, PRODUCT_VERSION } from './ocsf';
-import type { RequestDetail, Verdict } from './api/types';
+import type { FieldRef, RequestDetail, Verdict } from './api/types';
 import type { AttackTag } from '../gen/AttackTag';
 
 // The Rust test (crates/vft-proxy/src/ocsf.rs `shared_sample_matches`) reads the same file and applies every case.
@@ -9,11 +9,18 @@ interface Input {
   method: string; path: string; src_ip: string | null; verdict: string; enforced: boolean;
   construct: string | null; construct_summary: string | null; msg: string; score: number; ts_ms: number;
   event_id: string; group_id: string | null; confidence: number | null; attack: AttackTag[];
+  exceptions?: string[]; skipped_fields?: string[];
 }
 interface Case { name: string; input: Input; expected: Record<string, unknown>[] }
 const cases = sample.cases as unknown as Case[];
 // The richest case (an enforced Block with a source, a group, a construct and a confidence) drives the unit tests.
 const input = cases[0].input;
+
+// A `loc:name` label (lowercase location, as the encoder prints it) back to the judgment's FieldRef.
+const skippedRef = (label: string): FieldRef => {
+  const [loc, ...name] = label.split(':');
+  return { loc: (loc[0].toUpperCase() + loc.slice(1)) as FieldRef['loc'], name: name.join(':') };
+};
 
 function detailFrom(i: Input, over: { verdict?: Verdict; src_ip?: string; confidence?: number | null } = {}): RequestDetail {
   const verdict = over.verdict ?? (i.verdict as Verdict);
@@ -23,6 +30,7 @@ function detailFrom(i: Input, over: { verdict?: Verdict; src_ip?: string; confid
       id: i.event_id, ts_ms: i.ts_ms, verdict, score: i.score, src_key: i.src_ip ?? '', method: i.method, host: 'h', path: i.path,
       construct: i.construct, technique: i.attack[0]?.id ?? null, confidence, group_id: i.group_id, stage: null, cause: 'Detection',
       decided_option: 'scoring.block_at', config_rev: 1, latency_us: 1, upstream_status: null, sampled: false,
+      excepted: (i.exceptions?.length ?? 0) + (i.skipped_fields?.length ?? 0) > 0,
     },
     // The console's "unknown source address" is the empty string.
     ip: over.src_ip ?? i.src_ip ?? '',
@@ -30,7 +38,8 @@ function detailFrom(i: Input, over: { verdict?: Verdict; src_ip?: string; confid
     judgment: {
       verdict, score: i.score, contributions: [],
       decided_by: { kind: 'Detection', option_key: 'scoring.block_at', field: null, construct: i.construct, msg: i.msg },
-      chain: null, normalized_layers: 0, attack: i.attack, confidence, exceptions: [], skipped: [],
+      chain: null, normalized_layers: 0, attack: i.attack, confidence,
+      exceptions: i.exceptions ?? [], skipped: (i.skipped_fields ?? []).map(skippedRef),
     },
     bands: { monitor_at: 40, challenge_at: 70, block_at: 90 },
     setting: { key: 'scoring.block_at', value: '90', source: 'Override', rev: 1 },
@@ -159,4 +168,16 @@ test('a method named like an inherited property is still an unknown method: acti
     const [h] = encodeOcsf(d, 'e');
     expect([m, h.activity_id, h.type_uid]).toEqual([m, 99, 400299]);
   }
+});
+
+test('unmapped.vft is on the 4002 only, when either list is non-empty, with lowercase loc:name labels', () => {
+  expect(encodeOcsf(detailFrom(input), 'e')[0]).not.toHaveProperty('unmapped');
+  const d = detailFrom(input);
+  d.judgment.skipped = [{ loc: 'Header', name: 'x-signature' }, { loc: 'Query', name: 'utm_source' }];
+  const [h, f] = encodeOcsf(d, 'e');
+  expect(h.unmapped).toEqual({ vft: { exceptions: [], skipped_fields: ['header:x-signature', 'query:utm_source'] } });
+  expect(f).not.toHaveProperty('unmapped');
+  d.judgment.skipped = [];
+  d.judgment.exceptions = ['referer-sql'];
+  expect(encodeOcsf(d, 'e')[0].unmapped).toEqual({ vft: { exceptions: ['referer-sql'], skipped_fields: [] } });
 });

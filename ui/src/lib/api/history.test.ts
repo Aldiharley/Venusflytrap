@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { makeFixtures } from './fixtures';
-import { BANDS, PERIOD_MS, groupId, makeHistory, rowId } from './history';
+import { BANDS, PERIOD_MS, __setExceptionTouch, groupId, makeHistory, rowId } from './history';
 import { parse } from '../query';
 import { techniquesFor } from './attack';
 import { confidenceOf } from './confidence';
@@ -156,5 +156,52 @@ test('a fast-tracked banned judgment has no tags and no confidence', () => {
     expect(d.judgment.confidence).toBeNull();
     expect(d.row.technique).toBeNull();
     expect(d.row.confidence).toBeNull();
+  }
+});
+
+/** Rows `ks` with the touched-shape generator on or off; always switched back on. */
+function rowsWith(touch: boolean, ks: number[]) {
+  __setExceptionTouch(touch);
+  try { return ks.map((k) => h.row(k)); } finally { __setExceptionTouch(true); }
+}
+
+test('the exception-touched shapes leave every other row, and the random stream of every row, as it was', () => {
+  const ks = Array.from({ length: 2001 }, (_, k) => k);
+  const off = rowsWith(false, ks);
+  const on = rowsWith(true, ks);
+  expect(off.some((r) => r.excepted)).toBe(false);
+  for (const k of ks) {
+    expect({ ...on[k], excepted: false }, rowId(k)).toEqual(off[k]);
+    for (const key of ['verdict', 'score', 'construct', 'path'] as const) expect(on[k][key]).toBe(off[k][key]);
+  }
+  expect(on.filter((r) => r.excepted).length).toBeGreaterThan(0);
+});
+
+test('touched rows: a Referer ignore on a benign search, a log-only utm_source on an xss.event-handler detection', () => {
+  // `detail` walks the source's timeline, so open only the rows the cheap `excepted` flag points at.
+  const ids = Array.from({ length: 6000 }, (_, i) => h.row(K - i)).filter((r) => r.excepted).map((r) => r.id);
+  const touched = ids.map((id) => h.detail(id)!);
+  const details = touched;
+  expect(touched.length).toBeGreaterThan(0);
+  expect(details.every((d) => d.judgment.exceptions.length + d.judgment.skipped.length > 0)).toBe(true);
+  expect(details.every((d) => d.judgment.skipped.length === 0)).toBe(true);
+  const referer = touched.filter((d) => d.judgment.exceptions[0] === 'referer-sql');
+  const utm = touched.filter((d) => d.judgment.exceptions[0] === 'utm-xss');
+  expect(referer.length).toBeGreaterThan(0);
+  expect(utm.length).toBeGreaterThan(0);
+  for (const d of referer) {
+    expect(d.judgment.exceptions).toEqual(['referer-sql']);
+    expect(d.row.path).toBe('/api/search');
+    expect(d.judgment.verdict).toBe('Allow');
+    expect(d.judgment.contributions.every((c) => c.exception === null)).toBe(true);
+  }
+  for (const d of utm) {
+    expect(d.judgment.exceptions).toEqual(['utm-xss']);
+    expect(d.judgment.decided_by.construct).toBe('xss.event-handler');
+    const c = d.judgment.contributions.filter((x) => x.exception !== null);
+    expect(c).toEqual([{
+      engine: 'graph-taint', field: { loc: 'Query', name: 'utm_source' }, construct: 'xss.event-handler', family: 'Xss',
+      value: 'Suspicious', weight: 0.5, points: 0, shadow: true, exception: 'utm-xss',
+    }]);
   }
 });
