@@ -82,7 +82,8 @@ pub struct ExceptionScope {
     /// Empty = any method.
     #[serde(default)]
     pub methods: Vec<String>,
-    /// Matched on segment boundaries against the canonical path.
+    /// Matched on segment boundaries against the canonical path; any prefix
+    /// but `/` only when the raw path is plain (see `Exceptions::select`).
     pub path_prefix: String,
     /// None = every field, plus the request-level constructs.
     #[serde(default)]
@@ -230,6 +231,17 @@ fn prefix_matches(prefix: &str, path: &str) -> bool {
         return true;
     }
     path == p || (path.starts_with(p) && path[p.len()..].starts_with('/'))
+}
+
+/// Whether canonicalisation cannot move the raw request path between segments:
+/// no encoded `/`, `\`, `.` or `%` (ASCII case-insensitive), no `\` or `;`,
+/// and no `.` or `..` segment. Only a plain path is matched against a prefix
+/// other than `/`, so decoding can never carry a request into a scope.
+fn plain_path(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    !["%2f", "%5c", "%2e", "%25"].iter().any(|t| lower.contains(t))
+        && !raw.contains(['\\', ';'])
+        && !raw.split('/').any(|seg| seg == "." || seg == "..")
 }
 
 fn eligible(c: &sinks::ConstructInfo) -> bool {
@@ -451,14 +463,19 @@ impl Exceptions {
             .collect()
     }
 
-    /// The live exceptions whose method and path match this request.
-    pub(crate) fn select(&self, method: &str, canonical_path: &str, now_ms: u64) -> Selection<'_> {
+    /// The live exceptions whose method and path match this request. A prefix
+    /// of `/` matches every path; any other prefix matches the canonical path
+    /// only when the raw path is plain (see [`plain_path`]), so a request
+    /// whose path relies on decoding or dot segments gets full inspection.
+    pub(crate) fn select(&self, method: &str, raw_path: &str, now_ms: u64) -> Selection<'_> {
+        let canonical = crate::request::canonical_path(raw_path);
+        let plain = plain_path(raw_path);
         let entries = self
             .compiled
             .iter()
             .filter(|c| now_ms < c.expires_ms)
             .filter(|c| c.methods.is_empty() || c.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
-            .filter(|c| prefix_matches(&c.prefix, canonical_path))
+            .filter(|c| c.prefix.trim_end_matches('/').is_empty() || (plain && prefix_matches(&c.prefix, &canonical)))
             .collect();
         Selection { entries }
     }
@@ -578,6 +595,19 @@ mod tests {
         assert!(e.select("POST", "/api/search", live).is_empty());
         assert!(e.select("GET", "/apix", live).is_empty());
         assert!(e.select("GET", "/api", parse_date("2026-11-30").unwrap()).is_empty(), "as_of == expires is expired");
+    }
+
+    #[test]
+    fn a_non_root_prefix_needs_a_plain_raw_path() {
+        let hooks = ex(&REFERER.replace("path_prefix: /api", "path_prefix: /hooks"));
+        let root = ex(&REFERER.replace("path_prefix: /api", "path_prefix: /"));
+        let t = parse_date(AS_OF).unwrap();
+        assert!(!hooks.select("GET", "/hooks/a", t).is_empty());
+        assert!(!hooks.select("GET", "/hooks//a/", t).is_empty(), "empty segments are plain");
+        for p in ["/admin/..%2fhooks", "/admin/%252e%252e/hooks", "/hooks;x", "/hooks/./a", "/HOOKS%2F", "/hooks%2Fa", "/hooks%5Ca", "/hooks/%2E%2E/hooks", "/hooks\\a", "/a/../hooks"] {
+            assert!(hooks.select("GET", p, t).is_empty(), "{p}");
+            assert!(!root.select("GET", p, t).is_empty(), "{p}: / keeps matching every path");
+        }
     }
 
     #[test]

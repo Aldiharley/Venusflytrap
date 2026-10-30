@@ -7,7 +7,8 @@ export type ExceptionScope = {
  */
 methods: Array<string>, 
 /**
- * Matched on segment boundaries against the canonical path.
+ * Matched on segment boundaries against the canonical path; any prefix
+ * but `/` only when the raw path is plain (see `Exceptions::select`).
  */
 path_prefix: string, 
 /**

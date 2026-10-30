@@ -43,7 +43,7 @@ exceptions:
     constructs: [sqli.*]       # construct ids or family wildcards (`<family>.*`)
     scope:
       methods: [GET, POST]     # optional; absent = any method
-      path_prefix: /           # required; matched on the normalized path
+      path_prefix: /           # required; matched on the canonical path (§3.1)
       field: { loc: header, name: referer }   # optional
     owner: dennis
     reason: "Search-result referers carry SQL-looking text"
@@ -63,8 +63,13 @@ exceptions:
 - `field.loc` is one of `path`, `query`, `header`, `cookie`, `body` (the
   `Location` enum). `field.name` is a case-insensitive glob over the field name
   as the engine names it (`referer`, `key:q`, `json:/user/id`), with `*` and `?`.
-- `path_prefix` matches on segment boundaries against the normalized request
+- `path_prefix` matches on segment boundaries against the canonical request
   path: `/api` matches `/api` and `/api/x`, not `/apix`. `/` matches every path.
+  Any other prefix also needs the raw request path to be **plain**: it contains
+  none of `%2f`, `%5c`, `%2e`, `%25` (ASCII case-insensitive), no `\`, no `;`,
+  and no `.` or `..` segment. A request whose raw path is not plain gets no
+  exception except those scoped to `/` (fail closed: canonicalisation can never
+  carry a request such as `/admin/..%2fhooks` into a `/hooks` scope).
 - Dates are `YYYY-MM-DD`, read as 00:00 UTC.
 
 ### 3.2 Validation
@@ -96,8 +101,9 @@ naming its id, scope and expiry.
   date, printed in the run header) and use it for every row, so runs are
   reproducible.
 - A live exception applies to a **field** when its method list (if any) contains
-  the request method, its `path_prefix` matches, and its `field` (if any)
-  matches the field's location and name.
+  the request method, its `path_prefix` matches (§3.1: a prefix other than `/`
+  only on a plain raw path), and its `field` (if any) matches the field's
+  location and name.
 - An exception with no `field` applies to every field and also to the
   request-level constructs (`recon.sensitive-path-probe`, `honeypot.decoy-hit`,
   `intel.scanner-ua`).

@@ -144,7 +144,7 @@ impl Shield {
             ExceptionClock::PerRequest => now_ms,
         };
         let sel = (!self.exceptions.is_empty())
-            .then(|| self.exceptions.select(&req.method, &req.canonical_path(), t))
+            .then(|| self.exceptions.select(&req.method, &req.path, t))
             .filter(|s| !s.is_empty());
         let Some(sel) = sel else {
             let (mut j, work) = self.inspect_view(req, &self.view(&self.disabled, None, false));
@@ -2032,6 +2032,24 @@ mod exception_tests {
             let j = s.inspect_stateful(&req, &mut chain, parse_date(AS_OF).unwrap() + i * 1000);
             assert!(!j.banned(), "round {i}: {j:?}");
         }
+    }
+
+    #[test]
+    fn a_path_prefix_applies_only_to_a_plain_raw_path() {
+        let hooks = shield_with(&[entry("hooks-sql", "ignore", "sqli.*", "      path_prefix: /hooks\n      field: { loc: header, name: referer }\n")]);
+        let at = |path: &str| {
+            let mut r = referer_req();
+            r.path = path.into();
+            hooks.inspect(&r).exceptions
+        };
+        assert_eq!(at("/hooks/a"), vec!["hooks-sql".to_string()]);
+        for p in ["/admin/..%2fhooks", "/admin/%252e%252e/hooks", "/hooks;x", "/hooks/./a", "/HOOKS%2F", "/hooks%2Fa", "/admin/../hooks", "/hooks\\a"] {
+            assert!(at(p).is_empty(), "{p}: a /hooks exception applies only when the raw path is plain");
+        }
+        let everywhere = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]);
+        let mut r = referer_req();
+        r.path = "/admin/..%2fhooks".into();
+        assert_eq!(everywhere.inspect(&r).exceptions, vec!["referer-sql".to_string()], "a /-scoped exception still applies");
     }
 
     #[test]
