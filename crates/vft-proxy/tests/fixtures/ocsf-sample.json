@@ -1,0 +1,410 @@
+{
+  "_comment": "Shared by the Rust and TS OCSF encoders; both tests apply every case. metadata.product.version is excluded from the comparison (each side asserts it equals its own package version); this key is ignored.",
+  "cases": [
+    {
+      "name": "enforced Block with a measured confidence",
+      "input": {
+        "method": "POST",
+        "path": "/login",
+        "src_ip": "192.0.2.1",
+        "verdict": "Block",
+        "enforced": true,
+        "construct": "sqli.union-select",
+        "construct_summary": "UNION followed by SELECT",
+        "msg": "UNION followed by SELECT in query parameter id",
+        "score": 100,
+        "ts_ms": 1700000000000,
+        "event_id": "018bcfe5-6800-7abc-8def-0123456789ab",
+        "group_id": "192.0.2.1@1699999990000",
+        "confidence": 92,
+        "attack": [
+          {
+            "tactic_id": "TA0001",
+            "tactic": "Initial Access",
+            "id": "T1190",
+            "name": "Exploit Public-Facing Application"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "class_uid": 4002,
+          "category_uid": 4,
+          "activity_id": 6,
+          "type_uid": 400206,
+          "severity_id": 4,
+          "time": 1700000000000,
+          "metadata": {
+            "version": "1.9.0",
+            "uid": "018bcfe5-6800-7abc-8def-0123456789ab",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            },
+            "correlation_uid": "192.0.2.1@1699999990000"
+          },
+          "src_endpoint": {
+            "ip": "192.0.2.1"
+          },
+          "message": "UNION followed by SELECT in query parameter id",
+          "http_request": {
+            "http_method": "POST",
+            "url": {
+              "path": "/login"
+            }
+          },
+          "action_id": 2,
+          "disposition_id": 2,
+          "firewall_rule": {
+            "uid": "sqli.union-select",
+            "name": "UNION followed by SELECT"
+          }
+        },
+        {
+          "class_uid": 2004,
+          "category_uid": 2,
+          "activity_id": 1,
+          "type_uid": 200401,
+          "severity_id": 4,
+          "time": 1700000000000,
+          "metadata": {
+            "version": "1.9.0",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            },
+            "correlation_uid": "192.0.2.1@1699999990000"
+          },
+          "message": "UNION followed by SELECT in query parameter id",
+          "is_alert": true,
+          "finding_info": {
+            "uid": "018bcfe5-6800-7abc-8def-0123456789ab",
+            "title": "UNION followed by SELECT in query parameter id",
+            "attacks": [
+              {
+                "tactic": {
+                  "uid": "TA0001",
+                  "name": "Initial Access"
+                },
+                "technique": {
+                  "uid": "T1190",
+                  "name": "Exploit Public-Facing Application"
+                }
+              }
+            ]
+          },
+          "attacks": [
+            {
+              "tactic": {
+                "uid": "TA0001",
+                "name": "Initial Access"
+              },
+              "technique": {
+                "uid": "T1190",
+                "name": "Exploit Public-Facing Application"
+              }
+            }
+          ],
+          "evidences": [
+            {
+              "src_endpoint": {
+                "ip": "192.0.2.1"
+              },
+              "http_request": {
+                "http_method": "POST",
+                "url": {
+                  "path": "/login"
+                }
+              }
+            }
+          ],
+          "confidence_score": 92,
+          "confidence_id": 3
+        }
+      ]
+    },
+    {
+      "name": "Allow without a source IP: no src_endpoint, no group, no rule",
+      "input": {
+        "method": "GET",
+        "path": "/products",
+        "src_ip": null,
+        "verdict": "Allow",
+        "enforced": true,
+        "construct": null,
+        "construct_summary": null,
+        "msg": "no evidence",
+        "score": 0,
+        "ts_ms": 1700000001000,
+        "event_id": "018bcfe5-6be8-7abc-8def-0123456789ac",
+        "group_id": null,
+        "confidence": null,
+        "attack": []
+      },
+      "expected": [
+        {
+          "class_uid": 4002,
+          "category_uid": 4,
+          "activity_id": 3,
+          "type_uid": 400203,
+          "severity_id": 1,
+          "time": 1700000001000,
+          "metadata": {
+            "version": "1.9.0",
+            "uid": "018bcfe5-6be8-7abc-8def-0123456789ac",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            }
+          },
+          "message": "no evidence",
+          "http_request": {
+            "http_method": "GET",
+            "url": {
+              "path": "/products"
+            }
+          },
+          "action_id": 1,
+          "disposition_id": 1
+        }
+      ]
+    },
+    {
+      "name": "monitor-only Block (forwarded): Allowed and Logged, the finding still written, a sub-technique",
+      "input": {
+        "method": "GET",
+        "path": "/.git/config",
+        "src_ip": "198.51.100.23",
+        "verdict": "Block",
+        "enforced": false,
+        "construct": "honeypot.decoy-hit",
+        "construct_summary": "canonical path hits a configured decoy",
+        "msg": "hard-block: request hit a honeypot decoy path",
+        "score": 100,
+        "ts_ms": 1700000100000,
+        "event_id": "018bcfe5-8340-7abc-8def-0123456789ad",
+        "group_id": "198.51.100.23@1700000100000",
+        "confidence": null,
+        "attack": [
+          {
+            "tactic_id": "TA0043",
+            "tactic": "Reconnaissance",
+            "id": "T1595.003",
+            "name": "Active Scanning: Wordlist Scanning"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "class_uid": 4002,
+          "category_uid": 4,
+          "activity_id": 3,
+          "type_uid": 400203,
+          "severity_id": 4,
+          "time": 1700000100000,
+          "metadata": {
+            "version": "1.9.0",
+            "uid": "018bcfe5-8340-7abc-8def-0123456789ad",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            },
+            "correlation_uid": "198.51.100.23@1700000100000"
+          },
+          "src_endpoint": {
+            "ip": "198.51.100.23"
+          },
+          "message": "hard-block: request hit a honeypot decoy path",
+          "http_request": {
+            "http_method": "GET",
+            "url": {
+              "path": "/.git/config"
+            }
+          },
+          "action_id": 1,
+          "disposition_id": 17,
+          "firewall_rule": {
+            "uid": "honeypot.decoy-hit",
+            "name": "canonical path hits a configured decoy"
+          }
+        },
+        {
+          "class_uid": 2004,
+          "category_uid": 2,
+          "activity_id": 1,
+          "type_uid": 200401,
+          "severity_id": 4,
+          "time": 1700000100000,
+          "metadata": {
+            "version": "1.9.0",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            },
+            "correlation_uid": "198.51.100.23@1700000100000"
+          },
+          "message": "hard-block: request hit a honeypot decoy path",
+          "is_alert": true,
+          "finding_info": {
+            "uid": "018bcfe5-8340-7abc-8def-0123456789ad",
+            "title": "hard-block: request hit a honeypot decoy path",
+            "attacks": [
+              {
+                "tactic": {
+                  "uid": "TA0043",
+                  "name": "Reconnaissance"
+                },
+                "technique": {
+                  "uid": "T1595",
+                  "name": "Active Scanning"
+                },
+                "sub_technique": {
+                  "uid": "T1595.003",
+                  "name": "Wordlist Scanning"
+                }
+              }
+            ]
+          },
+          "attacks": [
+            {
+              "tactic": {
+                "uid": "TA0043",
+                "name": "Reconnaissance"
+              },
+              "technique": {
+                "uid": "T1595",
+                "name": "Active Scanning"
+              },
+              "sub_technique": {
+                "uid": "T1595.003",
+                "name": "Wordlist Scanning"
+              }
+            }
+          ],
+          "evidences": [
+            {
+              "src_endpoint": {
+                "ip": "198.51.100.23"
+              },
+              "http_request": {
+                "http_method": "GET",
+                "url": {
+                  "path": "/.git/config"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fast-tracked ban: chain.ban is unregistered, so firewall_rule has no name; no group",
+      "input": {
+        "method": "POST",
+        "path": "/login",
+        "src_ip": "203.0.113.9",
+        "verdict": "Block",
+        "enforced": true,
+        "construct": "chain.ban",
+        "construct_summary": null,
+        "msg": "source banned (Exfiltration) until t=1700003600000 ms",
+        "score": 100,
+        "ts_ms": 1700000200000,
+        "event_id": "018bcfe5-9ae0-7abc-8def-0123456789ae",
+        "group_id": null,
+        "confidence": null,
+        "attack": []
+      },
+      "expected": [
+        {
+          "class_uid": 4002,
+          "category_uid": 4,
+          "activity_id": 6,
+          "type_uid": 400206,
+          "severity_id": 4,
+          "time": 1700000200000,
+          "metadata": {
+            "version": "1.9.0",
+            "uid": "018bcfe5-9ae0-7abc-8def-0123456789ae",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            }
+          },
+          "src_endpoint": {
+            "ip": "203.0.113.9"
+          },
+          "message": "source banned (Exfiltration) until t=1700003600000 ms",
+          "http_request": {
+            "http_method": "POST",
+            "url": {
+              "path": "/login"
+            }
+          },
+          "action_id": 2,
+          "disposition_id": 2,
+          "firewall_rule": {
+            "uid": "chain.ban"
+          }
+        },
+        {
+          "class_uid": 2004,
+          "category_uid": 2,
+          "activity_id": 1,
+          "type_uid": 200401,
+          "severity_id": 4,
+          "time": 1700000200000,
+          "metadata": {
+            "version": "1.9.0",
+            "profiles": [
+              "security_control"
+            ],
+            "product": {
+              "name": "Venusflytrap",
+              "vendor_name": "Venusflytrap"
+            }
+          },
+          "message": "source banned (Exfiltration) until t=1700003600000 ms",
+          "is_alert": true,
+          "finding_info": {
+            "uid": "018bcfe5-9ae0-7abc-8def-0123456789ae",
+            "title": "source banned (Exfiltration) until t=1700003600000 ms",
+            "attacks": []
+          },
+          "attacks": [],
+          "evidences": [
+            {
+              "src_endpoint": {
+                "ip": "203.0.113.9"
+              },
+              "http_request": {
+                "http_method": "POST",
+                "url": {
+                  "path": "/login"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

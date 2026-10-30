@@ -6,7 +6,7 @@ import { app } from '../../lib/state/app.svelte';
 import { router } from '../../lib/state/router.svelte';
 import Monitor from '../Monitor.svelte';
 
-// Each test renders a 100-row, 13-column grid in jsdom; give slow machines room.
+// Each test renders a 100-row, 15-column grid in jsdom; give slow machines room.
 vi.setConfig({ testTimeout: 20_000 });
 
 beforeAll(async () => {
@@ -165,4 +165,46 @@ test('auto-refresh pauses while focus is in the grid and offers the new results 
   expect(cell(grid, 0, 0).querySelector('a')!.getAttribute('href')).toBe(firstId); // rows did not move
   await fireEvent.click(screen.getByRole('button', { name: 'Show' }));
   await waitFor(() => expect(cell(screen.getByRole('grid'), 0, 0).querySelector('a')!.getAttribute('href')).not.toBe(firstId));
+});
+
+test('the grid has Technique and Confidence columns right after Construct', async () => {
+  const { grid } = await mount('/monitor?q=construct%3Acmd.chained-command');
+  const heads = within(grid).getAllByRole('columnheader');
+  expect(heads.slice(7, 10).map((h) => h.textContent)).toEqual(['Construct', 'Technique', 'Conf.Confidence']);
+  // The Confidence header shows "Conf."; its accessible name and tooltip keep the full word.
+  const conf = within(grid).getByRole('columnheader', { name: 'Confidence' });
+  expect(conf).toBe(heads[9]);
+  expect(conf.getAttribute('title')).toBe('Precision on dev of the deciding construct');
+  expect(conf.querySelector('[aria-hidden="true"]')!.textContent).toBe('Conf.');
+  const row = grid.querySelector('tbody tr')!;
+  const tech = row.querySelector('td[data-c="8"]')!;
+  // Only the primary technique (row.technique); the construct's other tag (T1059) is in Request details.
+  expect(tech.querySelectorAll('.chip').length).toBe(1);
+  expect(tech.textContent).toContain('T1190');
+  expect(tech.textContent).not.toContain('T1059');
+  expect(tech.querySelector('[title="Initial Access · Exploit Public-Facing Application"]')).toBeTruthy();
+  expect(tech.querySelector('.sr-only')!.textContent).toBe('Initial Access · Exploit Public-Facing Application');
+  expect(row.querySelector('td[data-c="9"]')!.textContent!.trim()).toBe('70');
+});
+
+test('a row with no technique or confidence shows a dash', async () => {
+  const { grid } = await mount('/monitor?q=cause%3ABan');
+  const row = grid.querySelector('tbody tr')!;
+  expect(row.querySelector('td[data-c="8"]')!.textContent!.trim()).toBe('—no technique');
+  expect(row.querySelector('td[data-c="9"]')!.textContent!.trim()).toBe('—not measured');
+});
+
+test('ArrowRight walks Construct, Technique, Confidence, Stage in order', async () => {
+  const { grid } = await mount('/monitor?q=verdict%3Ablock');
+  cell(grid, 0, 7).focus();
+  for (const c of [8, 9, 10]) {
+    await fireEvent.keyDown(grid, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(cell(grid, 0, c));
+  }
+  expect(grid.querySelector('th.c-stage')!.textContent).toBe('Stage');
+});
+
+test('the Time link carries the full stamp as its title', async () => {
+  const { grid } = await mount('/monitor');
+  expect(cell(grid, 0, 0).querySelector('a')!.getAttribute('title')).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{2}:\d{2}:\d{2}$/);
 });

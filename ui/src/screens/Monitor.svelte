@@ -6,6 +6,7 @@
   import EmptyState from '../lib/components/EmptyState.svelte';
   import ErrorCard from '../lib/components/ErrorCard.svelte';
   import StageChip from '../lib/components/StageChip.svelte';
+  import TechniqueCell from '../lib/components/TechniqueCell.svelte';
   import { toasts } from '../lib/components/toasts.svelte';
   import VerdictChip from '../lib/components/VerdictChip.svelte';
   import { fmtClock, fmtCount, fmtStamp } from '../lib/format';
@@ -20,7 +21,8 @@
   let { title }: { title: string } = $props();
   const PAGE = 100;
 
-  interface Col { key: string; label: string; field: Field | null; n?: boolean }
+  /** `short` is the visible header when the full label does not fit; the label stays the accessible name. */
+  interface Col { key: string; label: string; short?: string; field: Field | null; n?: boolean }
   const COLS: Col[] = [
     { key: 'ts', label: 'Time', field: null },
     { key: 'verdict', label: 'Verdict', field: 'verdict' },
@@ -30,12 +32,19 @@
     { key: 'host', label: 'Host', field: 'host' },
     { key: 'path', label: 'Path', field: 'path' },
     { key: 'construct', label: 'Construct', field: 'construct' },
+    { key: 'technique', label: 'Technique', field: null },
+    { key: 'confidence', label: 'Confidence', short: 'Conf.', field: null, n: true },
     { key: 'stage', label: 'Stage', field: 'stage' },
     { key: 'decided', label: 'Decided by', field: null },
     { key: 'rev', label: 'Rev', field: 'config_rev', n: true },
     { key: 'latency', label: 'Latency', field: null, n: true },
     { key: 'upstream', label: 'HTTP', field: null, n: true },
   ];
+  const HEAD_TITLE: Record<string, string | undefined> = {
+    upstream: 'Upstream status',
+    technique: 'MITRE ATT&CK technique of the deciding construct',
+    confidence: 'Precision on dev of the deciding construct',
+  };
   const GROUP_LABEL: Record<GroupBy, string> = { src: 'Source', path: 'Path', construct: 'Construct', stage: 'Stage', verdict: 'Verdict' };
 
   const st = $derived(readState(router.search));
@@ -346,7 +355,7 @@
             {/each}
           </tbody>
         {:else}
-          <thead><tr>{#each COLS as c (c.key)}<th scope="col" class="c-{c.key}" class:n={c.n} title={c.key === 'upstream' ? 'Upstream status' : undefined}>{c.label}</th>{/each}</tr></thead>
+          <thead><tr>{#each COLS as c (c.key)}<th scope="col" class="c-{c.key}" class:n={c.n} title={HEAD_TITLE[c.key]}>{#if c.short}<span aria-hidden="true">{c.short}</span><span class="sr-only">{c.label}</span>{:else}{c.label}{/if}</th>{/each}</tr></thead>
           <tbody>
             {#each rows as row, r (row.id)}
               <tr class:blocked={row.verdict === 'Block'} aria-rowindex={r + 2}>
@@ -362,7 +371,7 @@
                     class="c-{col.key}"
                   >
                     {#if col.key === 'ts'}
-                      <a href={requestHref(row)} tabindex="-1" class="mono clip" onclick={(e) => linkClick(e, () => openRequest(row, c))}>{fmtStamp(row.ts_ms, withDate)}</a>
+                      <a href={requestHref(row)} tabindex="-1" class="mono clip" title={fmtStamp(row.ts_ms, true)} onclick={(e) => linkClick(e, () => openRequest(row, c))}>{fmtStamp(row.ts_ms, withDate)}</a>
                     {:else if col.key === 'verdict'}
                       <VerdictChip verdict={row.verdict} size="sm" />{#if row.sampled}<span class="tag">sampled</span>{/if}
                     {:else if col.key === 'score'}
@@ -377,6 +386,10 @@
                       <span class="mono clip" title={row.path}>{row.path}</span>
                     {:else if col.key === 'construct'}
                       <span class="mono clip" title={row.construct ?? undefined}>{row.construct ?? '—'}</span>
+                    {:else if col.key === 'technique'}
+                      <TechniqueCell technique={row.technique} construct={row.construct} />
+                    {:else if col.key === 'confidence'}
+                      {#if row.confidence === null}<span aria-hidden="true">—</span><span class="sr-only">not measured</span>{:else}<span class="num">{row.confidence}</span>{/if}
                     {:else if col.key === 'stage'}
                       <StageChip stage={row.stage} compact />
                     {:else if col.key === 'decided'}
@@ -425,22 +438,28 @@
   .grid { font-size: var(--vf-fs-sm); table-layout: fixed; }
   .grid th, .grid td { padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .grid th { position: sticky; top: 0; z-index: 1; background: var(--vf-surface-raised); }
-  .grid th.c-ts { width: 7%; }
-  .grid th.c-verdict { width: 13%; }
-  .grid th.c-score { width: 5%; }
-  .grid th.c-src { width: 11%; }
-  .grid th.c-method { width: 6%; }
-  .grid th.c-host { width: 8%; }
-  .grid th.c-path { width: 8%; }
-  .grid th.c-construct { width: 10%; }
-  .grid th.c-stage { width: 7%; }
-  .grid th.c-decided { width: 11%; }
-  .grid th.c-rev { width: 4%; }
+  /* Widths (about 1160 px of grid at 1280 and 1440): every header fits its label; Time and the usual
+     Decided-by key take one line; Path is readable; Technique fits one chip (T1595.003); Confidence shows "Conf.". */
+  .grid th.c-ts { width: 6.5%; }
+  .grid th.c-verdict { width: 9%; }
+  .grid th.c-score { width: 4.7%; }
+  .grid th.c-src { width: 7.5%; }
+  .grid th.c-method { width: 5.7%; }
+  .grid th.c-host { width: 4.8%; }
+  .grid th.c-path { width: 9.7%; }
+  .grid th.c-construct { width: 9%; }
+  .grid th.c-technique { width: 7.7%; }
+  .grid th.c-confidence { width: 4.4%; }
+  .grid th.c-stage { width: 6.5%; }
+  .grid th.c-decided { width: 11.2%; }
+  .grid th.c-rev { width: 3.3%; }
   .grid th.c-latency { width: 6%; }
   .grid th.c-upstream { width: 4%; }
-  .grid.dated th.c-ts { width: 10%; }
-  .grid.dated th.c-path { width: 7%; }
-  .grid.dated th.c-construct { width: 8%; }
+  /* With the date, Time breaks once, between the date and the clock. */
+  .grid.dated th.c-ts { width: 8.5%; }
+  .grid.dated th.c-src { width: 6.5%; }
+  .grid.dated th.c-verdict { width: 8.5%; }
+  .grid.dated th.c-path { width: 9.2%; }
   .grid td.c-verdict { white-space: normal; }
   .srcwrap { display: flex; align-items: center; min-width: 0; }
   .grid td:focus-visible { outline-offset: -2px; box-shadow: none; }

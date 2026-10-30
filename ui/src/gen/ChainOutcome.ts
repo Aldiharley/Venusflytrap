@@ -6,4 +6,9 @@ export type ChainOutcome = { stage_before: Stage | null, stage_after: Stage | nu
 /**
  * True only when the stage strictly increased with this event.
  */
-advanced: boolean, new_ban: BanRecord | null, };
+advanced: boolean, new_ban: BanRecord | null, 
+/**
+ * When this source's current episode began: its first event, or its first
+ * event after a gap longer than the chain window.
+ */
+episode_start_ms: number | null, };

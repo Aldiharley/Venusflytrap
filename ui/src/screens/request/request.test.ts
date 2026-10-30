@@ -1,7 +1,8 @@
-import { render, screen, within } from '@testing-library/svelte';
-import { beforeAll, expect, test } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
+import { beforeAll, expect, test, vi } from 'vitest';
 import { FixtureSource } from '../../lib/api/source';
 import type { RequestDetail } from '../../lib/api/types';
+import { toasts } from '../../lib/components/toasts.svelte';
 import { app } from '../../lib/state/app.svelte';
 import RequestDetails from '../RequestDetails.svelte';
 
@@ -103,4 +104,93 @@ test('an unknown id says the row is gone and links back to Monitor', async () =>
   expect(await screen.findByText('Request not found. Rows older than history.retention_days are removed.')).toBeTruthy();
   expect(screen.getByRole('link', { name: 'Open Monitor' }).getAttribute('href')).toBe('/monitor');
   expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('R0');
+});
+
+const CONFIDENCE_TITLE = "Share of this construct's blocks on the dev split that were attacks (lower 95 % bound). It does not change the score.";
+
+test('the why panel shows one chip per ATT&CK tag with its tactic, and the precision on dev with its explanation', async () => {
+  const d = find((x) => x.judgment.attack.length >= 2 && x.judgment.confidence !== null);
+  const why = await show(d);
+  const header = why.querySelector('header')!;
+  for (const t of d.judgment.attack) {
+    const chip = within(header).getByText(`${t.tactic} · ${t.name}`);
+    expect(chip.closest('.chip')!.textContent).toContain(t.id);
+  }
+  for (const t of d.judgment.attack) expect(within(header).getAllByText(t.tactic).length).toBeGreaterThan(0);
+  expect(header.querySelectorAll('.tag-item').length).toBe(d.judgment.attack.length);
+  const line = within(header).getByText(`Precision on dev: ${d.judgment.confidence}`);
+  expect(line.getAttribute('title')).toBe(CONFIDENCE_TITLE);
+  // The explanation is visible text too, not only a tooltip.
+  const help = within(why).getByText(CONFIDENCE_TITLE, { selector: 'p:not([title])' });
+  expect(help.className).toContain('secondary');
+  expect(help.className).not.toContain('sr-only');
+});
+
+test('a construct with no measured precision says "not measured"; one with no technique shows none', async () => {
+  const d = find((x) => x.judgment.confidence === null && x.judgment.attack.length === 0);
+  const why = await show(d);
+  const line = within(why).getByText('Precision on dev: not measured');
+  expect(line.getAttribute('title')).toBe(CONFIDENCE_TITLE);
+  expect(within(why).getByText(CONFIDENCE_TITLE, { selector: 'p:not([title])' })).toBeTruthy();
+  expect(why.querySelectorAll('.tag-item').length).toBe(0);
+  expect(why.textContent).toContain('No ATT&CK technique');
+});
+
+test('the event ID and the group ID each have a copy button that copies and announces', async () => {
+  const d = find((x) => x.row.group_id !== null);
+  const write = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+  await show(d);
+  const terms = Object.fromEntries(screen.getAllByRole('term').map((t) => [t.textContent, t.nextElementSibling as HTMLElement]));
+  expect(terms['Event ID'].textContent).toContain(d.row.id);
+  expect(terms['Group ID'].textContent).toContain(d.row.group_id!);
+  await fireEvent.click(screen.getByRole('button', { name: 'Copy event ID' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Copy group ID' }));
+  expect(write.mock.calls).toEqual([[d.row.id], [d.row.group_id]]);
+  await vi.waitFor(() => expect(toasts.items.map((t) => t.text)).toEqual(expect.arrayContaining(['Copied event ID.', 'Copied group ID.'])));
+});
+
+test('a request with no group shows a dash, "no group" to screen readers and no group copy button', async () => {
+  const d = find((x) => x.row.group_id === null);
+  await show(d);
+  const dd = screen.getAllByRole('term').find((t) => t.textContent === 'Group ID')!.nextElementSibling as HTMLElement;
+  expect(dd.textContent).toContain('—');
+  expect(within(dd).getByText('no group').className).toContain('sr-only');
+  expect(screen.queryByRole('button', { name: 'Copy group ID' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Copy event ID' })).toBeTruthy();
+});
+
+test('"View as OCSF" is a second tab: the evidence view is selected first, the OCSF records show in a pre', async () => {
+  const d = find((x) => x.row.verdict === 'Block' && x.judgment.decided_by.kind === 'Detection');
+  await show(d);
+  const tabs = screen.getByRole('tablist', { name: 'Request view' });
+  const [evidence, ocsf] = within(tabs).getAllByRole('tab');
+  expect(evidence.getAttribute('aria-selected')).toBe('true');
+  expect(ocsf.textContent).toBe('View as OCSF');
+  expect(screen.queryByRole('tabpanel', { name: 'View as OCSF' })).toBeNull();
+  await fireEvent.click(ocsf);
+  expect(ocsf.getAttribute('aria-selected')).toBe('true');
+  const panel = screen.getByRole('tabpanel', { name: 'View as OCSF' });
+  const pre = panel.querySelector('pre')!;
+  expect(pre.textContent).toContain('"class_uid": 4002');
+  expect(pre.textContent).toContain('"class_uid": 2004');
+  expect(pre.textContent).toContain(`"uid": "${d.row.id}"`);
+  expect(screen.queryByRole('region', { name: 'Contributions' })).toBeNull();
+  await fireEvent.click(evidence);
+  expect(screen.getByRole('region', { name: 'Contributions' })).toBeTruthy();
+});
+
+test('the tabs follow the arrow, Home and End keys', async () => {
+  await show(details[0]);
+  const [evidence, ocsf] = screen.getAllByRole('tab');
+  evidence.focus();
+  await fireEvent.keyDown(evidence, { key: 'ArrowRight' });
+  expect(document.activeElement).toBe(ocsf);
+  expect(ocsf.getAttribute('aria-selected')).toBe('true');
+  await fireEvent.keyDown(ocsf, { key: 'ArrowRight' });
+  expect(document.activeElement).toBe(evidence);
+  await fireEvent.keyDown(evidence, { key: 'End' });
+  expect(document.activeElement).toBe(ocsf);
+  await fireEvent.keyDown(ocsf, { key: 'Home' });
+  expect(document.activeElement).toBe(evidence);
 });

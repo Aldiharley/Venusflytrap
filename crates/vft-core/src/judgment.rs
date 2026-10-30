@@ -153,6 +153,10 @@ pub struct Judgment {
     /// The chain observation applied by `Shield::finalize`.
     pub chain: Option<crate::chain::ChainOutcome>,
     pub normalized_layers: u8,
+    /// ATT&CK techniques of the deciding construct (sub-project A).
+    pub attack: Vec<crate::attack::AttackTag>,
+    /// Measured precision on dev of the deciding construct, 1-100; never affects score or verdict.
+    pub confidence: Option<u8>,
 }
 
 impl Judgment {
@@ -170,7 +174,33 @@ impl Judgment {
             },
             chain: None,
             normalized_layers: 0,
+            attack: Vec::new(),
+            confidence: None,
         }
+    }
+
+    /// Fill `attack` and `confidence` from `decided_by.construct`.
+    ///
+    /// Tags describe the detection that decided the request; a ban keeps the
+    /// tags of the detection that caused it (see `Shield::finalize`).
+    pub fn annotate(self) -> Self {
+        let construct = self.decided_by.construct.clone();
+        self.annotate_as(construct.as_deref())
+    }
+
+    /// Fill `attack` and `confidence` from `construct`, clearing them when it is `None`.
+    pub(crate) fn annotate_as(mut self, construct: Option<&str>) -> Self {
+        match construct {
+            Some(c) => {
+                self.attack = crate::attack::tags_for(c);
+                self.confidence = crate::confidence::confidence(c);
+            }
+            None => {
+                self.attack.clear();
+                self.confidence = None;
+            }
+        }
+        self
     }
 
     /// The source is banned: by this request (`chain.new_ban`) or already (fast-track).
@@ -197,5 +227,18 @@ mod tests {
         j.chain = Some(crate::chain::ChainOutcome { stage_after: Some(Stage::Recon), ..Default::default() });
         assert!(j.banned());
         assert_eq!(j.stage(), Some(Stage::Recon));
+    }
+
+    #[test]
+    fn annotate_follows_the_deciding_construct() {
+        let mut j = Judgment::allow();
+        j.decided_by.construct = Some("honeypot.decoy-hit".into());
+        let j = j.annotate();
+        assert_eq!(j.attack.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T1595.003"]);
+        assert_eq!(j.confidence, crate::confidence::confidence("honeypot.decoy-hit"));
+        let mut k = j.clone();
+        k.decided_by.construct = None;
+        let k = k.annotate();
+        assert!(k.attack.is_empty() && k.confidence.is_none());
     }
 }

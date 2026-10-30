@@ -29,6 +29,8 @@ use vft_core::{Judgment, Shield, Verdict};
 
 pub mod adapt;
 pub mod audit;
+pub mod ids;
+pub mod ocsf;
 pub mod pipeline;
 pub use hyper::http;
 
@@ -100,6 +102,9 @@ pub struct ProxyState {
     pub pipeline: pipeline::Pipeline,
     pub upstream: String,
     pub audit: audit::AuditSink,
+    /// OCSF 1.9.0 records for the same events (off unless `serve --ocsf`).
+    pub ocsf: audit::AuditSink,
+    pub ids: ids::EventIds,
     request_seq: std::sync::atomic::AtomicU64,
     /// If true, Block/Challenge are stopped; otherwise everything is forwarded.
     pub enforce: bool,
@@ -109,7 +114,7 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
-    pub fn new(shield: Shield, upstream: String, audit: audit::AuditSink, enforce: bool) -> Self {
+    pub fn new(shield: Shield, upstream: String, audit: audit::AuditSink, ocsf: audit::AuditSink, enforce: bool) -> Self {
         let limits = shield.config().limits.clone();
         let decision_headers = shield.config().proxy.decision_headers;
         let mut conn = HttpConnector::new();
@@ -119,6 +124,8 @@ impl ProxyState {
             pipeline: pipeline::Pipeline::new(Arc::new(shield)),
             upstream,
             audit,
+            ocsf,
+            ids: ids::EventIds::new(),
             request_seq: std::sync::atomic::AtomicU64::new(0),
             enforce,
             client,
@@ -199,7 +206,12 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     if state.enforce {
         if let Some(d) = state.pipeline.fast_track(&parts, Some(peer.ip()), now_ms()) {
             let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            state.audit.record(&d.request, &d.judgment, now_ms(), id);
+            let ts = now_ms();
+            let eid = state.ids.next(ts);
+            let group = d.group_id();
+            let m = audit::EventMeta { ts_ms: ts, request_id: id, event_id: &eid, group_id: group.as_deref(), enforced: true };
+            state.audit.record(&d.request, &d.judgment, &m);
+            state.ocsf.record(&d.request, &d.judgment, &m);
             return Ok(refusal(d.judgment.verdict));
         }
     }
@@ -224,7 +236,13 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
 
     let decision = state.pipeline.decide(&parts, &collected, Some(peer.ip()), now_ms());
     let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state.audit.record(&decision.request, &decision.judgment, now_ms(), id);
+    let ts = now_ms();
+    let eid = state.ids.next(ts);
+    // One group ID per source key and episode, computed once for both sinks.
+    let group = decision.group_id();
+    let m = audit::EventMeta { ts_ms: ts, request_id: id, event_id: &eid, group_id: group.as_deref(), enforced: state.enforce };
+    state.audit.record(&decision.request, &decision.judgment, &m);
+    state.ocsf.record(&decision.request, &decision.judgment, &m);
     let j = decision.judgment;
 
     if state.enforce && matches!(j.verdict, Verdict::Block | Verdict::Challenge) {
@@ -341,6 +359,7 @@ mod tests {
         ProxyState::new(
             Shield::new(Config::default()),
             "http://127.0.0.1:1".into(),
+            audit::AuditSink::off(),
             audit::AuditSink::off(),
             true,
         )

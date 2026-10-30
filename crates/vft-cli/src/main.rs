@@ -69,6 +69,9 @@ enum Command {
         /// Rotate the audit file to <name>.1 once it reaches this many MiB.
         #[arg(long, default_value_t = 100)]
         audit_max_mb: u64,
+        /// Also write OCSF 1.9.0 JSONL to this file (rotated at --audit-max-mb).
+        #[arg(long)]
+        ocsf: Option<String>,
         /// Only log, don't actually block (observation mode) when set.
         #[arg(long)]
         monitor_only: bool,
@@ -146,6 +149,17 @@ enum ConfigCmd {
     },
 }
 
+/// `--ocsf` must not name the `--audit` file (compared as given): two
+/// writers appending to one file would interleave their formats.
+fn check_ocsf_path(audit: Option<&str>, ocsf: Option<&str>) -> anyhow::Result<()> {
+    match (audit, ocsf) {
+        (Some(a), Some(o)) if a == o => {
+            anyhow::bail!("--ocsf and --audit name the same file ({o}); give the OCSF output its own path")
+        }
+        _ => Ok(()),
+    }
+}
+
 fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Config> {
     Config::load_or_default(path.map(|p| p.as_path())).context("loading config")
 }
@@ -194,18 +208,27 @@ fn main() -> anyhow::Result<()> {
             upstream,
             audit,
             audit_max_mb,
+            ocsf,
             monitor_only,
         } => {
+            check_ocsf_path(audit.as_deref(), ocsf.as_deref())?;
             let cfg = load_config(cli.config.as_ref())?;
             let shield = Shield::new(cfg);
-            let sink = vft_proxy::audit::AuditSink::new(
-                audit.map(std::path::PathBuf::from),
-                audit_max_mb.saturating_mul(1024 * 1024),
-            );
+            let max_bytes = audit_max_mb.saturating_mul(1024 * 1024);
+            let sink = vft_proxy::audit::AuditSink::new(audit.map(std::path::PathBuf::from), max_bytes);
+            let ocsf_sink = match ocsf {
+                Some(p) => vft_proxy::audit::AuditSink::with_format(
+                    Some(std::path::PathBuf::from(p)),
+                    max_bytes,
+                    vft_proxy::audit::Format::Ocsf,
+                ),
+                None => vft_proxy::audit::AuditSink::off(),
+            };
             let state = Arc::new(vft_proxy::ProxyState::new(
                 shield,
                 upstream,
                 sink,
+                ocsf_sink,
                 !monitor_only,
             ));
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -300,4 +323,19 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_ocsf_path;
+
+    #[test]
+    fn ocsf_path_must_differ_from_audit_path() {
+        let err = check_ocsf_path(Some("a.jsonl"), Some("a.jsonl")).unwrap_err().to_string();
+        assert!(err.contains("--ocsf") && err.contains("--audit") && err.contains("a.jsonl"), "{err}");
+        assert!(check_ocsf_path(Some("a.jsonl"), Some("o.jsonl")).is_ok());
+        assert!(check_ocsf_path(None, Some("o.jsonl")).is_ok());
+        assert!(check_ocsf_path(Some("a.jsonl"), None).is_ok());
+        assert!(check_ocsf_path(None, None).is_ok());
+    }
 }

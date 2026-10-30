@@ -24,7 +24,17 @@ struct ContribLine<'a> {
 }
 
 #[derive(Serialize)]
+struct AttackLine<'a> {
+    tactic_id: &'a str,
+    id: &'a str,
+}
+
+#[derive(Serialize)]
 struct AuditLine<'a> {
+    event_id: &'a str,
+    group_id: Option<&'a str>,
+    confidence: Option<u8>,
+    attack: Vec<AttackLine<'a>>,
     ts_ms: u64,
     request_id: u64,
     method: &'a str,
@@ -41,17 +51,53 @@ struct AuditLine<'a> {
     option_key: &'a str,
 }
 
+/// What the proxy knows about one event beyond the request and its judgment;
+/// every sink receives the same values.
+#[derive(Debug, Clone, Copy)]
+pub struct EventMeta<'a> {
+    pub ts_ms: u64,
+    pub request_id: u64,
+    pub event_id: &'a str,
+    /// The episode group ID from the decision's source key (`Decision::group_id`).
+    pub group_id: Option<&'a str>,
+    /// Whether Challenge and Block were enforced (false under `serve --monitor-only`,
+    /// where they are forwarded).
+    pub enforced: bool,
+}
+
+impl<'a> EventMeta<'a> {
+    /// An enforced event without a group ID.
+    pub fn new(ts_ms: u64, request_id: u64, event_id: &'a str) -> Self {
+        EventMeta { ts_ms, request_id, event_id, group_id: None, enforced: true }
+    }
+}
+
+/// What a sink writes per judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// One venusflytrap audit line.
+    Jsonl,
+    /// One line per OCSF 1.9.0 record (`ocsf::encode`).
+    Ocsf,
+}
+
 pub struct AuditSink {
     tx: Option<SyncSender<String>>,
     worker: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
     write_errors: Arc<AtomicU64>,
     enabled: bool,
+    format: Format,
 }
 
 impl AuditSink {
-    /// `None` writes to stdout.
+    /// A JSONL audit sink; `None` writes to stdout.
     pub fn new(path: Option<PathBuf>, max_bytes: u64) -> Self {
+        Self::with_format(path, max_bytes, Format::Jsonl)
+    }
+
+    /// `None` writes to stdout.
+    pub fn with_format(path: Option<PathBuf>, max_bytes: u64, format: Format) -> Self {
         let (tx, rx) = sync_channel::<String>(4096);
         let write_errors = Arc::new(AtomicU64::new(0));
         let errs = write_errors.clone();
@@ -111,6 +157,7 @@ impl AuditSink {
             dropped: Arc::new(AtomicU64::new(0)),
             write_errors,
             enabled: true,
+            format,
         }
     }
 
@@ -122,43 +169,36 @@ impl AuditSink {
             dropped: Arc::new(AtomicU64::new(0)),
             write_errors: Arc::new(AtomicU64::new(0)),
             enabled: false,
+            format: Format::Jsonl,
         }
     }
 
-    pub fn record(&self, req: &Request, j: &Judgment, ts_ms: u64, request_id: u64) {
+    pub fn record(&self, req: &Request, j: &Judgment, m: &EventMeta) {
         let Some(tx) = self.tx.as_ref().filter(|_| self.enabled) else {
             return;
         };
-        let line = AuditLine {
-            ts_ms,
-            request_id,
-            method: &req.method,
-            path: &req.path,
-            src_ip: req.src_ip.map(|i| i.to_string()),
-            verdict: format!("{:?}", j.verdict),
-            score: j.score,
-            stage: j.stage().map(|s| format!("{s:?}")),
-            banned: j.banned(),
-            layers: j.normalized_layers,
-            contributions: j
-                .contributions
-                .iter()
-                .map(|c| ContribLine {
-                    construct: c.construct.as_deref(),
-                    field: c.field.as_ref().map(|f| format!("{:?}:{}", f.loc, f.name)),
-                    value: format!("{:?}", c.value),
-                    points: c.points,
-                    shadow: c.shadow,
-                })
-                .collect(),
-            reason: &j.decided_by.msg,
-            cause: format!("{:?}", j.decided_by.kind),
-            option_key: j.decided_by.option_key,
-        };
-        let Ok(json) = serde_json::to_string(&line) else {
-            return;
-        };
-        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = tx.try_send(json) {
+        match self.format {
+            Format::Jsonl => {
+                if let Some(json) = jsonl_line(req, j, m) {
+                    self.send(tx, json);
+                }
+            }
+            Format::Ocsf => {
+                for rec in crate::ocsf::encode(req, j, m.ts_ms, m.event_id, m.group_id, m.enforced) {
+                    match serde_json::to_string(&rec) {
+                        Ok(json) => self.send(tx, json),
+                        // An encoding failure is a write error on this sink only.
+                        Err(_) => {
+                            self.write_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn send(&self, tx: &SyncSender<String>, line: String) {
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) = tx.try_send(line) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -177,6 +217,45 @@ impl AuditSink {
             let _ = w.join();
         }
     }
+}
+
+/// The JSONL audit line for one judgment; `None` if it does not serialize.
+fn jsonl_line(req: &Request, j: &Judgment, m: &EventMeta) -> Option<String> {
+    let line = AuditLine {
+        event_id: m.event_id,
+        group_id: m.group_id,
+        confidence: j.confidence,
+        attack: j
+            .attack
+            .iter()
+            .map(|a| AttackLine { tactic_id: &a.tactic_id, id: &a.id })
+            .collect(),
+        ts_ms: m.ts_ms,
+        request_id: m.request_id,
+        method: &req.method,
+        path: &req.path,
+        src_ip: req.src_ip.map(|i| i.to_string()),
+        verdict: format!("{:?}", j.verdict),
+        score: j.score,
+        stage: j.stage().map(|s| format!("{s:?}")),
+        banned: j.banned(),
+        layers: j.normalized_layers,
+        contributions: j
+            .contributions
+            .iter()
+            .map(|c| ContribLine {
+                construct: c.construct.as_deref(),
+                field: c.field.as_ref().map(|f| format!("{:?}:{}", f.loc, f.name)),
+                value: format!("{:?}", c.value),
+                points: c.points,
+                shadow: c.shadow,
+            })
+            .collect(),
+        reason: &j.decided_by.msg,
+        cause: format!("{:?}", j.decided_by.kind),
+        option_key: j.decided_by.option_key,
+    };
+    serde_json::to_string(&line).ok()
 }
 
 fn open(p: &std::path::Path) -> Option<File> {
@@ -226,7 +305,7 @@ mod tests {
         let mut req = Request::get("/x");
         req.query.push(("id".into(), "1 union select a".into()));
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1_700_000_000_000, 7);
+        sink.record(&req, &j, &EventMeta::new(1_700_000_000_000, 7, "019000000000-7000-8000-000000000001"));
         sink.close();
         let line = std::fs::read_to_string(&p).unwrap();
         let v: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
@@ -236,7 +315,53 @@ mod tests {
         assert!(v["cause"].is_string() && v["option_key"].is_string(), "{v}");
         assert!(v["contributions"][0]["points"].is_number(), "{v}");
         assert_eq!(v["contributions"][0]["shadow"], false, "{v}");
+        assert_eq!(v["event_id"], "019000000000-7000-8000-000000000001", "{v}");
+        assert!(v.get("confidence").is_some(), "{v}");
+        assert!(v["attack"].is_array(), "{v}");
+        assert!(v.get("group_id").is_some() && v["group_id"].is_null(), "{v}");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ocsf_sink_writes_one_line_per_record() {
+        let p = tmp("ocsf.jsonl");
+        let sink = AuditSink::with_format(Some(p.clone()), 10 * 1024 * 1024, Format::Ocsf);
+        let mut req = Request::get("/x");
+        req.query.push(("id".into(), "1 union select a,b".into()));
+        let mut j = Shield::new(Config::default()).inspect(&req);
+        j.verdict = vft_core::Verdict::Block;
+        sink.record(&req, &j, &EventMeta::new(1_700_000_000_000, 7, "e"));
+        sink.close();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let classes: Vec<u64> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["class_uid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(classes, vec![4002, 2004], "{text}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn both_sinks_write_the_group_id_they_are_given() {
+        let (pj, po) = (tmp("gid.jsonl"), tmp("gid.ocsf.jsonl"));
+        let jsonl = AuditSink::new(Some(pj.clone()), 10 * 1024 * 1024);
+        let ocsf = AuditSink::with_format(Some(po.clone()), 10 * 1024 * 1024, Format::Ocsf);
+        let mut req = Request::get("/x");
+        req.src_ip = Some("2001:db8:1:2::9".parse().unwrap());
+        let j = Shield::new(Config::default()).inspect(&req);
+        let m = EventMeta { group_id: Some("2001:db8:1:2::@5"), ..EventMeta::new(1, 1, "e") };
+        jsonl.record(&req, &j, &m);
+        ocsf.record(&req, &j, &m);
+        jsonl.close();
+        ocsf.close();
+        let line: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&pj).unwrap().trim()).unwrap();
+        assert_eq!(line["group_id"], "2001:db8:1:2::@5", "{line}");
+        // The JSONL line keeps the client address; only the group ID uses the key.
+        assert_eq!(line["src_ip"], "2001:db8:1:2::9", "{line}");
+        let rec: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&po).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(rec["metadata"]["correlation_uid"], "2001:db8:1:2::@5", "{rec}");
+        let _ = std::fs::remove_file(&pj);
+        let _ = std::fs::remove_file(&po);
     }
 
     #[test]
@@ -246,7 +371,7 @@ mod tests {
         let req = Request::get("/rotate");
         let j = Shield::new(Config::default()).inspect(&req);
         for i in 0..20 {
-            sink.record(&req, &j, i, i);
+            sink.record(&req, &j, &EventMeta::new(i, i, "e"));
         }
         sink.close();
         assert!(p.with_extension("1").exists(), "rotated file missing");
@@ -261,7 +386,7 @@ mod tests {
         let sink = AuditSink::off();
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1);
+        sink.record(&req, &j, &EventMeta::new(1, 1, "e"));
         assert_eq!(sink.dropped(), 0);
         assert_eq!(sink.write_errors(), 0);
         sink.close();
@@ -277,7 +402,7 @@ mod tests {
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
         for i in 0..10 {
-            sink.record(&req, &j, i, i);
+            sink.record(&req, &j, &EventMeta::new(i, i, "e"));
         }
         assert_eq!(sink.dropped(), 0);
         let errs = sink.write_errors.clone();
@@ -293,11 +418,11 @@ mod tests {
         let sink = AuditSink::new(Some(p.clone()), 1024 * 1024);
         let req = Request::get("/x");
         let j = Shield::new(Config::default()).inspect(&req);
-        sink.record(&req, &j, 1, 1); // lost: directory missing
+        sink.record(&req, &j, &EventMeta::new(1, 1, "e")); // lost: directory missing
         std::thread::sleep(Duration::from_millis(100));
         std::fs::create_dir_all(&dir).unwrap();
         std::thread::sleep(Duration::from_millis(600)); // let the idle tick retry
-        sink.record(&req, &j, 2, 2);
+        sink.record(&req, &j, &EventMeta::new(2, 2, "e"));
         let errs = sink.write_errors.clone();
         sink.close();
         let text = std::fs::read_to_string(&p).unwrap();

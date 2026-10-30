@@ -44,7 +44,7 @@ async fn stub(respond: bool) -> Stub {
 }
 
 async fn proxy(cfg: Config, upstream: std::net::SocketAddr) -> std::net::SocketAddr {
-    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), true));
+    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), vft_proxy::audit::AuditSink::off(), true));
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(serve_listener(state, l));
@@ -269,7 +269,7 @@ async fn client_that_never_reads_is_dropped_at_max_connection_ms() {
 }
 
 async fn proxy_with_state(cfg: Config, upstream: std::net::SocketAddr) -> (std::net::SocketAddr, Arc<ProxyState>) {
-    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), true));
+    let state = Arc::new(ProxyState::new(Shield::new(cfg), format!("http://{upstream}"), vft_proxy::audit::AuditSink::off(), vft_proxy::audit::AuditSink::off(), true));
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(serve_listener(state.clone(), l));
@@ -369,4 +369,40 @@ async fn challenge_and_block_have_distinct_bodies() {
     assert!(block.starts_with("HTTP/1.1 403"), "{block}");
     assert!(block.ends_with("Request blocked.\n"), "{block}");
     assert_eq!(up.conns.load(Ordering::SeqCst), 0);
+}
+
+/// Final review I1/I2 end to end: under `--monitor-only` a Block is forwarded,
+/// so its HTTP Activity says Allowed and Logged; the Detection Finding is still
+/// written; both carry the group ID of the source key.
+#[tokio::test]
+async fn monitor_only_ocsf_says_allowed_and_logged_for_a_forwarded_block() {
+    use vft_proxy::audit::{AuditSink, Format};
+    let up = stub(true).await;
+    let path = std::env::temp_dir().join(format!("vft-hardening-{}-monitor-only.ocsf.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let ocsf = AuditSink::with_format(Some(path.clone()), 1 << 20, Format::Ocsf);
+    let state = Arc::new(ProxyState::new(Shield::new(short_cfg()), format!("http://{}", up.addr), AuditSink::off(), ocsf, false));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p = l.local_addr().unwrap();
+    tokio::spawn(serve_listener(state.clone(), l));
+    let resp = send(p, b"GET /items?id=1%20union%20select%20password%20from%20users HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "forwarded under monitor-only: {resp}");
+    assert_eq!(up.conns.load(Ordering::SeqCst), 1);
+    // The sink thread flushes on its idle tick.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let recs: Vec<serde_json::Value> = loop {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let recs: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        if recs.len() >= 2 || Instant::now() > deadline {
+            break recs;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(recs.iter().map(|r| r["class_uid"].as_u64().unwrap()).collect::<Vec<_>>(), vec![4002, 2004], "{recs:?}");
+    assert_eq!(recs[0]["severity_id"], 4, "the verdict is still Block: {}", recs[0]);
+    assert_eq!((recs[0]["action_id"].as_u64(), recs[0]["disposition_id"].as_u64()), (Some(1), Some(17)), "{}", recs[0]);
+    let g = recs[0]["metadata"]["correlation_uid"].as_str().expect("group ID");
+    assert!(g.starts_with("127.0.0.1@"), "{g}");
+    assert_eq!(recs[1]["metadata"]["correlation_uid"], g);
 }

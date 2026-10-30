@@ -828,6 +828,7 @@ pub fn run_tcp(cfg: Config, samples: &[Sample], limit: usize) -> anyhow::Result<
             Shield::new(cfg.clone()),
             format!("http://{up_addr}"),
             vft_proxy::audit::AuditSink::off(),
+            vft_proxy::audit::AuditSink::off(),
             true,
         ));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

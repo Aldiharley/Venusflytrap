@@ -1,0 +1,9 @@
+rel,label,lib_verdict,serve_verdict,score,banned,constructs,cause,field,top,shadow,top_field
+a.black,1,Block,,100,false,,Detection:scoring.block_at,,sqli.union-select,,query:id
+b.black,1,Block,,100,false,,Detection:scoring.block_at,,sqli.union-select,,query:id
+c.black,1,Block,,100,false,,Detection:scoring.block_at,,sqli.union-select,,query:id
+d.black,1,Challenge,,75,false,,Detection:scoring.challenge_at,,sqli.union-select,,query:id
+e.white,0,Block,,100,false,,Detection:scoring.block_at,,sqli.union-select,,header:referer
+f.black,1,Block,,100,false,,Detection:scoring.block_at,,xss.script-tag,,query:q
+g.black,1,Allow,,0,false,,NoEvidence:scoring.monitor_at,,,,
+h.white,0,Monitor,,45,false,,Detection:scoring.monitor_at,,cmd.shell-meta,,header:user-agent
