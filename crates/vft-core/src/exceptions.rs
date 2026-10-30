@@ -4,9 +4,6 @@
 //! (they do not score but stay visible as 0-point evidence) and
 //! `skip-inspection` (matching fields are not inspected at all).
 
-// The selection API is consumed by the shield in Task 3; remove this allow then.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::path::Path;
 

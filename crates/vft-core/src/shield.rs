@@ -3,6 +3,7 @@
 
 use crate::chain::{event_for, BanCause, BanRecord, ChainOutcome, ChainTracker, SourceKey};
 use crate::config::Config;
+use crate::exceptions::{ExceptionAction, ExceptionClock, Exceptions, Selection};
 use crate::detect::{
     intent_evidence, AiDetector, AiOracle, ApiSafetyDetector, FieldCtx, FieldDetector,
     GraphTaintDetector, HeuristicOracle, SignatureDetector,
@@ -15,6 +16,9 @@ use crate::lattice::{Evidence, FourValued};
 use crate::normalize::{decode, fold, fold_unless_cut, Decoded, Normalized, Options};
 use crate::request::Request;
 use crate::score::{arbitrate, Scored};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 pub struct Shield {
     cfg: Config,
@@ -29,6 +33,14 @@ pub struct Shield {
     observe: Option<Disabled>,
     /// `shield.shadow`.
     shadow: Disabled,
+    /// `shield.disabled` alone, always set: the observe pass that attributes
+    /// what scoped exceptions removed.
+    base_observe: Disabled,
+    exceptions: Exceptions,
+    clock: ExceptionClock,
+    /// Compute every exception off-set afresh instead of caching it.
+    #[cfg(test)]
+    bypass_off_cache: bool,
 }
 
 impl Shield {
@@ -41,6 +53,7 @@ impl Shield {
         let disabled = Disabled::resolve(&off);
         let shadow = Disabled::resolve(&cfg.shield.shadow);
         let observe = (!cfg.shield.shadow.is_empty()).then(|| Disabled::resolve(&cfg.shield.disabled));
+        let base_observe = Disabled::resolve(&cfg.shield.disabled);
         let norm_opts = Options {
             max_payload: cfg.shield.max_payload,
             decode_cap: cfg.shield.decode_cap,
@@ -64,7 +77,24 @@ impl Shield {
             disabled,
             observe,
             shadow,
+            base_observe,
+            exceptions: Exceptions::default(),
+            clock: ExceptionClock::Fixed,
+            #[cfg(test)]
+            bypass_off_cache: false,
         }
+    }
+
+    /// This shield with scoped exceptions applied; `clock` says when their
+    /// expiry is checked (see [`ExceptionClock`]).
+    pub fn with_exceptions(mut self, ex: Exceptions, clock: ExceptionClock) -> Shield {
+        self.exceptions = ex;
+        self.clock = clock;
+        self
+    }
+
+    pub fn exceptions(&self) -> &Exceptions {
+        &self.exceptions
     }
 
     pub fn intel_mut(&mut self) -> &mut Intel {
@@ -78,34 +108,91 @@ impl Shield {
         &self.intel
     }
 
-    /// Pure, stateless inspection: no chain memory, no clock.
+    /// Pure, stateless inspection: no chain memory; exceptions expire as of
+    /// the exceptions file's `as_of`.
     pub fn inspect(&self, req: &Request) -> Judgment {
-        self.inspect_counting(req).0
+        self.inspect_at(req, self.exceptions.as_of_ms())
     }
 
-    /// [`Shield::inspect`], plus the normalization work it spent (folded chars).
+    /// [`Shield::inspect`] at `now_ms`, which decides which exceptions are live
+    /// under [`ExceptionClock::PerRequest`] (ignored under `Fixed`).
+    pub fn inspect_at(&self, req: &Request, now_ms: u64) -> Judgment {
+        self.inspect_counting_at(req, now_ms).0
+    }
+
+    #[cfg(test)]
+    fn inspect_counting(&self, req: &Request) -> (Judgment, usize) {
+        self.inspect_counting_at(req, self.exceptions.as_of_ms())
+    }
+
+    /// [`Shield::inspect_at`], plus the normalization work it spent (folded chars).
     ///
     /// With `shield.shadow` set, the request is judged with the shadow ids off
     /// (exactly as if they were in `shield.disabled`), then inspected again with
     /// only `shield.disabled` off; the shadow ids that fired in that pass are
     /// appended as `shadow` contributions with 0 points. They never reach the
     /// score, the verdict, `decided_by` or the chain.
-    fn inspect_counting(&self, req: &Request) -> (Judgment, usize) {
-        let (mut j, work) = self.inspect_view(req, &self.disabled);
-        if let Some(full) = &self.observe {
-            let (seen, _) = self.inspect_view(req, full);
-            j.contributions.extend(
-                seen.contributions
-                    .into_iter()
-                    .filter(|c| c.construct.as_deref().is_some_and(|id| self.shadow.has(id)))
-                    .map(|c| Contribution { points: 0.0, shadow: true, ..c }),
-            );
+    ///
+    /// When scoped exceptions apply, each field is judged with its excepted
+    /// constructs off as well (skip-inspection fields not at all), and the
+    /// observe pass also attributes what fired there to the exception that
+    /// removed it: log-only evidence is appended like shadow evidence, ignored
+    /// evidence only names its exception in `exceptions`.
+    fn inspect_counting_at(&self, req: &Request, now_ms: u64) -> (Judgment, usize) {
+        let t = match self.clock {
+            ExceptionClock::Fixed => self.exceptions.as_of_ms(),
+            ExceptionClock::PerRequest => now_ms,
+        };
+        let sel = (!self.exceptions.is_empty())
+            .then(|| self.exceptions.select(&req.method, &req.canonical_path(), t))
+            .filter(|s| !s.is_empty());
+        let Some(sel) = sel else {
+            let (mut j, work) = self.inspect_view(req, &self.view(&self.disabled, None, false));
+            if let Some(full) = &self.observe {
+                let (seen, _) = self.inspect_view(req, &self.view(full, None, false));
+                j.contributions.extend(
+                    seen.contributions
+                        .into_iter()
+                        .filter(|c| c.construct.as_deref().is_some_and(|id| self.shadow.has(id)))
+                        .map(|c| Contribution { points: 0.0, shadow: true, ..c }),
+                );
+            }
+            return (j, work);
+        };
+        let (mut j, work) = self.inspect_view(req, &self.view(&self.disabled, Some(&sel), true));
+        let mut touched: Vec<&str> = j.skipped.iter().filter_map(|f| sel.skip_for(f)).collect();
+        if sel.has_removers() || self.observe.is_some() {
+            let (seen, _) = self.inspect_view(req, &self.view(&self.base_observe, Some(&sel), false));
+            for c in seen.contributions {
+                if c.construct.as_deref().is_some_and(|id| self.shadow.has(id)) {
+                    j.contributions.push(Contribution { points: 0.0, shadow: true, ..c });
+                } else if let Some((id, action)) = sel.attribute(&c) {
+                    touched.push(id);
+                    if action == ExceptionAction::LogOnly {
+                        j.contributions.push(Contribution { points: 0.0, shadow: true, exception: Some(id.into()), ..c });
+                    }
+                }
+            }
         }
+        touched.sort_unstable();
+        touched.dedup();
+        j.exceptions = touched.into_iter().map(String::from).collect();
         (j, work)
     }
 
-    /// One inspection with the constructs in `off` switched off.
-    fn inspect_view(&self, req: &Request, off: &Disabled) -> (Judgment, usize) {
+    fn view<'a>(&self, base: &'a Disabled, sel: Option<&'a Selection<'a>>, remove: bool) -> View<'a> {
+        View {
+            base,
+            sel,
+            remove,
+            cache: RefCell::default(),
+            #[cfg(test)]
+            bypass_cache: self.bypass_off_cache,
+        }
+    }
+
+    /// One inspection with the constructs `view` switches off.
+    fn inspect_view(&self, req: &Request, view: &View<'_>) -> (Judgment, usize) {
         // Intel allow-list short-circuit (still inspect, but never hard-block on
         // intel; allow-list only suppresses the intel deny pin).
         // Lists are keyed by the canonical address (IPv4-mapped IPv6 -> IPv4),
@@ -130,7 +217,11 @@ impl Shield {
         let ai = AiDetector {
             oracle: self.oracle.as_ref(),
         };
-        let gopts = graph::GraphOpts { disabled: off, max_windows: self.cfg.shield.max_graph_windows };
+        // Request-level checks see only field-less exceptions; each field (and
+        // the path) gets its own off-set below.
+        let off = view.off(None);
+        let off: &Disabled = &off;
+        let mut skipped = Vec::new();
 
         // Long fields are inspected in overlapping chunks under a per-request
         // byte budget. A chunk is decoded whole; if its fold is cut, the decoded
@@ -145,6 +236,14 @@ impl Shield {
         let mut budget_hit = false;
         let (fields, body_facts) = req.fields_with(off);
         'fields: for field in fields {
+            let fref = FieldRef::of(&field);
+            if view.skip(&fref).is_some() {
+                // skip-inspection: not normalized, not charged to the budget.
+                skipped.push(fref);
+                continue;
+            }
+            let field_off = view.off(Some(&fref));
+            let gopts = graph::GraphOpts { disabled: &field_off, max_windows: self.cfg.shield.max_graph_windows };
             let ranges = crate::normalize::chunk_ranges(&field.raw, self.cfg.shield.max_payload);
             let mut prev_end = 0usize;
             for range in ranges {
@@ -209,11 +308,19 @@ impl Shield {
         // Also inspect the path itself for traversal/recon structure, through the
         // same routine (a path longer than max_payload is chunked like a field, but
         // not charged to the byte budget).
-        for range in crate::normalize::chunk_ranges(&req.path, self.cfg.shield.max_payload) {
+        let path_ref = FieldRef::path();
+        let path_skipped = view.skip(&path_ref).is_some();
+        let path_off = view.off(Some(&path_ref));
+        let gopts = graph::GraphOpts { disabled: &path_off, max_windows: self.cfg.shield.max_graph_windows };
+        let path_ranges = if path_skipped { Vec::new() } else { crate::normalize::chunk_ranges(&req.path, self.cfg.shield.max_payload) };
+        if path_skipped {
+            skipped.push(path_ref);
+        }
+        for range in path_ranges {
             let (lost, layers) = inspect_pieces(&req.path[range], &self.norm_opts, &mut work, &mut |n| {
                 let analysis = graph::analyze_field(n, &gopts);
                 if analysis.graph_truncated {
-                    self.record_graph_truncated(&mut rec, FieldRef::path(), off);
+                    self.record_graph_truncated(&mut rec, FieldRef::path(), &path_off);
                 }
                 if !analysis.reachable.is_empty() {
                     let e = Evidence::new(
@@ -333,7 +440,7 @@ impl Shield {
             attack: Vec::new(),
             confidence: None,
             exceptions: Vec::new(),
-            skipped: Vec::new(),
+            skipped,
         }
         .annotate();
         (j, work.used)
@@ -475,7 +582,7 @@ impl Shield {
     /// chain observe, finalize. The proxy runs the same steps over a sharded store.
     pub fn inspect_stateful(&self, req: &Request, chain: &mut ChainTracker, now_ms: u64) -> Judgment {
         let Some(ip) = req.src_ip else {
-            return self.inspect(req);
+            return self.inspect_at(req, now_ms);
         };
         let key = SourceKey::new(ip, self.cfg.chain.ipv6_prefix);
         // An allow-listed source is inspected normally and is never banned,
@@ -486,7 +593,7 @@ impl Shield {
                 return self.banned_judgment(&b);
             }
         }
-        let j = self.inspect(req);
+        let j = self.inspect_at(req, now_ms);
         let o = chain.observe(key, event_for(&j), now_ms, may_ban);
         self.finalize(j, &o)
     }
@@ -494,6 +601,61 @@ impl Shield {
 
 fn canonical(ip: std::net::IpAddr) -> std::net::IpAddr {
     SourceKey::new(ip, 128).ip()
+}
+
+/// What one inspection pass switches off: `base`, plus (when `remove`) the
+/// constructs of the selected exceptions that reach each field. Skips apply
+/// whenever a selection is present.
+struct View<'a> {
+    base: &'a Disabled,
+    sel: Option<&'a Selection<'a>>,
+    remove: bool,
+    /// Off-sets by the indexes of the exceptions that built them; most fields
+    /// share one (usually the empty key).
+    cache: RefCell<HashMap<Vec<usize>, Rc<Disabled>>>,
+    #[cfg(test)]
+    bypass_cache: bool,
+}
+
+impl View<'_> {
+    /// The constructs off for field `f` (`None` = the request-level checks).
+    fn off(&self, f: Option<&FieldRef>) -> Off<'_> {
+        let Some(sel) = self.sel.filter(|_| self.remove) else {
+            return Off::Base(self.base);
+        };
+        let key = sel.removers_for(f);
+        #[cfg(test)]
+        if self.bypass_cache {
+            return Off::Scoped(Rc::new(self.base.with_ids(sel.removed_ids(&key))));
+        }
+        if let Some(d) = self.cache.borrow().get(&key) {
+            return Off::Scoped(Rc::clone(d));
+        }
+        let d = Rc::new(self.base.with_ids(sel.removed_ids(&key)));
+        self.cache.borrow_mut().insert(key, Rc::clone(&d));
+        Off::Scoped(d)
+    }
+
+    /// The skip-inspection exception that covers `f`, if any.
+    fn skip(&self, f: &FieldRef) -> Option<&str> {
+        self.sel.and_then(|s| s.skip_for(f))
+    }
+}
+
+/// An off-set from a [`View`]: the shield's own, or one with exceptions added.
+enum Off<'a> {
+    Base(&'a Disabled),
+    Scoped(Rc<Disabled>),
+}
+
+impl std::ops::Deref for Off<'_> {
+    type Target = Disabled;
+    fn deref(&self) -> &Disabled {
+        match self {
+            Off::Base(d) => d,
+            Off::Scoped(d) => d,
+        }
+    }
 }
 
 /// Hard pins found during inspection.
@@ -1753,5 +1915,140 @@ mod tests {
         assert_eq!(j.attack.first().map(|t| t.id.as_str()), Some("T1190"));
         let plain = s.inspect(&Request::get("/"));
         assert!(plain.attack.is_empty() && plain.confidence.is_none());
+    }
+}
+
+#[cfg(test)]
+mod exception_tests {
+    use super::*;
+    use crate::exceptions::{parse_date, ExceptionClock, Exceptions};
+
+    const AS_OF: &str = "2026-10-30";
+
+    fn entry(id: &str, action: &str, constructs: &str, scope: &str) -> String {
+        let cs = if constructs.is_empty() { String::new() } else { format!("    constructs: [{constructs}]\n") };
+        format!("  - id: {id}\n    action: {action}\n{cs}    scope:\n{scope}    owner: o\n    reason: r\n    created: 2026-10-30\n    modified: 2026-10-30\n    expires: 2026-11-30\n")
+    }
+    fn shield_with(entries: &[String]) -> Shield {
+        let y = format!("version: 1\nexceptions:\n{}", entries.concat());
+        let ex = Exceptions::from_yaml_str(&y, parse_date(AS_OF).unwrap()).unwrap();
+        Shield::new(Config::default()).with_exceptions(ex, ExceptionClock::Fixed)
+    }
+    fn referer_req() -> Request {
+        let mut r = Request::get("/search");
+        r.headers.push(("Referer".into(), "https://x.test/?q=1' union select password from users--".into()));
+        r
+    }
+    const REFERER_SCOPE: &str = "      path_prefix: /\n      field: { loc: header, name: referer }\n";
+
+    #[test]
+    fn baseline_flags_the_referer() {
+        let j = Shield::new(Config::default()).inspect(&referer_req());
+        assert!(j.score > 0 && j.contributions.iter().any(|c| c.construct.as_deref().is_some_and(|i| i.starts_with("sqli."))), "{j:?}");
+    }
+
+    #[test]
+    fn empty_exceptions_change_nothing() {
+        let req = referer_req();
+        let a = serde_json::to_value(Shield::new(Config::default()).inspect(&req)).unwrap();
+        let b = serde_json::to_value(shield_with(&[]).inspect(&req)).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn non_matching_scope_changes_nothing() {
+        let req = referer_req();
+        let other = entry("other", "ignore", "sqli.*", "      path_prefix: /admin\n");
+        let a = serde_json::to_value(Shield::new(Config::default()).inspect(&req)).unwrap();
+        let b = serde_json::to_value(shield_with(&[other]).inspect(&req)).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ignore_removes_and_records_only_the_id() {
+        let j = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]).inspect(&referer_req());
+        assert!(!j.contributions.iter().any(|c| c.construct.as_deref().is_some_and(|i| i.starts_with("sqli.")) && c.field.as_ref().is_some_and(|f| f.name.eq_ignore_ascii_case("referer"))), "{j:?}");
+        assert!(j.contributions.iter().all(|c| c.exception.is_none()));
+        assert_eq!(j.exceptions, vec!["referer-sql".to_string()]);
+        assert!(j.score < Shield::new(Config::default()).inspect(&referer_req()).score);
+    }
+
+    #[test]
+    fn log_only_keeps_zero_point_evidence() {
+        let j = shield_with(&[entry("referer-sql", "log-only", "sqli.*", REFERER_SCOPE)]).inspect(&referer_req());
+        let logged: Vec<_> = j.contributions.iter().filter(|c| c.exception.as_deref() == Some("referer-sql")).collect();
+        assert!(!logged.is_empty());
+        assert!(logged.iter().all(|c| c.shadow && c.points == 0.0));
+        assert_eq!(j.exceptions, vec!["referer-sql".to_string()]);
+        let ignored = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]).inspect(&referer_req());
+        assert_eq!((j.score, j.verdict), (ignored.score, ignored.verdict), "the tiers score alike");
+    }
+
+    #[test]
+    fn skip_inspection_drops_the_field_and_records_it() {
+        let j = shield_with(&[entry("skip-ref", "skip-inspection", "", REFERER_SCOPE)]).inspect(&referer_req());
+        assert_eq!(j.skipped, vec![FieldRef { loc: crate::request::Location::Header, name: "Referer".into() }]);
+        assert!(!j.contributions.iter().any(|c| c.field.as_ref().is_some_and(|f| f.name == "Referer")));
+        assert_eq!(j.exceptions, vec!["skip-ref".to_string()]);
+    }
+
+    #[test]
+    fn other_fields_are_still_judged() {
+        let mut req = referer_req();
+        req.query.push(("id".into(), "1 union select password from users".into()));
+        let j = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]).inspect(&req);
+        assert!(j.contributions.iter().any(|c| c.field.as_ref().is_some_and(|f| f.name == "id") && c.construct.as_deref() == Some("sqli.union-select")), "{j:?}");
+    }
+
+    #[test]
+    fn field_less_exception_reaches_request_level_constructs() {
+        let req = Request::get("/.env");
+        assert!(Shield::new(Config::default()).inspect(&req).contributions.iter().any(|c| c.construct.as_deref() == Some("recon.sensitive-path-probe")));
+        let j = shield_with(&[entry("env-probe", "log-only", "recon.*", "      path_prefix: /.env\n")]).inspect(&req);
+        let c = j.contributions.iter().find(|c| c.construct.as_deref() == Some("recon.sensitive-path-probe")).unwrap();
+        assert!(c.shadow && c.points == 0.0 && c.exception.as_deref() == Some("env-probe"));
+    }
+
+    #[test]
+    fn expired_at_request_time_has_no_effect() {
+        let y = format!("version: 1\nexceptions:\n{}", entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE));
+        let ex = Exceptions::from_yaml_str(&y, parse_date(AS_OF).unwrap()).unwrap();
+        let s = Shield::new(Config::default()).with_exceptions(ex, ExceptionClock::PerRequest);
+        let after = s.inspect_at(&referer_req(), parse_date("2026-11-30").unwrap());
+        let base = Shield::new(Config::default()).inspect(&referer_req());
+        assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(base).unwrap());
+        assert_eq!(s.inspect_at(&referer_req(), parse_date("2026-11-29").unwrap()).exceptions, vec!["referer-sql".to_string()]);
+    }
+
+    #[test]
+    fn excepted_false_positive_does_not_feed_a_ban() {
+        use crate::chain::ChainTracker;
+        let cfg = Config::default();
+        let s = shield_with(&[entry("referer-sql", "ignore", "sqli.*", REFERER_SCOPE)]);
+        let mut chain = ChainTracker::new(&cfg.chain);
+        let mut req = referer_req();
+        req.src_ip = Some("192.0.2.7".parse().unwrap());
+        for i in 0..10u64 {
+            let j = s.inspect_stateful(&req, &mut chain, parse_date(AS_OF).unwrap() + i * 1000);
+            assert!(!j.banned(), "round {i}: {j:?}");
+        }
+    }
+
+    #[test]
+    fn cache_gives_the_same_judgment() {
+        let payload = "1' union select password from users--";
+        let mut req = Request::get("/search");
+        for h in ["Referer", "X-Forwarded-Referer", "Referer-Policy"] {
+            req.headers.push((h.into(), payload.into()));
+        }
+        req.query.push(("q".into(), payload.into()));
+        let scope = "      path_prefix: /\n      field: { loc: header, name: referer* }\n";
+        let mut s = shield_with(&[entry("referer-sql", "ignore", "sqli.*", scope)]);
+        let cached = serde_json::to_value(s.inspect(&req)).unwrap();
+        s.bypass_off_cache = true;
+        let uncached = serde_json::to_value(s.inspect(&req)).unwrap();
+        assert_eq!(cached, uncached);
+        assert_eq!(cached["exceptions"], serde_json::json!(["referer-sql"]));
+        assert!(cached["contributions"].as_array().unwrap().iter().any(|c| c["field"]["name"] == "q"), "q is still judged");
     }
 }
