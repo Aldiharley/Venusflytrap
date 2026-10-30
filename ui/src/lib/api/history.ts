@@ -117,16 +117,16 @@ function detection(score: number, a: Attack, construct: string, rnd: () => numbe
   const pts = split(score, n === 1 ? 1 : 2, rnd);
   const value = verdict === 'Monitor' ? 'Suspicious' : 'Dangerous';
   const contributions: Contribution[] = [
-    { engine: a.engine, field: a.field, construct, family: a.family, value, weight: tenth(0.6 + 0.4 * rnd()), points: pts[0], shadow: false },
+    { engine: a.engine, field: a.field, construct, family: a.family, value, weight: tenth(0.6 + 0.4 * rnd()), points: pts[0], shadow: false, exception: null },
   ];
-  if (n >= 2) contributions.push({ engine: 'graph-taint', field: { loc: 'Header', name: 'sec-ch-ua' }, construct: 'cmd.shell-meta', family: 'CommandInjection', value: 'Suspicious', weight: 0.5, points: pts[1], shadow: false });
+  if (n >= 2) contributions.push({ engine: 'graph-taint', field: { loc: 'Header', name: 'sec-ch-ua' }, construct: 'cmd.shell-meta', family: 'CommandInjection', value: 'Suspicious', weight: 0.5, points: pts[1], shadow: false, exception: null });
   if (n >= 3) {
-    contributions.push({ engine: 'ai', field: a.field, construct: 'ai.anomaly-score', family: 'Anomaly', value: 'Suspicious', weight: 0.6, points: 0, shadow: false });
-    contributions.push({ engine: 'api-safety', field: a.field, construct: 'api.type-violation', family: a.family, value: 'Dangerous', weight: 0.7, points: 0, shadow: false });
+    contributions.push({ engine: 'ai', field: a.field, construct: 'ai.anomaly-score', family: 'Anomaly', value: 'Suspicious', weight: 0.6, points: 0, shadow: false, exception: null });
+    contributions.push({ engine: 'api-safety', field: a.field, construct: 'api.type-violation', family: a.family, value: 'Dangerous', weight: 0.7, points: 0, shadow: false, exception: null });
   }
   const shadow = SHADOW[a.family];
   if (shadow && rnd() < 0.45) {
-    contributions.push({ engine: 'graph-taint', field: a.field, construct: shadow, family: a.family, value: 'Suspicious', weight: 0.5, points: 0, shadow: true });
+    contributions.push({ engine: 'graph-taint', field: a.field, construct: shadow, family: a.family, value: 'Suspicious', weight: 0.5, points: 0, shadow: true, exception: null });
   }
   const key = `scoring.${verdict.toLowerCase()}_at`;
   const threshold = BANDS[`${verdict.toLowerCase()}_at` as keyof Bands];
@@ -176,9 +176,9 @@ export function makeHistory(f: Fixtures, now: () => number): History {
       const field = query ? q(query.split('=')[0]) : PATH;
       judgment = {
         verdict: 'Allow', score,
-        contributions: noisy ? [{ engine: 'ai', field, construct: null, family: null, value: 'Suspicious', weight: 0.3, points: score, shadow: false }] : [],
+        contributions: noisy ? [{ engine: 'ai', field, construct: null, family: null, value: 'Suspicious', weight: 0.3, points: score, shadow: false, exception: null }] : [],
         decided_by: { kind: 'NoEvidence', option_key: 'scoring.monitor_at', construct: null, field: null, msg: `score ${score} < scoring.monitor_at ${BANDS.monitor_at}` },
-        chain: null, normalized_layers: query.includes('%') ? 1 : 0, attack: [], confidence: null,
+        chain: null, normalized_layers: query.includes('%') ? 1 : 0, attack: [], confidence: null, exceptions: [], skipped: [],
       };
       if (query) fields = [{ field, raw: query.split('=')[1], decoded: decodeURIComponent(query.split('=')[1]), layers: query.includes('%') ? ['url'] : [] }];
     } else {
@@ -191,9 +191,9 @@ export function makeHistory(f: Fixtures, now: () => number): History {
         ({ method, path } = ATTACKS[construct] ?? ATTACKS['sqli.union-select']);
         judgment = {
           verdict: 'Block', score: 100,
-          contributions: [{ engine: 'chain', field: null, construct: 'chain.ban', family: null, value: 'Dangerous', weight: 1, points: 100, shadow: false }],
+          contributions: [{ engine: 'chain', field: null, construct: 'chain.ban', family: null, value: 'Dangerous', weight: 1, points: 100, shadow: false, exception: null }],
           decided_by: { kind: 'Ban', option_key: BAN_OPTION[ban.cause], construct: 'chain.ban', field: null, msg: `source banned (${ban.cause}) until t=${ban.until_ms} ms` },
-          chain: null, normalized_layers: 0, attack: [], confidence: null,
+          chain: null, normalized_layers: 0, attack: [], confidence: null, exceptions: [], skipped: [],
         };
         fields = [];
       } else if (rnd() < 0.08) {
@@ -201,9 +201,9 @@ export function makeHistory(f: Fixtures, now: () => number): History {
         path = pick(rnd, DECOYS);
         judgment = {
           verdict: 'Block', score: 100,
-          contributions: [{ engine: 'honeypot', field: PATH, construct: 'honeypot.decoy-hit', family: 'Honeypot', value: 'Dangerous', weight: 1, points: 100, shadow: false }],
+          contributions: [{ engine: 'honeypot', field: PATH, construct: 'honeypot.decoy-hit', family: 'Honeypot', value: 'Dangerous', weight: 1, points: 100, shadow: false, exception: null }],
           decided_by: { kind: 'Honeypot', option_key: 'honeypot.decoy_paths', construct: 'honeypot.decoy-hit', field: PATH, msg: 'hard-block: request hit a honeypot decoy path' },
-          chain, normalized_layers: 0, attack: techniquesFor('honeypot.decoy-hit'), confidence: confidenceOf('honeypot.decoy-hit'),
+          chain, normalized_layers: 0, attack: techniquesFor('honeypot.decoy-hit'), confidence: confidenceOf('honeypot.decoy-hit'), exceptions: [], skipped: [],
         };
         fields = [{ field: PATH, raw: path, decoded: path, layers: [] }];
       } else {
@@ -219,7 +219,7 @@ export function makeHistory(f: Fixtures, now: () => number): History {
         const { contributions, decided_by } = detection(score, a, construct, rnd);
         judgment = {
           verdict: bandOf(score), score, contributions, decided_by, chain, normalized_layers: a.layers.length,
-          attack: techniquesFor(construct), confidence: confidenceOf(construct),
+          attack: techniquesFor(construct), confidence: confidenceOf(construct), exceptions: [], skipped: [],
         };
         fields = [{ field: a.field, raw: a.raw, decoded: a.decoded, layers: a.layers }];
       }

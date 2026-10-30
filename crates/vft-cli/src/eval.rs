@@ -1161,6 +1161,7 @@ Host: x
             weight: 1.0,
             points,
             shadow: false,
+            exception: None,
         };
         assert!(top_contribution(&[]).is_none());
         assert!(top_contribution(&[mk("test.zero", "a", 0.0)]).is_none(), "a contribution with no points is never top");

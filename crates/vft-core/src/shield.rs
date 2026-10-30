@@ -332,6 +332,8 @@ impl Shield {
             normalized_layers: max_layers,
             attack: Vec::new(),
             confidence: None,
+            exceptions: Vec::new(),
+            skipped: Vec::new(),
         }
         .annotate();
         (j, work.used)
@@ -456,12 +458,15 @@ impl Shield {
                 weight: 1.0,
                 points: 100.0,
                 shadow: false,
+                exception: None,
             }],
             decided_by: ban_cause(ban, format!("source banned ({:?}) until t={} ms", ban.cause, ban.until_ms)),
             chain: None,
             normalized_layers: 0,
             attack: Vec::new(),
             confidence: None,
+            exceptions: Vec::new(),
+            skipped: Vec::new(),
         }
         .annotate()
     }
@@ -619,6 +624,7 @@ fn chain_contribution(id: &str, points: f32) -> Contribution {
         weight: 1.0,
         points,
         shadow: false,
+        exception: None,
     }
 }
 
@@ -644,6 +650,7 @@ impl Recorder {
                     weight: e.weight,
                     points: 0.0,
                     shadow: false,
+                    exception: None,
                 });
             }
             for p in &e.patterns {
@@ -656,6 +663,7 @@ impl Recorder {
                     weight: e.weight,
                     points: 0.0,
                     shadow: false,
+                    exception: None,
                 });
             }
         }

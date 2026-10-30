@@ -9,7 +9,7 @@ function detail(cause: Partial<Cause>, over: Partial<RequestDetail> = {}, verdic
     row: { id: 'R1', ts_ms: 0, verdict, score, src_key: '203.0.113.7', method: 'GET', host: 'h', path: '/api/items', construct: decided_by.construct, technique: null, confidence: null, group_id: null, stage: null, cause: decided_by.kind, decided_option: decided_by.option_key, config_rev: 12, latency_us: 1, upstream_status: null, sampled: false },
     ip: '203.0.113.7', query: '', bands: BANDS, ban: null, timeline: [], fields: null,
     setting: { key: decided_by.option_key, value: '90', source: 'override', rev: 12 },
-    judgment: { verdict, score, contributions: [], decided_by, chain: null, normalized_layers: 0, attack: [], confidence: null },
+    judgment: { verdict, score, contributions: [], decided_by, chain: null, normalized_layers: 0, attack: [], confidence: null, exceptions: [], skipped: [] },
     ...over,
   };
 }
@@ -44,7 +44,7 @@ test('each other kind reads as its UX sentence', () => {
 });
 
 const c = (points: number, over: Partial<Contribution> = {}): Contribution => ({
-  engine: 'graph-taint', field: null, construct: null, family: null, value: 'Dangerous', weight: 1, points, shadow: false, ...over,
+  engine: 'graph-taint', field: null, construct: null, family: null, value: 'Dangerous', weight: 1, points, shadow: false, exception: null, ...over,
 });
 
 test('contributions sort by points, shadow rows last, and the scored points sum to the score', () => {

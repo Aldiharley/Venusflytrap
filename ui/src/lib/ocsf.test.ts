@@ -30,7 +30,7 @@ function detailFrom(i: Input, over: { verdict?: Verdict; src_ip?: string; confid
     judgment: {
       verdict, score: i.score, contributions: [],
       decided_by: { kind: 'Detection', option_key: 'scoring.block_at', field: null, construct: i.construct, msg: i.msg },
-      chain: null, normalized_layers: 0, attack: i.attack, confidence,
+      chain: null, normalized_layers: 0, attack: i.attack, confidence, exceptions: [], skipped: [],
     },
     bands: { monitor_at: 40, challenge_at: 70, block_at: 90 },
     setting: { key: 'scoring.block_at', value: '90', source: 'Override', rev: 1 },

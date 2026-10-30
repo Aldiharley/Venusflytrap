@@ -22,4 +22,8 @@ points: number,
  * it were disabled. Always 0 points; ignored by the score, the verdict,
  * `decided_by` and the kill chain.
  */
-shadow: boolean, };
+shadow: boolean, 
+/**
+ * The log-only exception that suppressed this contribution (then `shadow` is true and points 0).
+ */
+exception: string | null, };

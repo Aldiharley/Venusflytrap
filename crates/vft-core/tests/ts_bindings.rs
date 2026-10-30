@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
 use vft_core::chain::{BanCause, BanRecord, ChainOutcome};
+use vft_core::exceptions::{ExceptionAction, ExceptionEntry, ExceptionScope, ExceptionsFile, FieldLoc, FieldMatch};
 use vft_core::options::{Apply, Expertise, OptionDescriptor, OptionKind, Source};
 use vft_core::{AttackTag, Cause, CauseKind, Contribution, Family, FieldRef, FourValued, Judgment, Location, Stage, Verdict};
 
@@ -51,5 +52,11 @@ fn generated_types_are_current() {
     check::<Expertise>(&cfg, &mut stale);
     check::<Apply>(&cfg, &mut stale);
     check::<Source>(&cfg, &mut stale);
+    check::<ExceptionAction>(&cfg, &mut stale);
+    check::<FieldLoc>(&cfg, &mut stale);
+    check::<FieldMatch>(&cfg, &mut stale);
+    check::<ExceptionScope>(&cfg, &mut stale);
+    check::<ExceptionEntry>(&cfg, &mut stale);
+    check::<ExceptionsFile>(&cfg, &mut stale);
     assert!(stale.is_empty(), "stale bindings in ui/src/gen (re-run with VFT_BLESS_TS=1): {stale:?}");
 }

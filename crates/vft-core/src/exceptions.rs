@@ -578,7 +578,7 @@ mod tests {
         assert!(sel.removers_for(None).is_empty(), "a field-scoped exception never reaches request-level constructs");
         let c = |id: &str, f: FieldRef| Contribution {
             engine: "graph-taint", field: Some(f), construct: Some(id.into()), family: None,
-            value: crate::lattice::FourValued::Dangerous, weight: 1.0, points: 0.0, shadow: false,
+            value: crate::lattice::FourValued::Dangerous, weight: 1.0, points: 0.0, shadow: false, exception: None,
         };
         assert_eq!(sel.attribute(&c("sqli.union-select", referer.clone())), Some(("referer-sql", ExceptionAction::Ignore)));
         assert_eq!(sel.attribute(&c("xss.script-tag", referer)), None);

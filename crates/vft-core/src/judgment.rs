@@ -113,6 +113,8 @@ pub struct Contribution {
     /// it were disabled. Always 0 points; ignored by the score, the verdict,
     /// `decided_by` and the kill chain.
     pub shadow: bool,
+    /// The log-only exception that suppressed this contribution (then `shadow` is true and points 0).
+    pub exception: Option<String>,
 }
 
 /// What kind of thing decided a judgment.
@@ -157,6 +159,10 @@ pub struct Judgment {
     pub attack: Vec<crate::attack::AttackTag>,
     /// Measured precision on dev of the deciding construct, 1-100; never affects score or verdict.
     pub confidence: Option<u8>,
+    /// Ids of the exceptions that removed a construct or skipped a field on this request (sorted, unique).
+    pub exceptions: Vec<String>,
+    /// Fields a skip-inspection exception kept from inspection.
+    pub skipped: Vec<FieldRef>,
 }
 
 impl Judgment {
@@ -176,6 +182,8 @@ impl Judgment {
             normalized_layers: 0,
             attack: Vec::new(),
             confidence: None,
+            exceptions: Vec::new(),
+            skipped: Vec::new(),
         }
     }
 
@@ -217,6 +225,13 @@ impl Judgment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_fields_serialize_empty_by_default() {
+        let v = serde_json::to_value(Judgment::allow()).unwrap();
+        assert_eq!(v["exceptions"], serde_json::json!([]));
+        assert_eq!(v["skipped"], serde_json::json!([]));
+    }
 
     #[test]
     fn helpers_read_cause_and_chain() {
