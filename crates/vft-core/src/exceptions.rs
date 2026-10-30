@@ -349,8 +349,17 @@ pub fn validate_entry(e: &ExceptionEntry, as_of_ms: u64) -> Vec<Issue> {
         ExceptionAction::Ignore | ExceptionAction::LogOnly => {
             if e.constructs.is_empty() {
                 v.push(issue(id, "constructs-missing", "constructs is required"));
-            } else if let Err(is) = expand_constructs(&e.constructs) {
-                v.extend(is.into_iter().map(|i| Issue { id: Some(e.id.clone()), ..i }));
+            } else {
+                match expand_constructs(&e.constructs) {
+                    Err(is) => v.extend(is.into_iter().map(|i| Issue { id: Some(e.id.clone()), ..i })),
+                    // Request-level constructs are reached only by field-less exceptions.
+                    Ok(ids) if e.scope.field.is_some() && ids.iter().all(|c| REQUEST_LEVEL.contains(c)) => v.push(issue(
+                        id,
+                        "field-unreachable",
+                        format!("constructs {} are request-level; remove scope.field so the exception can apply", ids.join(", ")),
+                    )),
+                    Ok(_) => {}
+                }
             }
         }
     }
@@ -570,6 +579,17 @@ mod tests {
         assert!(ids.contains(&"sqli.union-select") && ids.contains(&"sig.classic-or") && ids.contains(&"api.type-violation"));
         assert!(!ids.iter().any(|i| i.starts_with("limit.") || i.starts_with("decode.")));
         assert_eq!(expand_constructs(&["intel.*".into()]).unwrap(), vec!["intel.scanner-ua"]);
+    }
+
+    #[test]
+    fn a_field_cannot_reach_request_level_constructs() {
+        let as_of = parse_date(AS_OF).unwrap();
+        let f = ExceptionsFile::parse(&yaml(&REFERER.replace("[sqli.*]", "[recon.*, intel.scanner-ua]"))).unwrap();
+        let is = validate_file(&f, as_of);
+        assert_eq!(is.iter().map(|i| i.code).collect::<Vec<_>>(), ["field-unreachable"]);
+        assert_eq!(is[0].to_string(), "referer-sql: constructs intel.scanner-ua, recon.sensitive-path-probe are request-level; remove scope.field so the exception can apply");
+        let mixed = ExceptionsFile::parse(&yaml(&REFERER.replace("[sqli.*]", "[recon.*, sqli.union-select]"))).unwrap();
+        assert!(validate_file(&mixed, as_of).is_empty(), "one field construct makes the field reachable");
     }
 
     #[test]

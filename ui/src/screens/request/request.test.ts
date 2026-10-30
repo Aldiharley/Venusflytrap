@@ -1,12 +1,12 @@
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { beforeAll, expect, test, vi } from 'vitest';
-import { formatDate, toYaml } from '../../lib/exceptions';
+import { formatDate, toYaml, validateEntry } from '../../lib/exceptions';
 import { FixtureSource } from '../../lib/api/source';
 import type { RequestDetail } from '../../lib/api/types';
 import { toasts } from '../../lib/components/toasts.svelte';
 import { app } from '../../lib/state/app.svelte';
 import RequestDetails from '../RequestDetails.svelte';
-import { prefillException } from './exception-form';
+import { prefillException, slotOf } from './exception-form';
 
 const call = () => ({ signal: new AbortController().signal });
 let details: RequestDetail[] = [];
@@ -304,6 +304,19 @@ test('the pre-fill follows the deciding construct, the path and the request', as
   expect(none.id).toBe('exception');
   expect(none.constructs).toEqual([]);
   expect(none.scope.field).toBeNull();
+});
+
+test('a request decided by a request-level construct pre-fills no field, so the exception can apply', () => {
+  const now = Date.UTC(2026, 9, 30, 12);
+  const hp = find((x) => x.judgment.decided_by.construct === 'honeypot.decoy-hit');
+  const recon = { ...hp, judgment: { ...hp.judgment, decided_by: { ...hp.judgment.decided_by, construct: 'recon.sensitive-path-probe', field: { loc: 'Path' as const, name: '<path>' } } } };
+  for (const d of [hp, recon]) {
+    const e = prefillException(d, now);
+    expect(e.constructs).toEqual([d.judgment.decided_by.construct]);
+    expect(e.scope.field).toBeNull();
+    expect(validateEntry({ ...e, owner: 'o', reason: 'r' }, now)).toEqual([]);
+  }
+  expect(slotOf({ code: 'field-unreachable', msg: '' })).toBe('field');
 });
 
 const open = async (d: RequestDetail) => {

@@ -67,6 +67,8 @@ const FAMILY_WILDCARDS = new Map<string, string>([
   ['recon', 'Recon'], ['honeypot', 'Honeypot'], ['intel', 'Intel'], ['anomaly', 'Anomaly'],
 ]);
 const DENY_LISTED = 'intel.deny-listed';
+/** Judged and attributed against exceptions with no `field` only (`REQUEST_LEVEL` in the Rust module). */
+export const REQUEST_LEVEL: readonly string[] = ['recon.sensitive-path-probe', 'honeypot.decoy-hit', 'intel.scanner-ua'];
 
 export interface Issue { code: string; msg: string }
 
@@ -140,7 +142,12 @@ export function validateEntry(e: ExceptionEntry, asOfMs: number): Issue[] {
   } else if (e.constructs.length === 0) {
     bad('constructs-missing', 'constructs is required');
   } else {
-    v.push(...expand(e.constructs).issues);
+    const { ids, issues } = expand(e.constructs);
+    v.push(...issues);
+    // Request-level constructs are reached only by field-less exceptions.
+    if (issues.length === 0 && f !== null && ids.every((c) => REQUEST_LEVEL.includes(c))) {
+      bad('field-unreachable', `constructs ${ids.join(', ')} are request-level; remove scope.field so the exception can apply`);
+    }
   }
   return v;
 }

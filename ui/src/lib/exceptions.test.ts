@@ -23,7 +23,7 @@ function apply(patch: Json): ExceptionEntry {
 const asOf = parseDate(shared.as_of)!;
 
 test("the shared cases give the Rust validator's codes", () => {
-  expect(shared.cases.length).toBe(31);
+  expect(shared.cases.length).toBe(35);
   for (const c of shared.cases) {
     const got = [...new Set(validateEntry(apply(c.patch as Json), asOf).map((i) => i.code))].sort();
     expect(got, `case ${c.name}`).toEqual(c.codes);
@@ -36,6 +36,11 @@ test('every issue has a message', () => {
   for (const i of issues) expect(i.msg.length).toBeGreaterThan(0);
   expect(issues.find((i) => i.code === 'expired')!.msg).toBe('expired on 2026-10-30 (as of 2026-10-30)');
   expect(issues.find((i) => i.code === 'unknown-construct')!.msg).toBe('unknown construct id "sqli.nope"');
+});
+
+test('a field-scoped exception of request-level constructs says how to make it apply', () => {
+  const issues = validateEntry(apply({ constructs: ['recon.*', 'intel.scanner-ua'] }), asOf);
+  expect(issues).toEqual([{ code: 'field-unreachable', msg: 'constructs intel.scanner-ua, recon.sensitive-path-probe are request-level; remove scope.field so the exception can apply' }]);
 });
 
 test('dates: bounds, leap years and the 1970 floor', () => {

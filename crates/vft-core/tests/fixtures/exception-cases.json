@@ -34,10 +34,14 @@
     { "name": "ban is forbidden", "patch": { "constructs": ["chain.ban"] }, "codes": ["forbidden-target"] },
     { "name": "decoder is not a detection", "patch": { "constructs": ["decode.entity"] }, "codes": ["not-a-detection"] },
     { "name": "gate is not a detection", "patch": { "constructs": ["gate.cmd-position"] }, "codes": ["not-a-detection"] },
-    { "name": "intel wildcard drops the deny list", "patch": { "constructs": ["intel.*"] }, "codes": [] },
+    { "name": "intel wildcard drops the deny list", "patch": { "constructs": ["intel.*"], "scope": { "field": null } }, "codes": [] },
     { "name": "constructs missing", "patch": { "constructs": [] }, "codes": ["constructs-missing"] },
     { "name": "constructs on skip", "patch": { "action": "skip-inspection" }, "codes": ["constructs-on-skip"] },
     { "name": "skip needs a field", "patch": { "action": "skip-inspection", "constructs": [], "scope": { "field": null } }, "codes": ["skip-needs-field"] },
-    { "name": "skip with a glob", "patch": { "action": "skip-inspection", "constructs": [], "scope": { "field": { "loc": "header", "name": "x-*" } } }, "codes": ["skip-wildcard"] }
+    { "name": "skip with a glob", "patch": { "action": "skip-inspection", "constructs": [], "scope": { "field": { "loc": "header", "name": "x-*" } } }, "codes": ["skip-wildcard"] },
+    { "name": "request-level constructs with a field", "patch": { "constructs": ["recon.*"] }, "codes": ["field-unreachable"] },
+    { "name": "every request-level family with a field", "patch": { "action": "log-only", "constructs": ["recon.*", "honeypot.decoy-hit", "intel.*"] }, "codes": ["field-unreachable"] },
+    { "name": "request-level constructs without a field", "patch": { "constructs": ["recon.*"], "scope": { "field": null } }, "codes": [] },
+    { "name": "request-level and field constructs with a field", "patch": { "constructs": ["recon.sensitive-path-probe", "sqli.union-select"] }, "codes": [] }
   ]
 }

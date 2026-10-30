@@ -1,7 +1,7 @@
 // The "Create exception" form of Request details as pure functions: the pre-fill from one request, the
 // text-to-entry parsing, and which input each validation issue belongs to.
 import type { ExceptionEntry, FieldLoc, RequestDetail } from '../../lib/api/types';
-import { formatDate, type Issue } from '../../lib/exceptions';
+import { REQUEST_LEVEL, formatDate, type Issue } from '../../lib/exceptions';
 
 const DAY_MS = 86_400_000;
 export const DEFAULT_LIFETIME_DAYS = 30;
@@ -14,9 +14,13 @@ export function suggestId(construct: string | null, path: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 64);
 }
 
-/** A log-only exception for what decided this request, scoped to its method, path and field, expiring in 30 days. */
+/**
+ * A log-only exception for what decided this request, scoped to its method, path and field, expiring in 30 days.
+ * A request-level construct (recon, honeypot, scanner user agent) gets no field: only field-less exceptions reach it.
+ */
 export function prefillException(d: RequestDetail, nowMs: number): ExceptionEntry {
-  const { construct, field } = d.judgment.decided_by;
+  const { construct } = d.judgment.decided_by;
+  const field = construct !== null && REQUEST_LEVEL.includes(construct) ? null : d.judgment.decided_by.field;
   const today = formatDate(nowMs);
   return {
     id: suggestId(construct, d.row.path),
@@ -49,7 +53,7 @@ export function slotOf(i: Issue): Slot {
     case 'date': return i.msg.startsWith('expires') ? 'expires' : 'form';
     case 'method': return 'methods';
     case 'path-prefix': return 'path';
-    case 'field-name': case 'skip-needs-field': case 'skip-wildcard': return 'field';
+    case 'field-name': case 'skip-needs-field': case 'skip-wildcard': case 'field-unreachable': return 'field';
     case 'constructs-missing': case 'constructs-on-skip': case 'unknown-construct': case 'forbidden-target':
     case 'not-a-detection': case 'empty-wildcard': return 'constructs';
     default: return 'form';
