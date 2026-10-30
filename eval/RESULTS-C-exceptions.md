@@ -79,8 +79,10 @@ same binary on both sides.
 
 - McNemar (exact, two-sided) on malicious rows: b = 1 blocked only without the file, c = 0, p = 1.
 - McNemar on benign rows: b = 43, c = 0, p = 2.274e-13.
-- The recall and FP-rate intervals overlap (Wilson 95 %, each run's own interval, taken from the JSON
-  reports). The FP-rate change is not noise: all 43 flipped benign rows changed in the same direction.
+- The test for the change is the paired McNemar test above, not the overlap of the two runs' intervals
+  (the Wilson 95 % intervals in the table are each run's own, from the JSON reports). All 43 benign rows
+  that changed went from false positive to not, and none went the other way, so the FP-rate change is
+  not noise. The one lost true positive is a single row.
 
 ## Referer exception: held-out, scored once per side
 
