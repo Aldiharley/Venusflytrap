@@ -29,6 +29,7 @@ use vft_core::{Judgment, Shield, Verdict};
 
 pub mod adapt;
 pub mod audit;
+pub mod config_handle;
 pub mod ids;
 pub mod ocsf;
 pub mod pipeline;
@@ -114,14 +115,29 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
+    /// A proxy over a fixed shield (a fresh handle at rev 1).
     pub fn new(shield: Shield, upstream: String, audit: audit::AuditSink, ocsf: audit::AuditSink, enforce: bool) -> Self {
-        let limits = shield.config().limits.clone();
-        let decision_headers = shield.config().proxy.decision_headers;
+        let handle = Arc::new(config_handle::ConfigHandle::new(Arc::new(shield)));
+        Self::with_handle(handle, upstream, audit, ocsf, enforce)
+    }
+
+    /// A proxy that follows `handle`. Limits and decision headers are
+    /// restart-only, so they are read once from its current config.
+    pub fn with_handle(
+        handle: Arc<config_handle::ConfigHandle>,
+        upstream: String,
+        audit: audit::AuditSink,
+        ocsf: audit::AuditSink,
+        enforce: bool,
+    ) -> Self {
+        let first = handle.load();
+        let limits = first.shield.config().limits.clone();
+        let decision_headers = first.shield.config().proxy.decision_headers;
         let mut conn = HttpConnector::new();
         conn.set_connect_timeout(Some(Duration::from_millis(limits.upstream_connect_timeout_ms)));
         let client = Client::builder(TokioExecutor::new()).build(conn);
         ProxyState {
-            pipeline: pipeline::Pipeline::new(Arc::new(shield)),
+            pipeline: pipeline::Pipeline::with_handle(handle),
             upstream,
             audit,
             ocsf,

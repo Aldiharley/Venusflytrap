@@ -17,6 +17,7 @@ hyper-util = { version = "0.1.10", features = ["tokio", "server", "client", "cli
 http-body-util = "0.1.2"
 tokio = { version = "1.41.0", features = ["rt-multi-thread", "net", "macros", "sync", "io-util", "time"] }
 bytes = "1.8.0"
+arc-swap = "=1.9.2"
 
 [dev-dependencies]
 tokio = { version = "1.41.0", features = ["rt-multi-thread", "net", "macros", "sync", "io-util", "time"] }

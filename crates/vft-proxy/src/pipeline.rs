@@ -2,7 +2,9 @@
 //! client address → allow-list → ban fast-track → adapt → pure inspect (no
 //! lock) → sharded chain observe → finalize. No lock is held during inspection
 //! (H3). The handler runs the fast-track alone ([`Pipeline::fast_track`])
-//! before reading the body.
+//! before reading the body. Each call loads the [`ConfigHandle`] once and
+//! uses that one shield throughout; the chain store and trusted proxies are
+//! restart-only and fixed at construction.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -18,6 +20,7 @@ use vft_core::{
 };
 
 use crate::adapt;
+use crate::config_handle::{ConfigHandle, Loaded};
 
 const SHARDS: usize = 64;
 
@@ -25,6 +28,8 @@ const SHARDS: usize = 64;
 /// Only a single shard is locked, and only for the duration of one chain call.
 pub struct ChainStore {
     shards: Vec<Mutex<ChainTracker>>,
+    /// `chain.ipv6_prefix` the store was built with (restart-only).
+    ipv6_prefix: u8,
 }
 
 impl ChainStore {
@@ -32,7 +37,10 @@ impl ChainStore {
         let mut per = cfg.clone();
         per.max_sources = (cfg.max_sources / SHARDS).max(1);
         per.ban_policy.max_bans = (cfg.ban_policy.max_bans / SHARDS).max(1);
-        ChainStore { shards: (0..SHARDS).map(|_| Mutex::new(ChainTracker::new(&per))).collect() }
+        ChainStore {
+            shards: (0..SHARDS).map(|_| Mutex::new(ChainTracker::new(&per))).collect(),
+            ipv6_prefix: cfg.ipv6_prefix,
+        }
     }
 
     fn shard(&self, key: &SourceKey) -> MutexGuard<'_, ChainTracker> {
@@ -71,6 +79,8 @@ pub struct Decision {
     pub request: VftRequest,
     pub judgment: Judgment,
     pub src: Option<SourceKey>,
+    /// Revision of the config that decided it ([`Loaded::rev`]).
+    pub config_rev: u64,
 }
 
 impl Decision {
@@ -83,7 +93,7 @@ impl Decision {
 }
 
 pub struct Pipeline {
-    shield: Arc<Shield>,
+    handle: Arc<ConfigHandle>,
     chain: ChainStore,
     trusted: Vec<IpAddr>,
 }
@@ -101,8 +111,16 @@ fn parse_hop(hop: &str) -> Option<IpAddr> {
 }
 
 impl Pipeline {
+    /// A pipeline over a fixed shield (a fresh handle at rev 1).
     pub fn new(shield: Arc<Shield>) -> Self {
-        let cfg = shield.config();
+        Self::with_handle(Arc::new(ConfigHandle::new(shield)))
+    }
+
+    /// A pipeline that follows `handle`; restart-only settings (trusted
+    /// proxies, the chain store) come from its current config.
+    pub fn with_handle(handle: Arc<ConfigHandle>) -> Self {
+        let first = handle.load();
+        let cfg = first.shield.config();
         let trusted = cfg
             .proxy
             .trusted_proxies
@@ -111,11 +129,12 @@ impl Pipeline {
             .map(canonical)
             .collect();
         let chain = ChainStore::new(&cfg.chain);
-        Pipeline { shield, chain, trusted }
+        Pipeline { handle, chain, trusted }
     }
 
-    pub fn shield(&self) -> &Shield {
-        &self.shield
+    /// The config requests are decided with now.
+    pub fn current(&self) -> Arc<Loaded> {
+        self.handle.load()
     }
 
     pub fn chain(&self) -> &ChainStore {
@@ -147,24 +166,25 @@ impl Pipeline {
         peer
     }
 
-    /// The chain key and ban eligibility of the client behind `peer`.
-    fn source(&self, peer: IpAddr, headers: &HeaderMap) -> Source {
+    /// The chain key and ban eligibility of the client behind `peer`; the
+    /// allow-list is `shield`'s (live), the key prefix the chain store's.
+    fn source(&self, shield: &Shield, peer: IpAddr, headers: &HeaderMap) -> Source {
         let ip = self.client_ip(peer, headers);
         Source {
             ip,
-            key: SourceKey::new(ip, self.shield.config().chain.ipv6_prefix),
+            key: SourceKey::new(ip, self.chain.ipv6_prefix),
             // An allow-listed source (checked on its canonical address) is
             // inspected normally and is never banned, so a ban on its address
             // or shared prefix cannot block it.
-            may_ban: !self.shield.intel().is_allowed(&canonical(ip)),
+            may_ban: !shield.intel().is_allowed(&canonical(ip)),
         }
     }
 
-    fn banned(&self, src: &Source, now_ms: u64) -> Option<Judgment> {
+    fn banned(&self, shield: &Shield, src: &Source, now_ms: u64) -> Option<Judgment> {
         if !src.may_ban {
             return None;
         }
-        self.chain.active_ban(src.key, now_ms).map(|ban| self.shield.banned_judgment(&ban))
+        self.chain.active_ban(src.key, now_ms).map(|ban| shield.banned_judgment(&ban))
     }
 
     /// Spec §5.3 step 3: the ban fast-track from the request head alone, so
@@ -174,27 +194,31 @@ impl Pipeline {
     ///
     /// [`decide`]: Pipeline::decide
     pub fn fast_track(&self, parts: &Parts, peer: Option<IpAddr>, now_ms: u64) -> Option<Decision> {
-        let src = self.source(peer?, &parts.headers);
-        let judgment = self.banned(&src, now_ms)?;
+        let peer = peer?;
+        let cur = self.handle.load();
+        let src = self.source(&cur.shield, peer, &parts.headers);
+        let judgment = self.banned(&cur.shield, &src, now_ms)?;
         let request = adapt::from_parts(parts, b"", Some(src.ip));
-        Some(Decision { request, judgment, src: Some(src.key) })
+        Some(Decision { request, judgment, src: Some(src.key), config_rev: cur.rev })
     }
 
     pub fn decide(&self, parts: &Parts, body: &[u8], peer: Option<IpAddr>, now_ms: u64) -> Decision {
+        let cur = self.handle.load();
+        let (shield, config_rev) = (&cur.shield, cur.rev);
         let Some(peer) = peer else {
             let request = adapt::from_parts(parts, body, None);
-            let judgment = self.shield.inspect_at(&request, now_ms);
-            return Decision { request, judgment, src: None };
+            let judgment = shield.inspect_at(&request, now_ms);
+            return Decision { request, judgment, src: None, config_rev };
         };
-        let src = self.source(peer, &parts.headers);
+        let src = self.source(shield, peer, &parts.headers);
         let request = adapt::from_parts(parts, body, Some(src.ip));
-        if let Some(judgment) = self.banned(&src, now_ms) {
-            return Decision { request, judgment, src: Some(src.key) };
+        if let Some(judgment) = self.banned(shield, &src, now_ms) {
+            return Decision { request, judgment, src: Some(src.key), config_rev };
         }
-        let judgment = self.shield.inspect_at(&request, now_ms);
+        let judgment = shield.inspect_at(&request, now_ms);
         let outcome = self.chain.observe(src.key, event_for(&judgment), now_ms, src.may_ban);
-        let judgment = self.shield.finalize(judgment, &outcome);
-        Decision { request, judgment, src: Some(src.key) }
+        let judgment = shield.finalize(judgment, &outcome);
+        Decision { request, judgment, src: Some(src.key), config_rev }
     }
 }
 
@@ -533,7 +557,7 @@ exceptions:
                             if stateful {
                                 let _ = p.decide(&w, b"", Some(ip), i);
                             } else {
-                                let _ = p.shield().inspect(&adapt::from_parts(&w, b"", Some(ip)));
+                                let _ = p.current().shield.inspect(&adapt::from_parts(&w, b"", Some(ip)));
                             }
                         }
                     })
