@@ -52,6 +52,14 @@ exceptions:
     expires: 2026-11-30
 ```
 
+- A family wildcard is `<name>.*` with `<name>` one of `sqli` (family Sqli),
+  `xss` (Xss), `cmd` (CommandInjection), `path` (PathTraversal), `recon`
+  (Recon), `honeypot` (Honeypot), `intel` (Intel) or `anomaly` (Anomaly). It
+  expands to every exceptable construct of that family: kind Sink, Latent or
+  Signature, and not forbidden (§3.2). The family is the construct's, not its
+  id prefix, so `sqli.*` also covers `sig.classic-or` and `api.type-violation`.
+  Any other `<name>.*` is an unknown-construct error; a wildcard that expands to
+  nothing is an `empty-wildcard` error.
 - `field.loc` is one of `path`, `query`, `header`, `cookie`, `body` (the
   `Location` enum). `field.name` is a case-insensitive glob over the field name
   as the engine names it (`referer`, `key:q`, `json:/user/id`), with `*` and `?`.
@@ -66,7 +74,8 @@ The file is validated at load. Any error stops `serve` from starting and makes
 
 - unknown `version`, unknown keys, a missing required key, a bad date or glob;
 - a duplicate `id`;
-- an unknown construct id, or a wildcard naming no family;
+- an unknown construct id, a decoder or gate id (`not-a-detection`), or a
+  wildcard naming no family;
 - a forbidden target: `chain.ban`, any `limit.*` construct or `intel.deny-listed`
   (directly or through a wildcard: the wildcard expands without them, and naming
   one directly is an error);
@@ -158,8 +167,8 @@ Requests no exception's method and path scope touches pay nothing extra.
   Block, as today; a log-only hit on an otherwise allowed request writes none.
   The console's TypeScript encoder follows the same rule, kept identical by the
   shared fixture.
-- **CLI:** `eval`, `bench` and `serve` take `--exceptions <file>`; `eval` and
-  `bench` also take `--as-of <YYYY-MM-DD>`. New `vft exceptions check <file>
+- **CLI:** `eval` and `serve` take `--exceptions <file>`; `eval` also takes
+  `--as-of <YYYY-MM-DD>`. `bench` (the synthetic smoke test) takes neither. New `vft exceptions check <file>
   [--as-of <date>]` validates the file and prints each entry with its live or
   expired state and expanded construct list; it exits non-zero on any error.
 - `eval/ab_dev.sh` already takes per-side flags, so a measurement passes

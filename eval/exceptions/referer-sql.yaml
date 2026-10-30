@@ -1,0 +1,14 @@
+# Measured in eval/RESULTS-C-exceptions.md. Not enabled by default.
+version: 1
+exceptions:
+  - id: referer-sql
+    action: ignore
+    constructs: [sqli.*]
+    scope:
+      path_prefix: /
+      field: { loc: header, name: referer }
+    owner: dennis
+    reason: "Referer URLs of search pages carry SQL-looking text; 43 of the 100 dev FPs are decided by an sqli.* construct in the Referer header (measured, eval/RESULTS-C-exceptions.md)"
+    created: 2026-10-30
+    modified: 2026-10-30
+    expires: 2027-10-30
