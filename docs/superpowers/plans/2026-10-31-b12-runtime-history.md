@@ -115,12 +115,12 @@ pub struct AdminConfig {
 ```rust
 pub struct Loaded {
     pub rev: u64,
-    pub shield: vft_core::Shield,
+    pub shield: Arc<vft_core::Shield>,
 }
 
 pub struct ConfigHandle { /* ArcSwap<Loaded> */ }
 impl ConfigHandle {
-    pub fn new(shield: Shield) -> Self;              // rev 1
+    pub fn new(shield: Arc<Shield>) -> Self;         // rev 1
     pub fn load(&self) -> Arc<Loaded>;               // one atomic load
     pub fn swap(&self, shield: Shield) -> u64;       // stores rev+1, returns it
 }
@@ -138,11 +138,11 @@ pub fn candidate(live: &Config, next: Config) -> Candidate;
 
 - `candidate` works on `serde_yaml::Value` trees of both configs: for each registry key (dotted path), compare the two values; if different push the key to `changed`; if the descriptor is `Restart`, also push to `restart_required` and write the live value into the next tree. Deserialize the merged tree back into `Config` (it was valid on both sides, so this cannot fail; use `expect` with a message naming the invariant).
 - `Pipeline`:
-  - `Pipeline::new(handle: Arc<ConfigHandle>) -> Self` replaces the old constructor, and `Pipeline::from_shield(shield: Shield) -> Self` wraps a plain shield in a fresh handle (rev 1) for callers that have one. Eval (`crates/vft-cli/src/eval.rs` ~425-426 and ~828-837) currently shares one `Arc<Shield>` between library mode and the pipeline: build a second `Shield` from the same `cfg.clone()` and `ex.clone()` for `Pipeline::from_shield` and keep the existing one for library mode. The eval output must not change.
+  - `Pipeline::new(shield: Arc<Shield>) -> Self` keeps its signature and behaviour (it wraps the shield in a fresh handle, rev 1), so `eval` is not modified. Add `Pipeline::with_handle(handle: Arc<ConfigHandle>) -> Self` for the runtime. Do not edit `crates/vft-cli/src/eval.rs`.
   - Per request, `decide` and `fast_track` call `self.handle.load()` once and use that `Loaded` for every shield access in that call. `trusted` stays fixed (restart-only). `source()` reads `ipv6_prefix` from the chain store's own config captured at construction (restart-only), not from the loaded shield.
   - Replace `pub fn shield(&self) -> &Shield` with `pub fn current(&self) -> Arc<Loaded>`; update the single test caller (`pipeline.rs` ~531).
   - `Decision` gains `pub config_rev: u64`.
-- `ProxyState::new(handle: Arc<ConfigHandle>, upstream, audit, ocsf, enforce)`; limits and decision headers are read from the handle's first load (restart-only). Add `ProxyState::from_shield(shield, …)` with the old argument list for existing call sites (CLI eval tcp mode, tests).
+- `ProxyState::new(shield, upstream, audit, ocsf, enforce)` keeps its signature (used by eval's tcp mode and tests). Add `ProxyState::with_handle(handle: Arc<ConfigHandle>, upstream, audit, ocsf, enforce)` for the runtime; limits and decision headers are read from the handle's first load (restart-only). `ProxyState::new` delegates to `with_handle`.
 
 - [ ] **Step 1: Failing tests** (`config_handle.rs` tests):
   - `swap` increments `rev` and `load` returns the new shield; an `Arc<Loaded>` taken before a swap still sees the old rev (no mixing).
