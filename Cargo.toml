@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vft-core", "crates/vft-cli", "crates/vft-proxy"]
+members = ["crates/vft-core", "crates/vft-cli", "crates/vft-proxy", "crates/vft-server"]
 
 [workspace.package]
 version = "0.1.0"
