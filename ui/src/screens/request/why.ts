@@ -59,6 +59,16 @@ export function contributionRows(cs: Contribution[], score: number): { items: Co
   };
 }
 
+/**
+ * What the Σ points footer says was left out. A log-only exception turns a contribution into a shadow
+ * one (`exception` names it), so the two kinds are told apart here and `contributionRows` needs no change.
+ */
+export function excludedNote(cs: Contribution[]): string {
+  const shadow = cs.some((c) => c.shadow && c.exception === null);
+  const suppressed = cs.some((c) => c.exception !== null);
+  return shadow && suppressed ? ' (shadow and suppressed rows excluded)' : shadow ? ' (shadow rows excluded)' : suppressed ? ' (suppressed rows excluded)' : '';
+}
+
 // Gauge: a 180° arc in a 200 × 120 viewBox, score 0 at the left, 100 at the right.
 export const GAUGE = { w: 200, h: 120, cx: 100, cy: 108, track: 72, band: 86, label: 100 };
 

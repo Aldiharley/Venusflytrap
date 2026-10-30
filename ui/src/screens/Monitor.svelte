@@ -11,7 +11,7 @@
   import VerdictChip from '../lib/components/VerdictChip.svelte';
   import { fmtClock, fmtCount, fmtStamp } from '../lib/format';
   import { moveCell, type Cell } from '../lib/grid';
-  import { Copy, ExternalLink } from '../lib/icons';
+  import { Copy, ExternalLink, ShieldOff } from '../lib/icons';
   import { addTerm, type Field } from '../lib/query';
   import { app } from '../lib/state/app.svelte';
   import { router } from '../lib/state/router.svelte';
@@ -373,7 +373,7 @@
                     {#if col.key === 'ts'}
                       <a href={requestHref(row)} tabindex="-1" class="mono clip" title={fmtStamp(row.ts_ms, true)} onclick={(e) => linkClick(e, () => openRequest(row, c))}>{fmtStamp(row.ts_ms, withDate)}</a>
                     {:else if col.key === 'verdict'}
-                      <VerdictChip verdict={row.verdict} size="sm" />{#if row.sampled}<span class="tag">sampled</span>{/if}
+                      <VerdictChip verdict={row.verdict} size="sm" />{#if row.excepted}<span class="excepted" role="img" aria-label="Exception applied" title="An exception changed how this request was judged"><ShieldOff size={14} strokeWidth={1.5} aria-hidden="true" /></span>{/if}{#if row.sampled}<span class="tag">sampled</span>{/if}
                     {:else if col.key === 'score'}
                       <span class="num">{row.score}</span>
                     {:else if col.key === 'src'}
@@ -476,6 +476,7 @@
     max-width: 100%; overflow: hidden; white-space: normal; overflow-wrap: anywhere; line-height: var(--vf-lh-xs);
   }
   .srcwrap .clip { min-width: 0; }
+  .excepted { display: inline-flex; vertical-align: middle; margin-left: var(--vf-space-1); color: var(--vf-text-secondary); }
   .tag { margin-left: var(--vf-space-1); font-size: var(--vf-fs-xs); color: var(--vf-text-secondary); }
   .open { display: inline-flex; flex: none; margin-left: var(--vf-space-1); color: var(--vf-accent); }
   .skeleton { display: grid; gap: var(--vf-space-2); padding: var(--vf-space-3); }

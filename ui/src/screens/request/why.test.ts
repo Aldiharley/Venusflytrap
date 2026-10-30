@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import type { Cause, Contribution, RequestDetail } from '../../lib/api/types';
-import { arc, contributionRows, gaugeSentence, pointAt, whyParts } from './why';
+import { arc, contributionRows, excludedNote, gaugeSentence, pointAt, whyParts } from './why';
 
 const BANDS = { monitor_at: 40, challenge_at: 70, block_at: 90 };
 function detail(cause: Partial<Cause>, over: Partial<RequestDetail> = {}, verdict: RequestDetail['row']['verdict'] = 'Block', score = 94): RequestDetail {
@@ -69,4 +69,15 @@ test('the gauge maps 0..100 onto a left-to-right semicircle', () => {
 
 test('the gauge has a sentence alternative', () => {
   expect(gaugeSentence(94, BANDS, 12)).toBe('Score 94 of 100. Bands at rev 12: Monitor ≥ 40, Challenge ≥ 70, Block ≥ 90.');
+});
+
+test('a log-only contribution is excluded from the sum, sorts with the shadow ones and is named in the footer note', () => {
+  const cs = [c(0, { shadow: true, exception: 'utm-xss' }), c(90), c(4)];
+  const rows = contributionRows(cs, 94);
+  expect(rows.items.map((r) => r.c.points)).toEqual([90, 4, 0]);
+  expect(rows.sum).toBe(94);
+  expect(excludedNote(cs)).toBe(' (suppressed rows excluded)');
+  expect(excludedNote([...cs, c(0, { shadow: true })])).toBe(' (shadow and suppressed rows excluded)');
+  expect(excludedNote([c(0, { shadow: true })])).toBe(' (shadow rows excluded)');
+  expect(excludedNote([c(4)])).toBe('');
 });
