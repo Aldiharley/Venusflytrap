@@ -1,12 +1,12 @@
 <script lang="ts">
   import Link from '../components/Link.svelte';
-  import { KeyRound, LayoutDashboard, ListFilter, Network, Settings, ShieldBan, Workflow } from '../icons';
+  import { KeyRound, LayoutDashboard, ListFilter, Network, Settings, ShieldBan, ShieldOff, Workflow } from '../icons';
   import { app } from '../state/app.svelte';
   import { NAV, PARENT, router, type RouteName } from '../state/router.svelte';
 
   const ICON: Record<string, typeof Network> = {
     dashboard: LayoutDashboard, topology: Network, monitor: ListFilter, chains: Workflow,
-    honeypot: ShieldBan, settings: Settings, keys: KeyRound,
+    exceptions: ShieldOff, honeypot: ShieldBan, settings: Settings, keys: KeyRound,
   };
   const current = $derived<RouteName>(PARENT[router.route.name] ?? router.route.name);
   const items = $derived(NAV.filter((n) => !n.adminOnly || app.session?.perm === 'Admin'));

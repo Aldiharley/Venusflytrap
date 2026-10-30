@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { banText, fmtAgo, fmtClock, fmtCount, fmtRps, fmtStamp } from './format';
+import { banText, fmtAgo, fmtClock, fmtCount, fmtExpiry, fmtRps, fmtStamp } from './format';
 
 test('rates', () => {
   expect(fmtRps(0)).toBe('0/s');
@@ -32,4 +32,17 @@ test('row stamps add the day only for multi-day ranges', () => {
   const ms = Date.UTC(2026, 9, 28, 14, 5, 12);
   expect(fmtStamp(ms, false)).toBe(fmtClock(ms));
   expect(fmtStamp(ms, true)).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d$/);
+});
+
+test('an expiry reads as whole days ahead or behind', () => {
+  const day = 86_400_000;
+  const noon = Date.UTC(2026, 9, 30, 12);
+  const midnight = Date.UTC(2026, 9, 30);
+  expect(fmtExpiry(midnight + 21 * day, noon)).toBe('in 21 days');
+  expect(fmtExpiry(noon + 1, noon)).toBe('in 1 day');
+  expect(fmtExpiry(noon + day, noon)).toBe('in 1 day');
+  expect(fmtExpiry(midnight - 3 * day, noon)).toBe('expired 3 days ago');
+  expect(fmtExpiry(noon - day - 1, noon)).toBe('expired 1 day ago');
+  expect(fmtExpiry(midnight, noon)).toBe('expired today');
+  expect(fmtExpiry(noon, noon)).toBe('expired today'); // the engine stops selecting at now >= expires
 });

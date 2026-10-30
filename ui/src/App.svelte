@@ -16,6 +16,7 @@
     topology: () => import('./screens/Topology.svelte'),
     chains: () => import('./screens/Chains.svelte'),
     monitor: () => import('./screens/Monitor.svelte'),
+    exceptions: () => import('./screens/Exceptions.svelte'),
     honeypot: placeholder,
     settings: placeholder,
     keys: placeholder,
@@ -25,6 +26,7 @@
   };
   const TITLES: Record<RouteName, string> = {
     dashboard: 'Dashboard', topology: 'Traffic topology', chains: 'Attack chains', monitor: 'Monitor',
+    exceptions: 'Exceptions',
     honeypot: 'Honeypot & bans', settings: 'Settings', keys: 'Keys', request: 'Request details',
     source: 'Source', notfound: 'Page not found',
   };
