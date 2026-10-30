@@ -12,10 +12,13 @@ const call = () => ({ signal: new AbortController().signal });
 let details: RequestDetail[] = [];
 
 beforeAll(async () => {
+  // The fixture clock every console test uses: which rows the last hour holds depends on it.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.UTC(2026, 9, 28, 14, 5, 0));
   const src = new FixtureSource({ live: false });
   await app.start(src);
   const now = Date.now();
-  const page = await src.history({ q: '', from: now - 3_600_000, to: now, limit: 200 }, call());
+  const page = await src.history({ q: '', from: now - 3_600_000, to: now, limit: 1000 }, call());
   details = await Promise.all(page.rows.map((r) => src.request(r.id, call())));
 });
 
@@ -59,6 +62,17 @@ test('contributions are sorted by points and their scored points sum to the scor
   const foot = within(table).getAllByRole('row').at(-1)!;
   expect(foot.textContent).toContain(`= score ${d.judgment.score}`);
   expect(pts.reduce((a, b) => a + b, 0)).toBeCloseTo(d.judgment.score, 0);
+});
+
+test('a tag in the contributions table is set off from the text before it', async () => {
+  const d = find(logOnly);
+  await show(d);
+  const table = within(screen.getByRole('region', { name: 'Contributions' })).getByRole('table');
+  const tags = [...table.querySelectorAll<HTMLElement>('td .tag')];
+  expect(tags.map((t) => t.textContent!.trim())).toEqual(expect.arrayContaining(['top', 'suppressed by utm-xss']));
+  // Svelte drops the space before a tag at the start of a block, so the gap is the tag's margin
+  // (vite.config.ts lets this component's styles through to jsdom).
+  for (const t of tags) expect(getComputedStyle(t).marginLeft, t.textContent!).not.toMatch(/^(0(px)?)?$/);
 });
 
 test('shadow contributions are shown, marked as not scored, with 0 points, after the scored ones', async () => {

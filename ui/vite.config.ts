@@ -22,8 +22,9 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.ts'],
-    // Vitest blanks CSS modules by default, including ?raw imports; tokens.test.ts parses the real file.
-    css: { include: [/tokens\.css/] },
+    // Vitest blanks CSS modules by default, including ?raw imports; tokens.test.ts parses the real file,
+    // and request.test.ts reads Request details' computed styles.
+    css: { include: [/tokens\.css/, /RequestDetails\.svelte\?svelte&type=style/] },
     setupFiles: ['src/test-setup.ts'],
   },
 });

@@ -207,10 +207,10 @@
               <tr class:top class:shadow={c.shadow && c.exception === null} class:suppressed={c.exception !== null}>
                 <td>{c.engine}</td>
                 <td class="mono">{c.field ? fieldLabel(c.field) : '—'}</td>
-                <td><span class="mono">{c.construct ?? '—'}</span>{#if c.exception !== null} <span class="tag">suppressed by <Link href={exceptionHref(c.exception)} class="mono">{c.exception}</Link></span>{:else if c.shadow} <span class="tag">Shadow · not scored</span>{/if}</td>
+                <td><span class="mono">{c.construct ?? '—'}</span>{#if c.exception !== null}<span class="tag">suppressed by <Link href={exceptionHref(c.exception)} class="mono">{c.exception}</Link></span>{:else if c.shadow}<span class="tag">Shadow · not scored</span>{/if}</td>
                 <td><EvidenceChip value={c.value} /></td>
                 <td class="n">{c.weight.toFixed(2)}</td>
-                <td class="n">{fmtPoints(c.points)}{#if top} <span class="tag">top</span>{/if}</td>
+                <td class="n">{fmtPoints(c.points)}{#if top}<span class="tag">top</span>{/if}</td>
               </tr>
             {:else}
               <tr><td colspan="6" class="secondary">No evidence was recorded for this request.</td></tr>
@@ -350,7 +350,8 @@
   .scroll { overflow-x: auto; }
   tr.top td { background: var(--vf-row-selected); }
   tr.suppressed td { color: var(--vf-text-muted); }
-  .tag { font-size: var(--vf-fs-xs); color: var(--vf-text-secondary); font-weight: 600; }
+  /* The gap before a tag is its margin: Svelte drops a space at the start of an {#if} block. */
+  .tag { margin-left: var(--vf-space-1); font-size: var(--vf-fs-xs); color: var(--vf-text-secondary); font-weight: 600; }
   tfoot th { text-align: right; text-transform: none; letter-spacing: 0; font-size: var(--vf-fs-sm); }
   tfoot td { font-weight: 600; }
   .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--vf-space-3); }
