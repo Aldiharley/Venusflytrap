@@ -23,9 +23,11 @@ const SHOTS = [
   ]),
 ];
 
-// Opens the first Monitor row an exception touched (found by its marker, not by id).
+// Opens the first Monitor detection an exception touched (found by its marker, not by id; an Allow whose
+// evidence was ignored would leave the Create exception form nothing to pre-fill).
 async function openTouched(page) {
-  await page.locator('tbody tr').filter({ has: page.getByLabel('Exception applied') }).first().locator('td[data-c="0"] a').click();
+  await page.locator('tbody tr').filter({ has: page.getByLabel('Exception applied') })
+    .filter({ hasNot: page.locator('td.c-verdict', { hasText: 'Allow' }) }).first().locator('td[data-c="0"] a').click();
 }
 
 // Opens a touched request, then the Create exception panel, filled so the YAML shows.

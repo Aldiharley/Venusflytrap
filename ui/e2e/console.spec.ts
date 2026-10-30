@@ -221,10 +221,15 @@ for (const scheme of ['light', 'dark'] as const) {
 const TOUCHED_QUERY = '/monitor?static&q=path%3A%2Fapi%2Fsearch';
 const touchedRow = (page: Page) => page.locator('tbody tr').filter({ has: page.getByLabel('Exception applied') }).first();
 
+// A touched detection (not an Allow, whose ignored evidence leaves no construct to pre-fill): which touched
+// rows the fixture window holds depends on the wall clock.
+const touchedDetection = (page: Page) => page.locator('tbody tr').filter({ has: page.getByLabel('Exception applied') })
+  .filter({ hasNot: page.locator('td.c-verdict', { hasText: 'Allow' }) }).first();
+
 async function openTouched(page: Page) {
   await page.goto(TOUCHED_QUERY);
   await expect(page.getByRole('grid')).toBeVisible();
-  await touchedRow(page).locator('td[data-c="0"] a').click();
+  await touchedDetection(page).locator('td[data-c="0"] a').click();
   await expect(page.getByRole('region', { name: 'Exceptions' })).toBeVisible();
   await page.waitForLoadState('networkidle');
 }
