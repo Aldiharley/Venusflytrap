@@ -73,7 +73,8 @@ fn addr_in(line: &str) -> SocketAddr {
 fn get(addr: SocketAddr, path: &str) -> (u16, String) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    // `Host: <ip:port>`: the admin listener serves nothing else.
+    write!(s, "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").unwrap();
     let mut out = String::new();
     let _ = s.read_to_string(&mut out);
     let code = out.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);

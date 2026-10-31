@@ -388,8 +388,9 @@ fn dist(mut v: Vec<u32>) -> serde_json::Value {
 /// One `GET /metrics` on the admin listener.
 async fn scrape(admin: SocketAddr) -> anyhow::Result<BTreeMap<String, f64>> {
     let mut s = TcpStream::connect(admin).await?;
-    s.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        .await?;
+    // The admin listener serves only `Host: <its loopback ip:port>`.
+    let req = format!("GET /metrics HTTP/1.1\r\nHost: {admin}\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).await?;
     let mut text = String::new();
     s.read_to_string(&mut text).await?;
     let mut m = BTreeMap::new();

@@ -119,7 +119,7 @@ impl Metrics {
             &mut o,
             "vft_request_latency_seconds",
             "histogram",
-            "Time to decide a request, in seconds.",
+            "Request handling time up to the response headers (includes upstream), in seconds.",
         );
         let mut cumulative = 0u64;
         for (i, (_, le)) in BUCKETS.iter().enumerate() {

@@ -89,7 +89,7 @@ impl Default for HistoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
-    /// Local admin listener (`host:port`); must be a loopback address until auth exists.
+    /// Local admin listener, a loopback `ip:port` (e.g. `127.0.0.1:8899` or `[::1]:8899`); must be a loopback address until auth exists.
     pub bind: String,
 }
 

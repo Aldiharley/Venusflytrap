@@ -1,12 +1,14 @@
 //! Loopback-only admin listener: health, status, metrics and config reload.
 //!
 //! There is no authentication yet, so the listener must only ever bind to a
-//! loopback address (see [`check_bind`]).
+//! loopback address (see [`check_bind`]), and it refuses requests a browser
+//! could make on a web page's behalf (see [`same_host`]).
 
 use crate::metrics::Metrics;
 use crate::status::StatusBoard;
 use bytes::Bytes;
 use http_body_util::Full;
+use hyper::header::HeaderMap;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -54,7 +56,7 @@ pub fn check_bind(bind: SocketAddr) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!(
-            "admin listener bind {bind} is not a loopback address: the admin API has no              authentication yet, so it must bind to loopback (127.0.0.0/8 or ::1)"
+            "admin listener bind {bind} is not a loopback address: the admin API has no authentication yet, so it must bind to loopback (127.0.0.0/8 or ::1)"
         )
     }
 }
@@ -73,6 +75,26 @@ fn respond(status: StatusCode, content_type: &'static str, body: Vec<u8>) -> Res
 
 fn json(status: StatusCode, v: &serde_json::Value) -> Response<Full<Bytes>> {
     respond(status, "application/json", v.to_string().into_bytes())
+}
+
+/// Whether a request may reach a route: it carries no `Origin` header
+/// (browsers send one on cross-origin requests, so a web page cannot POST a
+/// reload), and its `Host` is `127.0.0.1:<port>`, `[::1]:<port>` or
+/// `localhost:<port>` for the bound `port` (so a rebound DNS name pointing at
+/// loopback is refused too).
+fn same_host(headers: &HeaderMap, port: u16) -> bool {
+    if headers.contains_key(hyper::header::ORIGIN) {
+        return false;
+    }
+    let Some(host) = headers
+        .get(hyper::header::HOST)
+        .and_then(|h| h.to_str().ok())
+    else {
+        return false;
+    };
+    ["127.0.0.1", "[::1]", "localhost"]
+        .iter()
+        .any(|name| host.eq_ignore_ascii_case(&format!("{name}:{port}")))
 }
 
 async fn handle(state: Arc<AdminState>, method: Method, path: &str) -> Response<Full<Bytes>> {
@@ -140,6 +162,7 @@ pub async fn serve_admin(
     state: Arc<AdminState>,
     mut stop: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    let port = listener.local_addr()?.port();
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut conns = JoinSet::new();
     let mut backoff = Duration::from_millis(10);
@@ -172,6 +195,12 @@ pub async fn serve_admin(
             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let st = st.clone();
                 async move {
+                    if !same_host(req.headers(), port) {
+                        return Ok(json(
+                            StatusCode::FORBIDDEN,
+                            &serde_json::json!({"error": "forbidden"}),
+                        ));
+                    }
                     Ok::<_, std::convert::Infallible>(
                         handle(st, req.method().clone(), req.uri().path()).await,
                     )
@@ -265,10 +294,23 @@ mod tests {
     }
 
     async fn request(addr: SocketAddr, method: &str, path: &str) -> Resp {
+        let host = format!("localhost:{}", addr.port());
+        request_with(addr, method, path, &[("Host", &host)]).await
+    }
+
+    /// A request with exactly `headers` (plus `Connection` and `Content-Length`).
+    async fn request_with(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Resp {
         let mut s = TcpStream::connect(addr).await.unwrap();
-        let req = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-        );
+        let mut req = format!("{method} {path} HTTP/1.1\r\n");
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("Connection: close\r\nContent-Length: 0\r\n\r\n");
         s.write_all(req.as_bytes()).await.unwrap();
         let mut buf = Vec::new();
         s.read_to_end(&mut buf).await.unwrap();
@@ -455,6 +497,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_cross_origin_post_is_refused_and_does_not_reload() {
+        let s = start(false).await;
+        let host = format!("127.0.0.1:{}", s.addr.port());
+        for origin in ["https://evil.example", "null", "http://127.0.0.1:8080"] {
+            let r = request_with(
+                s.addr,
+                "POST",
+                "/api/v1/reload",
+                &[("Host", &host), ("Origin", origin)],
+            )
+            .await;
+            assert_eq!(r.status, 403, "{origin}");
+            assert_eq!(r.header("content-type"), Some("application/json"));
+            assert_eq!(r.body, r#"{"error":"forbidden"}"#);
+            assert_security_headers(&r);
+        }
+        assert_eq!(s.stub.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn only_a_loopback_host_with_the_bound_port_is_served() {
+        let s = start(false).await;
+        let port = s.addr.port();
+        for good in [
+            format!("127.0.0.1:{port}"),
+            format!("[::1]:{port}"),
+            format!("localhost:{port}"),
+            format!("LOCALHOST:{port}"),
+        ] {
+            let r = request_with(s.addr, "GET", "/api/v1/health", &[("Host", &good)]).await;
+            assert_eq!(r.status, 200, "{good}");
+        }
+        for bad in [
+            format!("evil.example:{port}"),
+            format!("rebind.example.com:{port}"),
+            format!("127.0.0.1:{}", port.wrapping_add(1)),
+            "127.0.0.1".to_string(),
+            "localhost".to_string(),
+            format!("192.168.1.10:{port}"),
+        ] {
+            let r = request_with(s.addr, "GET", "/api/v1/status", &[("Host", &bad)]).await;
+            assert_eq!(r.status, 403, "{bad}");
+            assert_eq!(r.body, r#"{"error":"forbidden"}"#);
+            assert_security_headers(&r);
+        }
+        let r = request_with(s.addr, "GET", "/api/v1/health", &[]).await;
+        assert_eq!(r.status, 403, "no Host");
+        let r = request_with(
+            s.addr,
+            "POST",
+            "/api/v1/reload",
+            &[("Host", "evil.example")],
+        )
+        .await;
+        assert_eq!(r.status, 403);
+        assert_eq!(s.stub.calls.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn check_bind_accepts_only_loopback() {
         for ok in [
@@ -477,6 +578,7 @@ mod tests {
             let e = check_bind(bad.parse().unwrap()).unwrap_err().to_string();
             assert!(e.contains("loopback"), "{bad}: {e}");
             assert!(e.contains("authentication"), "{bad}: {e}");
+            assert!(!e.contains("  "), "{bad}: {e}");
         }
     }
 

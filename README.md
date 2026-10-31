@@ -153,11 +153,13 @@ venusflytrap --config venusflytrap.yaml serve \
 | `--audit`, `--audit-max-mb`, `--ocsf` | JSONL and OCSF audit files and the size at which they rotate. |
 | `--monitor-only` | Log decisions, never block. |
 | `--exceptions` | Scoped exceptions file; re-read on reload. |
-| `--admin-bind` | Admin listener, a loopback `host:port`, or `off`. Default: `admin.bind` from the config (`127.0.0.1:8899`). Non-loopback addresses are refused: there is no authentication yet. |
-| `--state-dir` | Directory for `history.db` (default `./state`, created if missing). |
+| `--admin-bind` | Admin listener, a loopback `ip:port` (for example `127.0.0.1:8899` or `[::1]:8899`; a host name such as `localhost` is not accepted), or `off`. Default: `admin.bind` from the config (`127.0.0.1:8899`). Non-loopback addresses are refused: there is no authentication yet. |
+| `--state-dir` | Directory for `history.db` (default `./state`, relative to the working directory the service is started in; created if missing, with mode 0700 on Unix). |
 | `--no-history` | Run without the history database. |
 
-**Admin endpoints** (loopback only):
+**Admin endpoints** (loopback only). A request with an `Origin` header, or with a `Host` other than
+`127.0.0.1:<port>`, `[::1]:<port>` or `localhost:<port>` for the bound port, is refused with 403, so a web page
+in a local browser cannot reach the API.
 
 | Endpoint | Returns |
 |---|---|

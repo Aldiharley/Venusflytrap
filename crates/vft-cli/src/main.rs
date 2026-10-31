@@ -78,7 +78,7 @@ enum Command {
         /// Scoped exceptions file (see `exceptions check`); expiry is checked per request.
         #[arg(long)]
         exceptions: Option<PathBuf>,
-        /// Admin listener (loopback `host:port`), or `off`. Default: `admin.bind` from the config.
+        /// Admin listener, a loopback `ip:port` (e.g. `127.0.0.1:8899` or `[::1]:8899`), or `off`. Default: `admin.bind` from the config.
         #[arg(long)]
         admin_bind: Option<String>,
         /// Directory for the history database.

@@ -132,7 +132,7 @@ pub static REGISTRY: &[OptionDescriptor] = &[
     opt("history.retention_days", Int { min: 1, max: 3650 }, "history", "Days of requests and chain events kept; rollups keep 90 days.", Basic, Live),
     opt("history.store_snippets", Bool, "history", "Keep up to 128 characters of each field value (never `Authorization`, `Cookie` or `Set-Cookie`).", Advanced, Live),
     // admin
-    opt("admin.bind", Addr, "admin", "Local admin listener (`host:port`); must be a loopback address until auth exists.", Advanced, Restart),
+    opt("admin.bind", Addr, "admin", "Local admin listener, a loopback `ip:port` (e.g. `127.0.0.1:8899` or `[::1]:8899`); must be a loopback address until auth exists.", Advanced, Restart),
 ];
 
 pub fn lookup(key: &str) -> Option<&'static OptionDescriptor> {

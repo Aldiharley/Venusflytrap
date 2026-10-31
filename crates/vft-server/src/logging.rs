@@ -9,6 +9,8 @@ pub fn init() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        // Colour codes only on a terminal, never in a redirected log file.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init();
 }
 
