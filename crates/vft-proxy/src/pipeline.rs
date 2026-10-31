@@ -3,8 +3,9 @@
 //! lock) → sharded chain observe → finalize. No lock is held during inspection
 //! (H3). The handler runs the fast-track alone ([`Pipeline::fast_track`])
 //! before reading the body. Each call loads the [`ConfigHandle`] once and
-//! uses that one shield throughout; the chain store and trusted proxies are
-//! restart-only and fixed at construction.
+//! uses that one shield throughout. Trusted proxies and the chain store's
+//! capacities are restart-only and fixed at construction; a reload pushes the
+//! live `chain.*` options in with [`ChainStore::set_live_config`].
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -70,6 +71,16 @@ impl ChainStore {
 
     pub fn lift(&self, key: SourceKey) -> bool {
         self.shard(&key).lift(key)
+    }
+
+    /// Apply a reloaded config's live `chain.*` options to every shard
+    /// ([`ChainTracker::set_live_config`]). The restart-only capacities keep
+    /// their per-shard share and `ipv6_prefix` stays as built. Locks one shard
+    /// at a time.
+    pub fn set_live_config(&self, cfg: &ChainConfig) {
+        for shard in &self.shards {
+            shard.lock().unwrap_or_else(PoisonError::into_inner).set_live_config(cfg);
+        }
     }
 }
 
@@ -492,6 +503,33 @@ exceptions:
         h.append("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
         h.append("x-forwarded-for", HeaderValue::from_static("203.0.113.5, 10.0.0.1"));
         assert_eq!(p.client_ip(peer, &h), "203.0.113.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn set_live_config_changes_when_a_source_gets_banned_and_keeps_shard_capacity() {
+        let p = pipeline();
+        let a: IpAddr = "203.0.113.61".parse().unwrap();
+        assert!(blocked(p.decide(&parts(EXFIL, CHROME), b"", Some(a), 0).judgment.verdict));
+        assert!(!p.decide(&parts("/", CHROME), b"", Some(a), 100).judgment.banned(), "3 blocks needed by default");
+        let mut next = Config::default().chain;
+        next.ban_policy.exploitation_blocks = 1;
+        next.max_sources = 640_000;
+        next.ban_policy.max_bans = 640_000;
+        next.ipv6_prefix = 48;
+        p.chain().set_live_config(&next);
+        let b: IpAddr = "203.0.113.62".parse().unwrap();
+        assert!(p.decide(&parts(EXFIL, CHROME), b"", Some(b), 1_000).judgment.banned(), "one block bans now");
+        assert!(p.decide(&parts("/", CHROME), b"", Some(b), 1_100).judgment.banned());
+        // Restart-only capacity stays at the per-shard share of the original.
+        let live = Config::default().chain;
+        for shard in &p.chain().shards {
+            let t = shard.lock().unwrap();
+            assert_eq!(t.config().ban_policy.exploitation_blocks, 1);
+            assert_eq!(t.config().max_sources, live.max_sources / SHARDS);
+            assert_eq!(t.config().ban_policy.max_bans, live.ban_policy.max_bans / SHARDS);
+            assert_eq!(t.config().ipv6_prefix, live.ipv6_prefix);
+        }
+        assert_eq!(p.chain().ipv6_prefix, live.ipv6_prefix);
     }
 
     #[test]
