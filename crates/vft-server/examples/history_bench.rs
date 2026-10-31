@@ -22,9 +22,10 @@
 //! `requests` row each) spread evenly over the last `--days` days, then runs
 //! `--queries` queries of each 24-hour form over random 24-hour windows:
 //! `verdict:block`, `construct:sqli.*`, `src:<random source>`, `-verdict:allow`,
-//! the empty query grouped by `construct` (every row of the window), and
-//! `-verdict:allow` grouped by `construct`. `--no-fill` queries a database
-//! that is already there (window bounds are read from it).
+//! the empty query grouped by `construct`, `src` and `path` (every row of the
+//! window), and `-verdict:allow` grouped by `construct`. Each form's report
+//! carries its `EXPLAIN QUERY PLAN`. `--no-fill` queries a database that is
+//! already there (window bounds are read from it).
 
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -35,7 +36,7 @@ use vft_core::{
     Cause, CauseKind, Contribution, Family, FieldRef, FourValued, Judgment, Location, Verdict,
 };
 use vft_proxy::bus::DecisionEvent;
-use vft_server::history::query::{GroupBy, Request};
+use vft_server::history::query::{compile, GroupBy, Request};
 use vft_server::history::read::{open_read_only, run};
 use vft_server::history::{HistoryHandle, WriteMsg};
 use vft_server::metrics::Metrics;
@@ -286,6 +287,31 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
     sorted[rank.min(sorted.len()) - 1]
 }
 
+/// `EXPLAIN QUERY PLAN` of the form over the first 24 hours, one detail per step.
+fn plan(
+    conn: &Connection,
+    q: &str,
+    group_by: Option<GroupBy>,
+    from_ms: u64,
+) -> anyhow::Result<Vec<String>> {
+    let c = compile(&Request {
+        q: q.to_string(),
+        from_ms,
+        to_ms: from_ms + DAY_MS,
+        group_by,
+        limit: 100,
+        cursor: None,
+    })
+    .map_err(|e| anyhow::anyhow!("{q}: {e}"))?;
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {}", c.sql))?;
+    let steps = stmt
+        .query_map(rusqlite::params_from_iter(c.params.iter()), |r| {
+            r.get::<_, String>(3)
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(steps)
+}
+
 fn query_mode(a: &Args) -> anyhow::Result<serde_json::Value> {
     let fill_report = if a.no_fill {
         serde_json::Value::Null
@@ -308,7 +334,7 @@ fn query_mode(a: &Args) -> anyhow::Result<serde_json::Value> {
     let db_bytes = std::fs::metadata(a.state_dir.join("history.db"))?.len();
 
     // (name, q, group_by); `src:<random>` is filled in per query.
-    let forms: [(&str, &str, Option<GroupBy>); 6] = [
+    let forms: [(&str, &str, Option<GroupBy>); 8] = [
         ("verdict:block", "verdict:block", None),
         ("construct:sqli.*", "construct:sqli.*", None),
         ("src:<ip>", "", None),
@@ -319,6 +345,8 @@ fn query_mode(a: &Args) -> anyhow::Result<serde_json::Value> {
             "-verdict:allow",
             Some(GroupBy::Construct),
         ),
+        ("group-by src", "", Some(GroupBy::Src)),
+        ("group-by path", "", Some(GroupBy::Path)),
     ];
     let mut rng = Rng(7);
     let mut out = Vec::new();
@@ -347,10 +375,16 @@ fn query_mode(a: &Args) -> anyhow::Result<serde_json::Value> {
         }
         let first = ms[0];
         ms.sort_by(f64::total_cmp);
+        let q = if name == "src:<ip>" {
+            format!("src:{}", ip_of(0))
+        } else {
+            q.to_string()
+        };
         out.push(serde_json::json!({
             "form": name, "queries": a.queries,
             "p50_ms": pct(&ms, 50.0), "p95_ms": pct(&ms, 95.0), "max_ms": ms[ms.len() - 1],
             "first_ms": first, "mean_returned": returned as f64 / a.queries as f64,
+            "plan": plan(&conn, &q, group_by, lo)?,
         }));
     }
     Ok(serde_json::json!({
