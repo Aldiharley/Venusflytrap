@@ -135,6 +135,64 @@ req.query.push(("id".into(), "1 union select password from users".into()));
 assert_eq!(shield.inspect(&req).verdict, Verdict::Block);
 ```
 
+## Running as a service
+
+`venusflytrap serve` runs the proxy, an admin listener and a history store in one process:
+
+```bash
+venusflytrap --config venusflytrap.yaml serve   --bind 0.0.0.0:8080 --upstream http://127.0.0.1:3000   --audit audit.jsonl --exceptions exceptions.yaml   --admin-bind 127.0.0.1:8899 --state-dir ./state
+```
+
+| Flag | Meaning |
+|---|---|
+| `--bind` | Proxy listener (default `127.0.0.1:8080`). |
+| `--upstream` | The application to protect (required). |
+| `--audit`, `--audit-max-mb`, `--ocsf` | JSONL and OCSF audit files and the size at which they rotate. |
+| `--monitor-only` | Log decisions, never block. |
+| `--exceptions` | Scoped exceptions file; re-read on reload. |
+| `--admin-bind` | Admin listener, a loopback `host:port`, or `off`. Default: `admin.bind` from the config (`127.0.0.1:8899`). Non-loopback addresses are refused: there is no authentication yet. |
+| `--state-dir` | Directory for `history.db` (default `./state`, created if missing). |
+| `--no-history` | Run without the history database. |
+
+**Admin endpoints** (loopback only):
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/health` | `{"ok": true}` while the process answers. |
+| `GET /api/v1/status` | Health of each component (proxy, config, bus, history), the live config revision, restart-required keys, bus drops, version, uptime. |
+| `GET /metrics` | Prometheus text: requests by verdict, latency histogram, bus drops, reloads, history rows written and dropped, history queue depth, config revision. |
+| `POST /api/v1/reload` | Re-read the config and exceptions files and swap them in. `200 {"rev": n}` on success; `422 {"rev": n, "issues": [...]}` and the running config stays when the files are invalid. |
+
+**Reload.** `SIGHUP` (Unix) and `POST /api/v1/reload` do the same thing. The files are read, validated and built
+before anything is swapped, so a bad file never replaces a good config. Options that need a restart (for example
+`limits.max_body`) keep their running value and are listed under `restart_required` in `/api/v1/status`.
+`Ctrl+C` and `SIGTERM` stop accepting, drain in-flight requests, then flush and close the history store.
+
+**History.** Every decision is counted in a per-minute rollup; every non-Allow decision, every decision an
+exception touched and a sample of the rest (`history.allow_sample_rate`, default 0.01) is stored as a row, with
+the kill-chain events, bans (restored at start) and config revisions. Rows are kept `history.retention_days`
+days (default 14). Writing never blocks the proxy: when the writer falls behind, rows are dropped and counted
+(`vft_history_rows_dropped_total`).
+
+**Querying.** `venusflytrap history query` reads `<state-dir>/history.db` read-only, so it works while the
+service runs. Terms are ANDed; `-` negates one. It prints a page as JSON and exits 2 on a bad query.
+
+```bash
+# Blocked SQL injection in a 24-hour window, newest page of 100 rows
+venusflytrap history query --state-dir ./state   --q "verdict:block construct:sqli.*"   --from 2026-10-30T00:00:00Z --to 2026-10-31T00:00:00Z
+
+# Which constructs fired on non-Allow requests from one /24, counted
+venusflytrap history query --state-dir ./state   --q "-verdict:allow src:203.0.113.0/24" --group-by construct   --from 2026-10-24T00:00:00Z --to 2026-10-31T00:00:00Z
+```
+
+Terms: `verdict:`, `stage:`, `construct:` (a trailing `.*` is a prefix), `technique:`, `src:` (an address or an
+IPv4 `/8`, `/16`, `/24`), `path:` (an absolute path prefix), `method:`, `cause:`, `exception:`, `group:`, `sampled:true|false` and
+`score:50` or `score>=50` (also `>`, `<`, `<=`). `--group-by` takes `src`, `path`, `construct`, `stage` or `verdict`; `--cursor`
+takes the `next` value of the previous page.
+
+Measured overhead, reload behaviour under load and query times:
+[`eval/RESULTS-B12-runtime-history.md`](eval/RESULTS-B12-runtime-history.md).
+
 ## Workspace
 
 - `crates/vft-core` — the engine (normalize, graph/taint, lattice, detectors,
