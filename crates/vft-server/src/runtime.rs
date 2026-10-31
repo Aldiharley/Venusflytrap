@@ -3,10 +3,12 @@
 //! shutdown.
 //!
 //! Start order (each step only once the previous one succeeded): load the
-//! config and exceptions → [history → restore active bans into the chain store] →
-//! bus consumers → admin listener → proxy listener. A failed step stops what already started, in reverse. Stop runs
-//! the other way: proxy (stop accepting, drain), admin, supervised tasks,
-//! [history: forward what the consumer had not read yet, flush, close].
+//! config and exceptions → [history: open, migrate, record the startup
+//! revision] → bus consumers (metrics, [history, retention]) → [restore active
+//! bans into the chain store] → admin listener → proxy listener. A failed step
+//! stops what already started, in reverse. Stop runs the other way: proxy (stop
+//! accepting, drain), admin, supervised tasks, [history: forward what the
+//! consumer had not read yet, write the active bans, flush, close].
 
 use crate::admin::{check_bind, serve_admin, AdminState, Reload};
 use crate::history::{active_bans, HistoryHandle, HistoryQueue, WriteMsg};
@@ -23,7 +25,7 @@ use tokio::sync::broadcast::Receiver;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use vft_core::config::ConfigError;
-use vft_core::{Config, ExceptionClock, Exceptions, Shield, SourceKey};
+use vft_core::{BanRecord, Config, ExceptionClock, Exceptions, Shield, SourceKey};
 use vft_proxy::audit::{AuditSink, Format};
 use vft_proxy::bus::{BusEvent, EventBus};
 use vft_proxy::config_handle::{candidate, Candidate, ConfigHandle};
@@ -365,6 +367,7 @@ fn restore_bans(
 ) -> rusqlite::Result<usize> {
     let conn =
         rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
     let mut restored = 0;
     for (key, rec) in active_bans(&conn, now_ms)? {
         match key.parse::<IpAddr>() {
@@ -380,9 +383,18 @@ fn restore_bans(
     Ok(restored)
 }
 
+/// How long [`close_history`] waits for room on the control queue for the ban snapshot.
+const BAN_SNAPSHOT_WAIT: Duration = Duration::from_secs(1);
+
 /// Close the history store: forward what the (stopped) consumer had not read
-/// yet, then flush and stop the writer, off the async workers.
-async fn close_history(history: Option<HistoryHandle>, rx: Option<SharedRx>, status: &StatusBoard) {
+/// yet, write every ban active in `chain` (when given), then flush and stop
+/// the writer, off the async workers.
+async fn close_history(
+    history: Option<HistoryHandle>,
+    rx: Option<SharedRx>,
+    status: &StatusBoard,
+    chain: Option<&ChainStore>,
+) {
     let Some(h) = history else { return };
     if let Some(rx) = rx {
         // The aborted consumer task releases the receiver as it is dropped.
@@ -400,9 +412,23 @@ async fn close_history(history: Option<HistoryHandle>, rx: Option<SharedRx>, sta
             Err(_) => tracing::warn!("history: the bus consumer did not stop in time"),
         }
     }
-    if tokio::task::spawn_blocking(move || h.close(HISTORY_CLOSE))
-        .await
-        .is_err()
+    // A ban whose `BanChanged` never reached the writer (a full queue, a
+    // lagging consumer) is still restored at the next start. The upsert is
+    // keyed on (key, since_ms): a ban already written is rewritten unchanged.
+    let bans: Vec<(String, BanRecord)> = chain.map_or_else(Vec::new, |c| {
+        c.active_bans(vft_proxy::now_ms())
+            .into_iter()
+            .map(|(k, b)| (k.ip().to_string(), b))
+            .collect()
+    });
+    if tokio::task::spawn_blocking(move || {
+        if !bans.is_empty() {
+            h.queue().snapshot_bans(bans, BAN_SNAPSHOT_WAIT);
+        }
+        h.close(HISTORY_CLOSE)
+    })
+    .await
+    .is_err()
     {
         tracing::error!("history: closing the store failed");
     }
@@ -424,9 +450,10 @@ pub struct Runtime {
 impl Runtime {
     /// Ordered start with rollback: load config (+exceptions, PerRequest clock) → [history: open
     /// `<state_dir>/history.db`, migrate, record config revision "startup"] → start bus consumers →
-    /// admin listener → proxy listener. On any error, stop what started, in reverse, and return it.
+    /// [restore the active bans of the history store into the chain store] → admin listener →
+    /// proxy listener. On any error, stop what started, in reverse, and return it.
     /// A non-loopback `admin_bind` fails before anything is loaded or bound; a history store that
-    /// cannot be opened fails before anything binds.
+    /// cannot be opened, or whose bans cannot be read, fails before anything binds.
     pub async fn start(opts: RuntimeOptions) -> anyhow::Result<Runtime> {
         Self::start_with(opts, DRAIN).await
     }
@@ -524,7 +551,7 @@ impl Runtime {
             Some((_, Ok(n))) => tracing::info!(restored = n, "history: active bans restored"),
             Some((path, Err(e))) => {
                 tasks.stop().await;
-                close_history(history, history_rx, &status).await;
+                close_history(history, history_rx, &status, None).await;
                 anyhow::bail!("restoring bans from {}: {e}", path.display());
             }
             None => {}
@@ -564,7 +591,7 @@ impl Runtime {
                 }
                 Err(e) => {
                     tasks.stop().await;
-                    close_history(history, history_rx, &status).await;
+                    close_history(history, history_rx, &status, None).await;
                     anyhow::bail!("binding the admin listener on {a}: {e}");
                 }
             },
@@ -580,7 +607,7 @@ impl Runtime {
                     let _ = a.stop().await;
                 }
                 tasks.stop().await;
-                close_history(history, history_rx, &status).await;
+                close_history(history, history_rx, &status, None).await;
                 anyhow::bail!("binding the proxy listener on {}: {e}", opts.bind);
             }
         };
@@ -637,8 +664,9 @@ impl Runtime {
     }
 
     /// Stop accepting, drain ≤ 10 s, stop admin, stop supervised tasks, then
-    /// write what the history consumer had not read yet, flush and close the
-    /// history store (≤ 5 s).
+    /// write what the history consumer had not read yet and every ban active in
+    /// the chain store, flush and close the history store (≤ 5 s, plus ≤ 1 s
+    /// waiting for room for the bans).
     pub async fn stop(self) -> anyhow::Result<()> {
         let Runtime {
             core,
@@ -662,7 +690,13 @@ impl Runtime {
             }
         }
         tasks.stop().await;
-        close_history(history, history_rx, &core.status).await;
+        close_history(
+            history,
+            history_rx,
+            &core.status,
+            Some(core.proxy.pipeline.chain()),
+        )
+        .await;
         tracing::info!("venusflytrap stopped");
         first_err.map_or(Ok(()), Err)
     }
@@ -810,6 +844,14 @@ mod tests {
         read_response(s).await
     }
 
+    /// [`http`] to the admin listener, with the `Host` it accepts.
+    async fn admin_http(addr: SocketAddr, method: &str, target: &str) -> (u16, String) {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let raw = format!("{method} {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        s.write_all(raw.as_bytes()).await.unwrap();
+        read_response(s).await
+    }
+
     async fn read_response(mut s: TcpStream) -> (u16, String) {
         let mut out = Vec::new();
         let _ = tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut out)).await;
@@ -827,7 +869,7 @@ mod tests {
     }
 
     async fn status_json(rt: &Runtime) -> serde_json::Value {
-        let (code, body) = http(rt.admin_addr().unwrap(), "GET", "/api/v1/status", &[]).await;
+        let (code, body) = admin_http(rt.admin_addr().unwrap(), "GET", "/api/v1/status").await;
         assert_eq!(code, 200, "{body}");
         serde_json::from_str(&body).unwrap()
     }
@@ -849,7 +891,7 @@ mod tests {
             (200, "ok".to_string())
         );
         assert_eq!(http(proxy, "GET", SQLI, &[]).await.0, 403);
-        let (code, body) = http(admin, "GET", "/api/v1/health", &[]).await;
+        let (code, body) = admin_http(admin, "GET", "/api/v1/health").await;
         assert_eq!((code, body.as_str()), (200, r#"{"ok":true}"#));
         let st = rt.status();
         assert_eq!(st.config_rev, 1);
@@ -870,7 +912,7 @@ mod tests {
         let admin = rt.admin_addr().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let (_, text) = http(admin, "GET", "/metrics", &[]).await;
+            let (_, text) = admin_http(admin, "GET", "/metrics").await;
             if text.contains("vft_requests_total{verdict=\"allow\"} 1")
                 && text.contains("vft_requests_total{verdict=\"block\"} 1")
             {
@@ -1137,6 +1179,45 @@ chain:
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_writes_a_ban_that_never_reached_the_writer_and_the_next_start_restores_it() {
+        let env = Env::new(BAN_CFG);
+        let up = stub(Some(Duration::ZERO)).await;
+        let mut o = env.opts(up);
+        o.history = true;
+        let state = o.state_dir.clone();
+        let rt = Runtime::start(o).await.unwrap();
+        // Straight into the chain store: no BanChanged, nothing queued.
+        let rec = rt.core.proxy.pipeline.chain().ban(
+            source("203.0.113.5"),
+            vft_core::BanCause::Manual,
+            vft_proxy::now_ms(),
+        );
+        assert!(rt.history.as_ref().unwrap().flush(Duration::from_secs(5)));
+        assert_eq!(count(&history_db(&state), "SELECT count(*) FROM bans"), 0);
+        rt.stop().await.unwrap();
+        assert_eq!(
+            count(
+                &history_db(&state),
+                "SELECT count(*) FROM bans WHERE key = '203.0.113.5' AND cause = 'Manual' AND lifted_ms IS NULL"
+            ),
+            1
+        );
+
+        let mut o = env.opts(up);
+        o.history = true;
+        let rt = Runtime::start(o).await.unwrap();
+        assert_eq!(
+            rt.core
+                .proxy
+                .pipeline
+                .chain()
+                .active_ban(source("203.0.113.5"), vft_proxy::now_ms()),
+            Some(rec)
+        );
+        rt.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_ipv6_ban_is_restored_for_its_whole_prefix() {
         let env = Env::new(BAN_CFG);
         let up = stub(Some(Duration::ZERO)).await;
@@ -1360,7 +1441,7 @@ chain:
         let rt = Runtime::start(env.opts(up)).await.unwrap();
         let mut rx = rt.bus().subscribe();
         env.write("version: 1\nscoring:\n  block_at: 500\n");
-        let (code, body) = http(rt.admin_addr().unwrap(), "POST", "/api/v1/reload", &[]).await;
+        let (code, body) = admin_http(rt.admin_addr().unwrap(), "POST", "/api/v1/reload").await;
         assert_eq!(code, 422, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["rev"], 1);
@@ -1392,10 +1473,10 @@ chain:
         assert_eq!(rt.reload().unwrap_err().1, 1);
         // A later success clears the warning.
         env.write("version: 1\nscoring:\n  block_at: 92\n");
-        let (code, body) = http(rt.admin_addr().unwrap(), "POST", "/api/v1/reload", &[]).await;
+        let (code, body) = admin_http(rt.admin_addr().unwrap(), "POST", "/api/v1/reload").await;
         assert_eq!((code, body.as_str()), (200, r#"{"rev":2}"#));
         assert_eq!(config_health(&rt.status()), (Health::Ok, String::new()));
-        let (_, metrics) = http(rt.admin_addr().unwrap(), "GET", "/metrics", &[]).await;
+        let (_, metrics) = admin_http(rt.admin_addr().unwrap(), "GET", "/metrics").await;
         assert!(
             metrics.contains("vft_reloads_total{result=\"applied\"} 1"),
             "{metrics}"

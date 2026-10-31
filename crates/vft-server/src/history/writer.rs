@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
-use vft_core::FieldRef;
+use vft_core::{BanRecord, FieldRef};
 use vft_proxy::bus::DecisionEvent;
 
 struct Writer {
@@ -28,11 +28,25 @@ struct Writer {
     sweep: Option<Sweeper>,
 }
 
+/// Pragmas for the write connection only: a 64 MiB page cache (the
+/// `requests` table and its indexes are several B-trees per row) and a WAL
+/// checkpoint every 10,000 pages instead of 1,000, so checkpoints, which run
+/// inline in a commit, stall the writer less often.
+pub(super) fn tune(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "cache_size", -65536)?;
+    conn.pragma_update(None, "wal_autocheckpoint", 10000)?;
+    Ok(())
+}
+
 /// The writer loop. Returns when every sender is gone, or after the flush that
-/// follows `close` (writing whatever is still queued first).
+/// follows `close` (writing whatever is still queued first). The control
+/// queue (`control`: bans, config revisions) is drained before every message
+/// taken from the decision queue, and at least every [`HistoryHandle::BATCH_WAIT`]
+/// when the decision queue is idle.
 pub(super) fn run(
     conn: Connection,
     rx: Receiver<WriteMsg>,
+    control: Receiver<WriteMsg>,
     shared: Arc<Shared>,
     metrics: Arc<Metrics>,
     status: Arc<StatusBoard>,
@@ -49,6 +63,7 @@ pub(super) fn run(
     // When the oldest message of the open batch must be committed.
     let mut due: Option<Instant> = None;
     loop {
+        w.drain(&control, &mut due);
         let next = if w.sweep.is_some() {
             // Queue first; with nothing waiting, one more sweep batch.
             match rx.try_recv() {
@@ -64,20 +79,20 @@ pub(super) fn run(
                 Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
             }
         } else {
-            match due {
-                None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-                Some(t) => rx.recv_timeout(t.saturating_duration_since(Instant::now())),
-            }
+            // With nothing pending, still wake every BATCH_WAIT for the control queue.
+            let wait = due.map_or(HistoryHandle::BATCH_WAIT, |t| {
+                t.saturating_duration_since(Instant::now())
+            });
+            rx.recv_timeout(wait)
         };
         match next {
             Ok(msg) => {
                 w.shared.depth.fetch_sub(1, Relaxed);
+                // Bans and revisions queued before this message go first (a
+                // flush covers them).
+                w.drain(&control, &mut due);
                 let flush = matches!(msg, WriteMsg::Flush(_));
-                if w.take(msg) {
-                    due = None;
-                } else if due.is_none() {
-                    due = Some(Instant::now() + HistoryHandle::BATCH_WAIT);
-                }
+                w.take_timed(msg, &mut due);
                 if flush && w.shared.stop.load(Relaxed) {
                     // `close` was called and a flush just went through: write
                     // what is still queued, then stop. A sweep in progress
@@ -85,11 +100,13 @@ pub(super) fn run(
                     w.sweep = None;
                     while let Ok(msg) = rx.try_recv() {
                         w.shared.depth.fetch_sub(1, Relaxed);
+                        w.drain(&control, &mut due);
                         // Retention can wait for the next start.
                         if !matches!(msg, WriteMsg::Sweep { .. }) {
                             w.take(msg);
                         }
                     }
+                    w.drain(&control, &mut due);
                     w.commit();
                     return;
                 }
@@ -99,6 +116,7 @@ pub(super) fn run(
                 due = None;
             }
             Err(RecvTimeoutError::Disconnected) => {
+                w.drain(&control, &mut due);
                 w.commit();
                 return;
             }
@@ -107,6 +125,23 @@ pub(super) fn run(
 }
 
 impl Writer {
+    /// [`Writer::take`], keeping `due` (when the open batch must be committed).
+    fn take_timed(&mut self, msg: WriteMsg, due: &mut Option<Instant>) {
+        if self.take(msg) {
+            *due = None;
+        } else if due.is_none() {
+            *due = Some(Instant::now() + HistoryHandle::BATCH_WAIT);
+        }
+    }
+
+    /// Take everything waiting on the control queue.
+    fn drain(&mut self, control: &Receiver<WriteMsg>, due: &mut Option<Instant>) {
+        while let Ok(msg) = control.try_recv() {
+            self.shared.depth.fetch_sub(1, Relaxed);
+            self.take_timed(msg, due);
+        }
+    }
+
     /// Add `msg` to the batch; returns true when the batch was committed (a
     /// flush, or the batch is full).
     fn take(&mut self, msg: WriteMsg) -> bool {
@@ -185,7 +220,7 @@ impl Writer {
                     self.recovered();
                 }
                 Err(e) => {
-                    self.shared.drop_n(&self.metrics, n);
+                    self.shared.drop_n(&self.metrics, &self.status, n);
                     tracing::error!(error = %e, dropped = n, "history: write failed; batch dropped");
                     self.status
                         .set("history", Health::Degraded, format!("write failed: {e}"));
@@ -230,18 +265,7 @@ fn write(tx: &Transaction<'_>, msg: &WriteMsg, rates: &[(u64, f64)]) -> rusqlite
             ts_ms,
         } => {
             if let Some(b) = ban {
-                tx.prepare_cached(
-                    "INSERT INTO bans (key, cause, since_ms, until_ms, offences) VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT (key, since_ms) DO UPDATE SET
-                       cause = excluded.cause, until_ms = excluded.until_ms, offences = excluded.offences",
-                )?
-                .execute(params![
-                    key,
-                    format!("{:?}", b.cause),
-                    int(b.since_ms),
-                    int(b.until_ms),
-                    b.offences
-                ])?;
+                upsert_ban(tx, key, b)?;
             }
             if *lifted {
                 match ban {
@@ -281,9 +305,32 @@ fn write(tx: &Transaction<'_>, msg: &WriteMsg, rates: &[(u64, f64)]) -> rusqlite
             ])?;
             Ok(())
         }
+        WriteMsg::BanSnapshot(bans) => {
+            for (key, b) in bans {
+                upsert_ban(tx, key, b)?;
+            }
+            Ok(())
+        }
         // Handled by the loop; never batched.
         WriteMsg::Flush(_) | WriteMsg::Sweep { .. } => Ok(()),
     }
+}
+
+/// One `bans` row per (key, since_ms); a later write of the same ban updates it.
+fn upsert_ban(tx: &Transaction<'_>, key: &str, b: &BanRecord) -> rusqlite::Result<()> {
+    tx.prepare_cached(
+        "INSERT INTO bans (key, cause, since_ms, until_ms, offences) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (key, since_ms) DO UPDATE SET
+           cause = excluded.cause, until_ms = excluded.until_ms, offences = excluded.offences",
+    )?
+    .execute(params![
+        key,
+        format!("{:?}", b.cause),
+        int(b.since_ms),
+        int(b.until_ms),
+        b.offences
+    ])?;
+    Ok(())
 }
 
 /// The rollup (always), the `requests` row (when kept) and the chain events.

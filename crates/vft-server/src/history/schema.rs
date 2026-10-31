@@ -18,7 +18,7 @@ CREATE TABLE requests (
   latency_us INTEGER NOT NULL, upstream_status INTEGER, sampled INTEGER NOT NULL,
   exceptions TEXT NOT NULL, extra TEXT NOT NULL
 );
-CREATE INDEX requests_ts ON requests(ts_ms);
+CREATE INDEX requests_ts ON requests(ts_ms, construct, verdict);
 CREATE INDEX requests_verdict_ts ON requests(verdict, ts_ms);
 CREATE INDEX requests_src_ts ON requests(src_key, ts_ms);
 CREATE INDEX requests_construct_ts ON requests(construct, ts_ms);

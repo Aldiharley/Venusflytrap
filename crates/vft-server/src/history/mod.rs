@@ -3,8 +3,11 @@
 //! config revisions.
 //!
 //! One writer thread owns the only write connection. Producers hand it
-//! [`WriteMsg`]s through a bounded queue with `try_send`, so recording history
+//! [`WriteMsg`]s through bounded queues with `try_send`, so recording history
 //! never blocks the proxy: a full queue drops the message and counts it.
+//! Bans and config revisions have their own small control queue, which the
+//! writer always drains before the decision queue, so a decision flood cannot
+//! crowd them out.
 
 pub mod query;
 pub mod read;
@@ -52,8 +55,21 @@ pub enum WriteMsg {
         now_ms: u64,
         retention_days: u32,
     },
+    /// Upsert every (key, ban) as a `bans` row, as `Ban` with `lifted` false
+    /// does; [`HistoryQueue::snapshot_bans`] sends it at stop.
+    BanSnapshot(Vec<(String, BanRecord)>),
     /// Commit everything before this message, then send `()` (the sender may block).
     Flush(SyncSender<()>),
+}
+
+impl WriteMsg {
+    /// Bans, config revisions and ban snapshots go on the control queue.
+    fn is_control(&self) -> bool {
+        matches!(
+            self,
+            WriteMsg::Ban { .. } | WriteMsg::ConfigRevision { .. } | WriteMsg::BanSnapshot(_)
+        )
+    }
 }
 
 /// State shared by every queue clone and the writer thread.
@@ -61,7 +77,7 @@ pub enum WriteMsg {
 struct Shared {
     dropped: AtomicU64,
     written: AtomicU64,
-    /// Messages sent and not yet taken by the writer.
+    /// Messages sent (on either queue) and not yet taken by the writer.
     depth: AtomicU64,
     /// `allow_sample_rate` per config revision, ascending by revision (a
     /// Live option): a decision is sampled with the rate of the config that
@@ -75,9 +91,12 @@ struct Shared {
 const RATES_KEPT: usize = 16;
 
 impl Shared {
-    fn drop_n(&self, metrics: &Metrics, n: u64) {
+    /// Count `n` dropped messages (a full decision queue, or the rows of a
+    /// failed batch) under consumer `history-writer`.
+    fn drop_n(&self, metrics: &Metrics, status: &StatusBoard, n: u64) {
         self.dropped.fetch_add(n, Relaxed);
         metrics.history_dropped(n);
+        status.add_drops("history-writer", n);
     }
 
     fn rates(&self) -> std::sync::MutexGuard<'_, Vec<(u64, f64)>> {
@@ -96,28 +115,113 @@ fn rate_at(rates: &[(u64, f64)], rev: u64) -> f64 {
         .map_or(0.0, |(_, rate)| *rate)
 }
 
-/// A cloneable producer side of the writer queue (for the bus consumer and reloads).
+/// A cloneable producer side of the writer queues (for the bus consumer and reloads).
 #[derive(Clone)]
 pub struct HistoryQueue {
     tx: SyncSender<WriteMsg>,
+    /// Bans and config revisions ([`WriteMsg::is_control`]).
+    control: SyncSender<WriteMsg>,
     shared: Arc<Shared>,
     metrics: Arc<Metrics>,
+    status: Arc<StatusBoard>,
+}
+
+/// `try_send` on `tx` until it is taken or `deadline` passes, counting depth
+/// as `enqueue` does. False on timeout or when the writer is gone.
+fn send_until(
+    tx: &SyncSender<WriteMsg>,
+    shared: &Shared,
+    mut msg: WriteMsg,
+    deadline: Instant,
+) -> bool {
+    loop {
+        shared.depth.fetch_add(1, Relaxed);
+        match tx.try_send(msg) {
+            Ok(()) => return true,
+            Err(e) => {
+                shared.depth.fetch_sub(1, Relaxed);
+                match e {
+                    TrySendError::Disconnected(_) => return false,
+                    TrySendError::Full(m) => {
+                        if Instant::now() >= deadline {
+                            return false;
+                        }
+                        msg = m;
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl HistoryQueue {
     /// `try_send`; returns false (and counts a drop) when the queue is full or
-    /// the writer is gone. Never blocks.
+    /// the writer is gone. Never blocks. Bans and config revisions go on the
+    /// control queue; a drop there is logged and counted under consumer
+    /// `history-control`, every other drop under `history-writer`.
     pub fn enqueue(&self, msg: WriteMsg) -> bool {
+        let control = msg.is_control();
+        let tx = if control { &self.control } else { &self.tx };
         // Count before sending, so the writer's decrement never underflows.
         self.shared.depth.fetch_add(1, Relaxed);
-        match self.tx.try_send(msg) {
+        match tx.try_send(msg) {
             Ok(()) => true,
-            Err(_) => {
+            Err(e) => {
                 self.shared.depth.fetch_sub(1, Relaxed);
-                self.shared.drop_n(&self.metrics, 1);
+                if control {
+                    let (TrySendError::Full(m) | TrySendError::Disconnected(m)) = e;
+                    self.control_dropped(&m);
+                } else {
+                    self.shared.drop_n(&self.metrics, &self.status, 1);
+                }
                 false
             }
         }
+    }
+
+    /// Count a control message that was not queued, and log what it was.
+    fn control_dropped(&self, msg: &WriteMsg) {
+        self.shared.dropped.fetch_add(1, Relaxed);
+        self.metrics.history_dropped(1);
+        self.status.add_drops("history-control", 1);
+        match msg {
+            WriteMsg::Ban { key, lifted, .. } => {
+                tracing::warn!(%key, lifted, "history: control queue full; ban record dropped")
+            }
+            WriteMsg::ConfigRevision { rev, .. } => {
+                tracing::warn!(rev, "history: control queue full; config revision dropped")
+            }
+            WriteMsg::BanSnapshot(bans) => {
+                tracing::warn!(
+                    bans = bans.len(),
+                    "history: control queue full; ban snapshot dropped"
+                )
+            }
+            _ => {}
+        }
+    }
+
+    /// Queue an upsert of every (key, ban) in `bans` on the control queue,
+    /// waiting at most `timeout` for room (used at stop, never on the request
+    /// path). False, logged and counted like a control drop, when it could
+    /// not be queued.
+    pub fn snapshot_bans(&self, bans: Vec<(String, BanRecord)>, timeout: Duration) -> bool {
+        let n = bans.len();
+        let deadline = Instant::now() + timeout;
+        if send_until(
+            &self.control,
+            &self.shared,
+            WriteMsg::BanSnapshot(bans),
+            deadline,
+        ) {
+            return true;
+        }
+        self.shared.dropped.fetch_add(1, Relaxed);
+        self.metrics.history_dropped(1);
+        self.status.add_drops("history-control", 1);
+        tracing::warn!(bans = n, "history: the ban snapshot could not be queued");
+        false
     }
 
     /// Queue a config-revision row with the SHA-256 of the raw file bytes. An
@@ -156,25 +260,10 @@ impl HistoryQueue {
     pub fn flush(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let (ack, done) = sync_channel(1);
-        let mut msg = WriteMsg::Flush(ack);
-        loop {
-            self.shared.depth.fetch_add(1, Relaxed);
-            match self.tx.try_send(msg) {
-                Ok(()) => break,
-                Err(e) => {
-                    self.shared.depth.fetch_sub(1, Relaxed);
-                    match e {
-                        TrySendError::Disconnected(_) => return false,
-                        TrySendError::Full(m) => {
-                            if Instant::now() >= deadline {
-                                return false;
-                            }
-                            msg = m;
-                            std::thread::sleep(Duration::from_millis(2));
-                        }
-                    }
-                }
-            }
+        // The writer drains the control queue before every decision-queue
+        // message, so this also covers bans and revisions queued before it.
+        if !send_until(&self.tx, &self.shared, WriteMsg::Flush(ack), deadline) {
+            return false;
         }
         let left = deadline.saturating_duration_since(Instant::now());
         done.recv_timeout(left).is_ok()
@@ -197,9 +286,12 @@ pub struct HistoryHandle {
 }
 
 impl HistoryHandle {
-    pub const QUEUE: usize = 4096;
+    /// Decision-queue capacity.
+    pub const QUEUE: usize = 16384;
+    /// Control-queue capacity (bans and config revisions).
+    pub const CONTROL_QUEUE: usize = 1024;
     /// Messages per transaction at most.
-    pub const BATCH: usize = 500;
+    pub const BATCH: usize = 2000;
     /// The longest a message waits in a batch before the batch is committed.
     pub const BATCH_WAIT: Duration = Duration::from_millis(250);
 
@@ -220,22 +312,28 @@ impl HistoryHandle {
         metrics: Arc<Metrics>,
         status: Arc<StatusBoard>,
     ) -> anyhow::Result<HistoryHandle> {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
+        create_state_dir(dir).map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
         let path = dir.join("history.db");
-        let conn =
-            schema::open(&path).map_err(|e| anyhow::anyhow!("opening {}: {e}", path.display()))?;
+        let conn = schema::open(&path)
+            .and_then(|c| {
+                writer::tune(&c)?;
+                Ok(c)
+            })
+            .map_err(|e| anyhow::anyhow!("opening {}: {e}", path.display()))?;
         let (tx, rx) = sync_channel(Self::QUEUE);
+        let (control, control_rx) = sync_channel(Self::CONTROL_QUEUE);
         let shared = Arc::new(Shared::default());
         let queue = HistoryQueue {
             tx,
+            control,
             shared: shared.clone(),
             metrics: metrics.clone(),
+            status: status.clone(),
         };
         queue.set_config(1, &cfg);
         let join = std::thread::Builder::new()
             .name("vft-history".into())
-            .spawn(move || writer::run(conn, rx, shared, metrics, status))
+            .spawn(move || writer::run(conn, rx, control_rx, shared, metrics, status))
             .map_err(|e| anyhow::anyhow!("starting the history writer: {e}"))?;
         Ok(HistoryHandle {
             queue,
@@ -304,6 +402,16 @@ impl HistoryHandle {
     pub fn written(&self) -> u64 {
         self.queue.written()
     }
+}
+
+/// Create the state directory (and its parents). On Unix a directory this
+/// creates gets mode 0700: the database holds request metadata.
+fn create_state_dir(dir: &Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)
 }
 
 /// Lower-case hex SHA-256, or `""` for no bytes (no file given).

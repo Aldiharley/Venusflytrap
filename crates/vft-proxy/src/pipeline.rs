@@ -73,6 +73,16 @@ impl ChainStore {
         self.shard(&key).lift(key)
     }
 
+    /// Every ban active at `now_ms` (history writes them at stop). Locks one
+    /// shard at a time.
+    pub fn active_bans(&self, now_ms: u64) -> Vec<(SourceKey, BanRecord)> {
+        let mut out = Vec::new();
+        for shard in &self.shards {
+            out.extend(shard.lock().unwrap_or_else(PoisonError::into_inner).active_bans(now_ms));
+        }
+        out
+    }
+
     /// Apply a reloaded config's live `chain.*` options to every shard
     /// ([`ChainTracker::set_live_config`]). The restart-only capacities keep
     /// their per-shard share and `ipv6_prefix` stays as built. Locks one shard

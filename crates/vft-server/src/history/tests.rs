@@ -492,12 +492,9 @@ fn a_config_revision_row_carries_the_sha256_of_the_given_bytes() {
     h.close(WAIT);
 }
 
-#[test]
-fn a_full_queue_drops_and_counts_without_blocking() {
-    let tmp = Tmp::new();
-    let metrics = Arc::new(Metrics::new());
-    let h = HistoryHandle::open(&tmp.0, cfg(0.01), metrics.clone()).unwrap();
-    // The writer blocks acknowledging this flush until we receive.
+/// Block the writer: it waits acknowledging a flush until the returned
+/// receiver is read. Returns once the writer has taken it.
+fn stall(h: &HistoryHandle) -> std::sync::mpsc::Receiver<()> {
     let (barrier, release) = sync_channel(0);
     assert!(h.enqueue(WriteMsg::Flush(barrier)));
     let t = Instant::now();
@@ -505,6 +502,17 @@ fn a_full_queue_drops_and_counts_without_blocking() {
         assert!(t.elapsed() < WAIT, "the writer never took the barrier");
         std::thread::sleep(Duration::from_millis(1));
     }
+    release
+}
+
+#[test]
+fn a_full_queue_drops_and_counts_without_blocking() {
+    let tmp = Tmp::new();
+    let metrics = Arc::new(Metrics::new());
+    let status = Arc::new(StatusBoard::new());
+    let h = HistoryHandle::open_with_status(&tmp.0, cfg(0.01), metrics.clone(), status.clone())
+        .unwrap();
+    let release = stall(&h);
     let t = Instant::now();
     let refused = (0..HistoryHandle::QUEUE + 10)
         .filter(|i| !h.enqueue(event(&format!("q-{i}"), 1_000, block())))
@@ -512,11 +520,16 @@ fn a_full_queue_drops_and_counts_without_blocking() {
     assert!(t.elapsed() < Duration::from_secs(5), "enqueue never blocks");
     assert_eq!(refused, 10);
     assert_eq!(h.dropped(), 10);
+    assert_eq!(status.snapshot().drops.get("history-writer"), Some(&10));
     release.recv().unwrap();
     assert!(h.flush(WAIT));
     assert_eq!(h.written(), HistoryHandle::QUEUE as u64);
-    let text = metrics.render(&StatusBoard::new().snapshot());
+    let text = metrics.render(&status.snapshot());
     assert!(text.contains("vft_history_rows_dropped_total 10"), "{text}");
+    assert!(
+        text.contains("vft_bus_dropped_total{consumer=\"history-writer\"} 10"),
+        "{text}"
+    );
     assert!(
         text.contains(&format!(
             "vft_history_rows_written_total {}",
@@ -526,6 +539,165 @@ fn a_full_queue_drops_and_counts_without_blocking() {
     );
     assert!(text.contains("vft_history_queue_depth 0"), "{text}");
     h.close(WAIT);
+}
+
+fn ban_msg(key: &str, since_ms: u64) -> WriteMsg {
+    WriteMsg::Ban {
+        key: key.into(),
+        ban: Some(BanRecord {
+            since_ms,
+            until_ms: since_ms + 60_000,
+            cause: BanCause::RepeatedExploitation,
+            offences: 1,
+        }),
+        lifted: false,
+        ts_ms: since_ms,
+    }
+}
+
+#[test]
+fn bans_and_revisions_are_written_while_the_decision_queue_is_full() {
+    let tmp = Tmp::new();
+    let status = Arc::new(StatusBoard::new());
+    let h =
+        HistoryHandle::open_with_status(&tmp.0, cfg(0.0), Arc::new(Metrics::new()), status.clone())
+            .unwrap();
+    let release = stall(&h);
+    for i in 0..HistoryHandle::QUEUE {
+        assert!(h.enqueue(event(&format!("f-{i}"), 1_000, block())));
+    }
+    assert!(
+        !h.enqueue(event("over", 1_000, block())),
+        "the decision queue is full"
+    );
+    assert!(
+        h.enqueue(ban_msg("192.0.2.7", 5_000)),
+        "a ban still goes in"
+    );
+    h.config_revision(2, "reload", b"version: 1\n", b"", Vec::new());
+    assert_eq!(h.dropped(), 1);
+    release.recv().unwrap();
+    assert!(h.flush(WAIT));
+    let c = read(&tmp.0);
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM bans WHERE key = '192.0.2.7'"),
+        1
+    );
+    assert_eq!(count(&c, "SELECT count(*) FROM config_revisions"), 1);
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM requests"),
+        HistoryHandle::QUEUE as i64
+    );
+    let drops = status.snapshot().drops;
+    assert_eq!(drops.get("history-writer"), Some(&1));
+    assert_eq!(drops.get("history-control"), None);
+    h.close(WAIT);
+}
+
+#[test]
+fn a_full_control_queue_drops_counts_and_never_blocks() {
+    let tmp = Tmp::new();
+    let status = Arc::new(StatusBoard::new());
+    let h =
+        HistoryHandle::open_with_status(&tmp.0, cfg(0.0), Arc::new(Metrics::new()), status.clone())
+            .unwrap();
+    let release = stall(&h);
+    let t = Instant::now();
+    let refused = (0..HistoryHandle::CONTROL_QUEUE as u64 + 3)
+        .filter(|i| !h.enqueue(ban_msg(&format!("192.0.2.{}", i % 250), 1_000 + i)))
+        .count();
+    assert!(t.elapsed() < Duration::from_secs(5), "enqueue never blocks");
+    assert_eq!(refused, 3);
+    assert_eq!(status.snapshot().drops.get("history-control"), Some(&3));
+    assert_eq!(h.dropped(), 3);
+    release.recv().unwrap();
+    assert!(h.flush(WAIT));
+    assert_eq!(
+        count(&read(&tmp.0), "SELECT count(*) FROM bans"),
+        HistoryHandle::CONTROL_QUEUE as i64
+    );
+    h.close(WAIT);
+}
+
+#[test]
+fn a_ban_snapshot_upserts_every_ban_and_keeps_rows_already_there() {
+    let tmp = Tmp::new();
+    let h = open(&tmp.0, 0.0);
+    h.enqueue(ban_msg("192.0.2.7", 5_000));
+    assert!(h.flush(WAIT));
+    let rec = |since_ms| BanRecord {
+        since_ms,
+        until_ms: since_ms + 60_000,
+        cause: BanCause::RepeatedExploitation,
+        offences: 1,
+    };
+    assert!(h.queue().snapshot_bans(
+        vec![
+            ("192.0.2.7".into(), rec(5_000)),
+            ("2001:db8:1:2::".into(), rec(6_000)),
+        ],
+        WAIT
+    ));
+    assert!(h.flush(WAIT));
+    let c = read(&tmp.0);
+    assert_eq!(count(&c, "SELECT count(*) FROM bans"), 2);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT until_ms FROM bans WHERE key = '2001:db8:1:2::' AND since_ms = 6000 AND lifted_ms IS NULL"
+        ),
+        66_000
+    );
+    h.close(WAIT);
+}
+
+#[test]
+fn the_writer_connection_has_a_large_cache_and_rare_checkpoints() {
+    let tmp = Tmp::new();
+    let c = schema::open(&tmp.0.join("history.db")).unwrap();
+    writer::tune(&c).unwrap();
+    let cache: i64 = c
+        .pragma_query_value(None, "cache_size", |r| r.get(0))
+        .unwrap();
+    let ckpt: i64 = c
+        .pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+        .unwrap();
+    assert_eq!((cache, ckpt), (-65536, 10000));
+}
+
+/// The `EXPLAIN QUERY PLAN` details of the compiled `q` grouped by `group_by`.
+fn plan(c: &Connection, q: &str, group_by: Option<query::GroupBy>) -> Vec<String> {
+    let compiled = query::compile(&query::Request {
+        q: q.into(),
+        from_ms: 1_000,
+        to_ms: 2_000,
+        group_by,
+        limit: 100,
+        cursor: None,
+    })
+    .unwrap();
+    c.prepare(&format!("EXPLAIN QUERY PLAN {}", compiled.sql))
+        .unwrap()
+        .query_map(rusqlite::params_from_iter(compiled.params.iter()), |r| {
+            r.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_construct_grouping_over_a_window_reads_only_the_covering_ts_index() {
+    let tmp = Tmp::new();
+    let c = schema::open(&tmp.0.join("history.db")).unwrap();
+    for q in ["", "-verdict:allow"] {
+        let p = plan(&c, q, Some(query::GroupBy::Construct));
+        assert!(
+            p.iter()
+                .any(|d| d.contains("USING COVERING INDEX requests_ts")),
+            "{q:?}: {p:?}"
+        );
+    }
 }
 
 #[test]

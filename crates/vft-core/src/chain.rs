@@ -327,6 +327,10 @@ impl ChainTracker {
     pub fn lift(&mut self, key: SourceKey) -> bool {
         self.bans.remove(&key).is_some()
     }
+    /// Every ban still active at `now_ms`, in no particular order.
+    pub fn active_bans(&self, now_ms: u64) -> impl Iterator<Item = (SourceKey, BanRecord)> + '_ {
+        self.bans.iter().filter(move |(_, b)| b.active(now_ms)).map(|(k, b)| (*k, *b))
+    }
     pub fn tracked_sources(&self) -> usize {
         self.sources.len()
     }
