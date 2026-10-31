@@ -3,17 +3,17 @@
 //! shutdown.
 //!
 //! Start order (each step only once the previous one succeeded): load the
-//! config and exceptions → [history] → bus consumers → admin listener → proxy
-//! listener. A failed step stops what already started, in reverse. Stop runs
+//! config and exceptions → [history → restore active bans into the chain store] →
+//! bus consumers → admin listener → proxy listener. A failed step stops what already started, in reverse. Stop runs
 //! the other way: proxy (stop accepting, drain), admin, supervised tasks,
 //! [history: forward what the consumer had not read yet, flush, close].
 
 use crate::admin::{check_bind, serve_admin, AdminState, Reload};
-use crate::history::{HistoryHandle, HistoryQueue, WriteMsg};
+use crate::history::{active_bans, HistoryHandle, HistoryQueue, WriteMsg};
 use crate::metrics::Metrics;
 use crate::status::{Health, StatusBoard, StatusRecord};
 use crate::supervise::supervise;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -23,10 +23,11 @@ use tokio::sync::broadcast::Receiver;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use vft_core::config::ConfigError;
-use vft_core::{Config, ExceptionClock, Exceptions, Shield};
+use vft_core::{Config, ExceptionClock, Exceptions, Shield, SourceKey};
 use vft_proxy::audit::{AuditSink, Format};
 use vft_proxy::bus::{BusEvent, EventBus};
 use vft_proxy::config_handle::{candidate, Candidate, ConfigHandle};
+use vft_proxy::pipeline::ChainStore;
 use vft_proxy::ProxyState;
 
 /// How long [`Runtime::stop`] waits for in-flight requests.
@@ -314,6 +315,71 @@ fn start_history_consumer(
     }))
 }
 
+/// The first retention sweep runs this long after start.
+const SWEEP_FIRST: Duration = Duration::from_secs(60);
+
+/// Then it runs this often.
+const SWEEP_EVERY: Duration = Duration::from_secs(3600);
+
+/// Call `fire` after `first`, then every `every`; never returns.
+async fn sweep_timer(
+    first: Duration,
+    every: Duration,
+    mut fire: impl FnMut(),
+) -> anyhow::Result<()> {
+    tokio::time::sleep(first).await;
+    loop {
+        fire();
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// The retention task: queue a `Sweep` for the writer every hour (the first
+/// one a minute after start), with the `history.retention_days` of the config
+/// loaded at that moment (a Live option).
+fn start_retention(
+    queue: HistoryQueue,
+    handle: Arc<ConfigHandle>,
+    stop: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(supervise("history-retention", stop, move || {
+        let (queue, handle) = (queue.clone(), handle.clone());
+        sweep_timer(SWEEP_FIRST, SWEEP_EVERY, move || {
+            queue.enqueue(WriteMsg::Sweep {
+                now_ms: vft_proxy::now_ms(),
+                retention_days: handle.load().shield.config().history.retention_days,
+            });
+        })
+    }))
+}
+
+/// Put every active ban of the history store back into `chain`, soonest
+/// expiring first, so a store over its `max_bans` capacity evicts the shortest
+/// bans and keeps the longest. A key that is not an address is logged and
+/// skipped. Returns how many were restored.
+fn restore_bans(
+    db: &Path,
+    chain: &ChainStore,
+    ipv6_prefix: u8,
+    now_ms: u64,
+) -> rusqlite::Result<usize> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut restored = 0;
+    for (key, rec) in active_bans(&conn, now_ms)? {
+        match key.parse::<IpAddr>() {
+            Ok(ip) => {
+                chain.restore_ban(SourceKey::new(ip, ipv6_prefix), rec);
+                restored += 1;
+            }
+            Err(_) => {
+                tracing::warn!(%key, "history: a stored ban has a key that is not an address; skipped")
+            }
+        }
+    }
+    Ok(restored)
+}
+
 /// Close the history store: forward what the (stopped) consumer had not read
 /// yet, then flush and stop the writer, off the async workers.
 async fn close_history(history: Option<HistoryHandle>, rx: Option<SharedRx>, status: &StatusBoard) {
@@ -375,6 +441,7 @@ impl Runtime {
         let (ex, exceptions_raw) = read_exceptions(opts.exceptions_path.as_deref())
             .map_err(|v| anyhow::anyhow!("loading exceptions:\n{}", v.join("\n")))?;
         let history_cfg = cfg.history.clone();
+        let ipv6_prefix = cfg.chain.ipv6_prefix;
         let handle = Arc::new(ConfigHandle::new(Arc::new(build_shield(cfg, ex))));
         let status = Arc::new(StatusBoard::new());
         status.set_config(1, Vec::new());
@@ -414,10 +481,15 @@ impl Runtime {
                 rx.clone(),
                 h.queue(),
                 status.clone(),
-                tasks_rx,
+                tasks_rx.clone(),
             ));
             rx
         });
+        if let Some(h) = &history {
+            tasks
+                .handles
+                .push(start_retention(h.queue(), handle.clone(), tasks_rx));
+        }
 
         let audit = AuditSink::new(opts.audit.clone(), opts.audit_max_bytes);
         let ocsf = match &opts.ocsf {
@@ -434,6 +506,27 @@ impl Runtime {
             )
             .with_bus(bus.clone()),
         );
+        // Bans come back before any listener opens: the first request from a
+        // banned source is already answered from the head. Nothing publishes
+        // on the bus yet, so the consumers see no event for them.
+        if let Some(h) = &history {
+            match restore_bans(
+                h.path(),
+                proxy.pipeline.chain(),
+                ipv6_prefix,
+                vft_proxy::now_ms(),
+            ) {
+                Ok(n) => tracing::info!(restored = n, "history: active bans restored"),
+                Err(e) => {
+                    tracing::error!(error = %e, "history: restoring the active bans failed");
+                    status.set(
+                        "history",
+                        Health::Degraded,
+                        format!("ban restore failed: {e}"),
+                    );
+                }
+            }
+        }
         let core = Arc::new(Core {
             config_path: opts.config_path.clone(),
             exceptions_path: opts.exceptions_path.clone(),
@@ -978,6 +1071,125 @@ mod tests {
             20
         );
         assert_eq!(count(&c, "SELECT sum(count) FROM rollup_minute"), 20);
+    }
+
+    const BAN_CFG: &str = "version: 1
+proxy:
+  trusted_proxies: [\"127.0.0.1\"]
+chain:
+  ban_policy:
+    exploitation_blocks: 1
+";
+
+    fn source(ip: &str) -> vft_core::SourceKey {
+        vft_core::SourceKey::new(ip.parse().unwrap(), 64)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ban_is_restored_at_start_and_the_first_request_is_answered_by_the_fast_track() {
+        let env = Env::new(BAN_CFG);
+        let up = stub(Some(Duration::ZERO)).await;
+        let mut o = env.opts(up);
+        o.history = true;
+        let state = o.state_dir.clone();
+        let from = |ip: &'static str| [("X-Forwarded-For", ip)];
+
+        let rt = Runtime::start(o).await.unwrap();
+        let p = rt.proxy_addr();
+        assert_eq!(http(p, "GET", SQLI, &from("198.51.100.9")).await.0, 403);
+        wait_count(&rt, &state, "SELECT count(*) FROM bans", 1).await;
+        rt.stop().await.unwrap();
+
+        // Same state dir, fresh process state: the chain store starts empty.
+        let mut o = env.opts(up);
+        o.history = true;
+        let rt = Runtime::start(o).await.unwrap();
+        let chain = rt.core.proxy.pipeline.chain();
+        let rec = chain
+            .active_ban(source("198.51.100.9"), vft_proxy::now_ms())
+            .expect("restored before start returned");
+        assert_eq!(rec.offences, 1);
+        assert!(chain
+            .active_ban(source("198.51.100.10"), vft_proxy::now_ms())
+            .is_none());
+        let mut rx = rt.bus().subscribe();
+        let p = rt.proxy_addr();
+        assert_eq!(http(p, "GET", "/", &from("198.51.100.9")).await.0, 403);
+        let d = loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("a decision")
+                .unwrap();
+            if let BusEvent::Decision(d) = ev {
+                break d;
+            }
+        };
+        assert_eq!(d.judgment.decided_by.kind, vft_core::CauseKind::Ban);
+        assert_eq!(d.upstream_status, None, "not inspected, not proxied");
+        assert_eq!(
+            http(p, "GET", "/", &from("198.51.100.10")).await.0,
+            200,
+            "other sources are not affected"
+        );
+        rt.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_bans_skips_a_key_that_does_not_parse_and_counts_what_it_restored() {
+        let dir = tmpdir();
+        drop(HistoryHandle::open(&dir, Default::default(), Arc::new(Metrics::new())).unwrap());
+        let now = vft_proxy::now_ms();
+        {
+            let c = rusqlite::Connection::open(dir.join("history.db")).unwrap();
+            for (key, until) in [
+                ("198.51.100.1", now + 60_000),
+                ("not-an-ip", now + 60_000),
+                ("198.51.100.2", now + 120_000),
+                ("198.51.100.3", now.saturating_sub(1)),
+            ] {
+                c.execute(
+                    "INSERT INTO bans (key, cause, since_ms, until_ms, offences) VALUES (?1, 'Manual', 1, ?2, 3)",
+                    rusqlite::params![key, until as i64],
+                )
+                .unwrap();
+            }
+        }
+        let cfg = vft_core::config::ChainConfig::default();
+        let chain = vft_proxy::pipeline::ChainStore::new(&cfg);
+        assert_eq!(
+            restore_bans(&dir.join("history.db"), &chain, cfg.ipv6_prefix, now).unwrap(),
+            2
+        );
+        assert!(chain.active_ban(source("198.51.100.1"), now).is_some());
+        assert!(chain.active_ban(source("198.51.100.2"), now).is_some());
+        assert!(chain.active_ban(source("198.51.100.3"), now).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_sweep_timer_fires_after_a_minute_and_then_every_hour() {
+        let fired = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let f = fired.clone();
+        let task = tokio::spawn(sweep_timer(SWEEP_FIRST, SWEEP_EVERY, move || {
+            f.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let n = || fired.load(std::sync::atomic::Ordering::Relaxed);
+        let advance = |secs| async move {
+            tokio::time::advance(Duration::from_secs(secs)).await;
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::task::yield_now().await;
+        advance(59).await;
+        assert_eq!(n(), 0, "not before a minute");
+        advance(2).await;
+        assert_eq!(n(), 1);
+        advance(3_599).await;
+        assert_eq!(n(), 1, "not before the hour is up");
+        advance(2).await;
+        assert_eq!(n(), 2);
+        task.abort();
     }
 
     #[tokio::test]

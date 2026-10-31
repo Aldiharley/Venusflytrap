@@ -62,7 +62,10 @@ pub(super) fn run(
                     // what is still queued, then stop.
                     while let Ok(msg) = rx.try_recv() {
                         w.shared.depth.fetch_sub(1, Relaxed);
-                        w.take(msg);
+                        // Retention can wait for the next start.
+                        if !matches!(msg, WriteMsg::Sweep { .. }) {
+                            w.take(msg);
+                        }
                     }
                     w.commit();
                     return;
@@ -90,6 +93,14 @@ impl Writer {
                 let _ = ack.send(());
                 true
             }
+            WriteMsg::Sweep {
+                now_ms,
+                retention_days,
+            } => {
+                self.commit();
+                self.sweep(now_ms, retention_days);
+                true
+            }
             other => {
                 self.batch.push(other);
                 if self.batch.len() >= HistoryHandle::BATCH {
@@ -99,6 +110,34 @@ impl Writer {
                     false
                 }
             }
+        }
+    }
+
+    /// The retention sweep on the write connection. A SQLite error turns
+    /// `history` Degraded like a failed commit; the next good write or sweep
+    /// clears it.
+    fn sweep(&mut self, now_ms: u64, retention_days: u32) {
+        match super::sweep(&self.conn, now_ms, retention_days) {
+            Ok((requests, chain_events, rollups)) => {
+                if requests + chain_events + rollups > 0 {
+                    tracing::info!(requests, chain_events, rollups, "history: retention sweep");
+                }
+                self.recovered();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "history: retention sweep failed");
+                self.status
+                    .set("history", Health::Degraded, format!("sweep failed: {e}"));
+                self.failing = true;
+            }
+        }
+    }
+
+    fn recovered(&mut self) {
+        if self.failing {
+            self.failing = false;
+            self.status.set("history", Health::Ok, "on");
+            tracing::info!("history: writes succeed again");
         }
     }
 
@@ -113,11 +152,7 @@ impl Writer {
                 Ok(()) => {
                     self.shared.written.fetch_add(n, Relaxed);
                     self.metrics.history_written(n);
-                    if self.failing {
-                        self.failing = false;
-                        self.status.set("history", Health::Ok, "on");
-                        tracing::info!("history: writes succeed again");
-                    }
+                    self.recovered();
                 }
                 Err(e) => {
                     self.shared.drop_n(&self.metrics, n);
@@ -217,7 +252,7 @@ fn write(tx: &Transaction<'_>, msg: &WriteMsg, rates: &[(u64, f64)]) -> rusqlite
             Ok(())
         }
         // Handled by the loop; never batched.
-        WriteMsg::Flush(_) => Ok(()),
+        WriteMsg::Flush(_) | WriteMsg::Sweep { .. } => Ok(()),
     }
 }
 

@@ -6,6 +6,7 @@
 //! [`WriteMsg`]s through a bounded queue with `try_send`, so recording history
 //! never blocks the proxy: a full queue drops the message and counts it.
 
+mod retention;
 mod schema;
 mod writer;
 
@@ -22,6 +23,7 @@ use vft_core::config::HistoryConfig;
 use vft_core::{BanRecord, Judgment, Verdict};
 use vft_proxy::bus::DecisionEvent;
 
+pub use retention::{active_bans, sweep};
 pub use schema::USER_VERSION;
 
 /// One unit of work for the writer thread.
@@ -41,6 +43,12 @@ pub enum WriteMsg {
         config_sha256: String,
         exceptions_sha256: String,
         changed_keys: Vec<String>,
+    },
+    /// Delete what retention no longer keeps ([`sweep`]): commit the pending batch, then
+    /// delete in transactions of at most 5,000 rows on the writer's connection.
+    Sweep {
+        now_ms: u64,
+        retention_days: u32,
     },
     /// Commit everything before this message, then send `()` (the sender may block).
     Flush(SyncSender<()>),

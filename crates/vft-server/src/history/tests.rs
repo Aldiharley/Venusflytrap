@@ -626,3 +626,69 @@ fn close_writes_what_was_queued_and_later_enqueues_are_refused() {
     let c = read(&tmp.0);
     assert_eq!(count(&c, "SELECT count(*) FROM requests"), 10);
 }
+
+const DAY_MS: u64 = 86_400_000;
+
+#[test]
+fn a_sweep_message_deletes_old_rows_on_the_writer_connection() {
+    let tmp = Tmp::new();
+    let h = open(&tmp.0, 0.0);
+    let now = 100 * DAY_MS;
+    h.enqueue(event("old", now - 20 * DAY_MS, block()));
+    h.enqueue(event("new", now - DAY_MS, block()));
+    h.enqueue(WriteMsg::Sweep {
+        now_ms: now,
+        retention_days: 14,
+    });
+    // A decision queued behind the sweep is still written.
+    h.enqueue(event("later", now, block()));
+    assert!(h.flush(WAIT));
+    let c = read(&tmp.0);
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM requests WHERE event_id = 'old'"),
+        0
+    );
+    assert_eq!(count(&c, "SELECT count(*) FROM requests"), 2);
+    // Both rollup minutes are far younger than 90 days.
+    assert_eq!(count(&c, "SELECT count(*) FROM rollup_minute"), 3);
+    h.close(WAIT);
+}
+
+#[test]
+fn a_failing_sweep_marks_history_degraded_and_the_next_good_write_clears_it() {
+    let tmp = Tmp::new();
+    let status = Arc::new(StatusBoard::new());
+    let h =
+        HistoryHandle::open_with_status(&tmp.0, cfg(0.0), Arc::new(Metrics::new()), status.clone())
+            .unwrap();
+    {
+        let c = Connection::open(tmp.0.join("history.db")).unwrap();
+        c.execute_batch("ALTER TABLE chain_events RENAME TO chain_events_gone")
+            .unwrap();
+    }
+    h.enqueue(WriteMsg::Sweep {
+        now_ms: 100 * DAY_MS,
+        retention_days: 14,
+    });
+    assert!(h.flush(WAIT));
+    let health = || {
+        let rec = status.snapshot();
+        let c = rec.components.iter().find(|c| c.name == "history").unwrap();
+        (c.health, c.reason.clone())
+    };
+    let (state, reason) = health();
+    assert_eq!(state, Health::Degraded);
+    assert!(reason.contains("chain_events"), "{reason}");
+    {
+        let c = Connection::open(tmp.0.join("history.db")).unwrap();
+        c.execute_batch("ALTER TABLE chain_events_gone RENAME TO chain_events")
+            .unwrap();
+    }
+    h.enqueue(WriteMsg::Sweep {
+        now_ms: 100 * DAY_MS,
+        retention_days: 14,
+    });
+    assert!(h.flush(WAIT));
+    assert_eq!(health().0, Health::Ok);
+    h.close(WAIT);
+}
