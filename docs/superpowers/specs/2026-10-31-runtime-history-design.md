@@ -52,6 +52,8 @@ Turn `serve` into a service that can be operated and remembers what it decided:
   `Loaded { rev: u64, shield: Shield, files: FileStamps }`. The pipeline loads
   it once per request, so a request never mixes revisions. The chain store and
   bans live outside `Loaded` and survive every reload.
+  *Deferred to B3:* `Loaded.files: FileStamps` is not implemented in B1+B2
+  (`Loaded` is `{ rev, shield }`); nothing reads file stamps until B3.
 - Reload: read `shield.yaml` (when `--config` was given) and the `--exceptions`
   file (when given) → `Config::validate()` and exceptions validation at the
   current time → build the new `Shield` off the request path → compare with the
@@ -125,10 +127,20 @@ Turn `serve` into a service that can be operated and remembers what it decided:
 - SQLite in WAL mode at `<state-dir>/history.db`; migrations by
   `PRAGMA user_version`.
 - One OS thread owns the write connection, fed from the bus through
-  `std::sync::mpsc::sync_channel(4096)` with `try_send`. A full queue drops the
-  event, counts it (status + `/metrics`) and never blocks a request.
-- Transactions of 500 rows or 250 ms, whichever comes first.
+  `std::sync::mpsc::sync_channel(16384)` with `try_send`. A full queue drops the
+  event, counts it (status + `/metrics`) and never blocks a request. (The
+  first build used 4096 and 500-row transactions; both were raised in the
+  fix wave after the sample-rate-1.0 write measurement.)
+- Bans and config revisions use a second `sync_channel(1024)` that the writer
+  drains before the decision queue; a drop there is logged with the ban key or
+  revision and counted under consumer `history-control`. At stop, every ban
+  active in the chain store is upserted into `bans`.
+- Transactions of 2000 rows or 250 ms, whichever comes first. The write
+  connection uses a 64 MiB page cache and `wal_autocheckpoint = 10000`.
 - Reads use a pool of 4 read-only connections.
+  *Deferred to B3:* there is no read-connection pool in B1+B2; the CLI
+  (`venusflytrap history query`) is the only reader and opens one read-only
+  connection per run.
 
 ### 5.2 Tables
 
@@ -140,8 +152,9 @@ Turn `serve` into a service that can be operated and remembers what it decided:
   `construct`, `technique`, `confidence`, `group_id`, `cause_kind`,
   `decided_option`, `config_rev`, `latency_us`, `upstream_status`, `sampled`,
   `exceptions` (comma-separated ids), `extra` (JSON: contributions summary and
-  skipped fields). Indexes: `ts_ms`, `(verdict, ts_ms)`, `(src_key, ts_ms)`,
-  `(construct, ts_ms)`, `group_id`.
+  skipped fields). Indexes: `(ts_ms, construct, verdict)` (covering, so a
+  window grouped by construct or filtered by verdict reads only the index),
+  `(verdict, ts_ms)`, `(src_key, ts_ms)`, `(construct, ts_ms)`, `group_id`.
 - `rollup_minute`: one row per minute × verdict × family with a count; counts
   100 % of requests (sampling does not affect it).
 - `chain_events`: stage changes and bans per source (`ts_ms`, `src_key`,
