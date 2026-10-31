@@ -162,9 +162,19 @@ impl ProxyState {
     }
 }
 
-/// Publish one request's `Decision`, then a `BanChanged` when it set a ban.
-/// Consumes the decision (the judgment moves into the event, no clone); only
-/// called with a bus attached. Snippets are filled when the live config has
+/// Publish a `BanChanged` when `d` set a new ban. Called right after the
+/// decision, before the upstream wait: a client that disconnects meanwhile
+/// drops the handler, and the ban must not be lost with it. Exactly one per
+/// new ban; only called with a bus attached.
+fn publish_ban(bus: &bus::EventBus, d: &pipeline::Decision) {
+    if let (Some(key), Some(ban)) = (d.src, d.judgment.chain.as_ref().and_then(|c| c.new_ban)) {
+        bus.publish(bus::BusEvent::BanChanged { key: key.ip().to_string(), ban: Some(ban), lifted: false });
+    }
+}
+
+/// Publish one request's `Decision` (its new ban, if any, was published by
+/// [`publish_ban`] already). Consumes the decision (the judgment moves into
+/// the event, no clone); only called with a bus attached. Snippets are filled when the live config has
 /// `history.store_snippets` on (a Live option, read per request).
 fn publish_decision(
     state: &ProxyState,
@@ -182,7 +192,6 @@ fn publish_decision(
         Vec::new()
     };
     let src_key = d.src.map(|k| k.ip().to_string());
-    let new_ban = d.judgment.chain.as_ref().and_then(|c| c.new_ban);
     let host = d
         .request
         .headers
@@ -194,7 +203,7 @@ fn publish_decision(
         event_id,
         group_id,
         ts_ms,
-        src_key: src_key.clone(),
+        src_key,
         ip: d.request.src_ip,
         method: d.request.method,
         host,
@@ -206,9 +215,6 @@ fn publish_decision(
         snippets,
     };
     bus.publish(bus::BusEvent::Decision(Arc::new(ev)));
-    if let (Some(key), Some(ban)) = (src_key, new_ban) {
-        bus.publish(bus::BusEvent::BanChanged { key, ban: Some(ban), lifted: false });
-    }
 }
 
 /// The most characters of a field value [`field_snippets`] keeps.
@@ -335,6 +341,7 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
             state.ocsf.record(&d.request, &d.judgment, &m);
             let resp = refusal(d.judgment.verdict);
             if let Some(bus) = &state.bus {
+                publish_ban(bus, &d);
                 publish_decision(&state, bus, d, eid, ts, start, None);
             }
             return Ok(resp);
@@ -360,6 +367,9 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
     };
 
     let decision = state.pipeline.decide(&parts, &collected, Some(peer.ip()), now_ms());
+    if let Some(bus) = &state.bus {
+        publish_ban(bus, &decision);
+    }
     let id = state.request_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ts = now_ms();
     let eid = state.ids.next(ts);
@@ -764,13 +774,11 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_ban_publishes_decision_then_ban_changed_and_the_fast_track_only_a_decision() {
+        async fn a_ban_publishes_ban_changed_then_decision_and_the_fast_track_only_a_decision() {
             let up = stub(200).await;
             let (addr, bus) = proxy(&up.to_string(), true).await;
             let mut rx = bus.subscribe();
             assert!(get(addr, "/.git/config").await.starts_with("HTTP/1.1 403"));
-            let d = next_decision(&mut rx).await;
-            assert!(d.judgment.chain.as_ref().is_some_and(|c| c.new_ban.is_some()), "{:?}", d.judgment.chain);
             match next(&mut rx).await {
                 BusEvent::BanChanged { key, ban, lifted } => {
                     assert_eq!(key, "127.0.0.1");
@@ -779,6 +787,8 @@ mod tests {
                 }
                 other => panic!("expected BanChanged, got {other:?}"),
             }
+            let d = next_decision(&mut rx).await;
+            assert!(d.judgment.chain.as_ref().is_some_and(|c| c.new_ban.is_some()), "{:?}", d.judgment.chain);
             quiet(&mut rx).await;
             // The next request is answered from the head: a Decision, no new ban.
             assert!(get(addr, "/").await.starts_with("HTTP/1.1 403"));
@@ -787,6 +797,44 @@ mod tests {
             assert_eq!(d.upstream_status, None);
             assert_eq!(d.src_key.as_deref(), Some("127.0.0.1"));
             quiet(&mut rx).await;
+        }
+
+        #[tokio::test]
+        async fn monitor_only_publishes_the_ban_before_the_upstream_answers_and_once() {
+            // An upstream that reads the request and never answers.
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let up = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = l.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 65536];
+                        let _ = s.read(&mut buf).await;
+                        std::future::pending::<()>().await;
+                    });
+                }
+            });
+            let (addr, bus) = proxy(&up.to_string(), false).await;
+            let mut rx = bus.subscribe();
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(b"GET /.git/config HTTP/1.1\r\nHost: shop.test\r\nConnection: close\r\n\r\n").await.unwrap();
+            match next(&mut rx).await {
+                BusEvent::BanChanged { key, ban, lifted } => {
+                    assert_eq!(key, "127.0.0.1");
+                    assert!(!lifted);
+                    assert!(ban.is_some());
+                }
+                other => panic!("expected BanChanged while the upstream waits, got {other:?}"),
+            }
+            // The client gives up: the handler is dropped mid-wait, with no second ban event.
+            drop(s);
+            loop {
+                match tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
+                    Err(_) => break,
+                    Ok(Ok(BusEvent::Decision(_))) => {}
+                    Ok(other) => panic!("unexpected event: {other:?}"),
+                }
+            }
         }
 
         #[tokio::test]
