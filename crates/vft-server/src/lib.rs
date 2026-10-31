@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod logging;
 pub mod metrics;
+pub mod runtime;
 pub mod sha256;
 pub mod status;
 pub mod supervise;

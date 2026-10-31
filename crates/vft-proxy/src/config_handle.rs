@@ -35,6 +35,15 @@ impl ConfigHandle {
 
     /// Make `shield` current under the next revision and return it. Concurrent
     /// swaps each get their own revision.
+    ///
+    /// Precondition: `shield` is built from `candidate(live, next).config`
+    /// (after `Config::validate` on it), never from `next` directly. Restart-only
+    /// values (limits, trusted proxies, chain capacities, ...) are read once at
+    /// construction by the proxy and the pipeline, so a shield carrying other
+    /// values would report settings the data plane does not use. `swap` does not
+    /// check this.
+    /// The live `chain.*` options reach the chain store only through
+    /// `ChainStore::set_live_config`, which the caller runs after the swap.
     pub fn swap(&self, shield: Shield) -> u64 {
         let shield = Arc::new(shield);
         let prev = self.current.rcu(|cur| Loaded { rev: cur.rev + 1, shield: shield.clone() });

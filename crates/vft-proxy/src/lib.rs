@@ -22,7 +22,8 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
+use tokio::task::JoinSet;
 
 use vft_core::config::{DecisionHeaders, LimitsConfig};
 use vft_core::{Judgment, Shield, Verdict};
@@ -399,20 +400,59 @@ pub async fn serve(state: Arc<ProxyState>, bind: SocketAddr) -> anyhow::Result<(
     serve_listener(state, listener).await
 }
 
-/// Serve on an already-bound listener. Accept errors never end the loop (M9).
+/// Serve on an already-bound listener until the task is dropped. Accept
+/// errors never end the loop (M9).
 pub async fn serve_listener(state: Arc<ProxyState>, listener: TcpListener) -> anyhow::Result<()> {
+    // The sender lives as long as this future, so the stop never fires.
+    let (_never, stop) = watch::channel(false);
+    serve_until(state, listener, stop, Duration::ZERO).await.map(|_| ())
+}
+
+/// Resolves once `stop` is true or its sender is gone.
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|v| *v).await;
+}
+
+/// Like `serve_listener`, but stops accepting when `stop` flips to true, then waits for
+/// in-flight connections up to `drain` and returns the number still open when it gave up.
+///
+/// On stop the listener is closed at once; every open connection finishes the
+/// request it is serving and then closes (idle keep-alive connections close
+/// straight away). Connections still open after `drain` are dropped, which
+/// closes their sockets. Dropping the stop sender counts as a stop.
+pub async fn serve_until(
+    state: Arc<ProxyState>,
+    listener: TcpListener,
+    mut stop: watch::Receiver<bool>,
+    drain: Duration,
+) -> anyhow::Result<usize> {
     let slots = Arc::new(Semaphore::new(state.limits.max_connections));
+    let mut conns = JoinSet::new();
     let mut backoff = Duration::from_millis(10);
     loop {
-        let permit = slots.clone().acquire_owned().await?;
-        let (stream, peer) = match listener.accept().await {
+        // Reap finished connections so the set stays small.
+        while conns.try_join_next().is_some() {}
+        let permit = tokio::select! {
+            biased;
+            _ = stopped(&mut stop) => break,
+            p = slots.clone().acquire_owned() => p?,
+        };
+        let accepted = tokio::select! {
+            biased;
+            _ = stopped(&mut stop) => break,
+            r = listener.accept() => r,
+        };
+        let (stream, peer) = match accepted {
             Ok(x) => {
                 backoff = Duration::from_millis(10);
                 x
             }
             Err(e) => {
                 eprintln!("accept error: {e}; retrying in {backoff:?}");
-                tokio::time::sleep(backoff).await;
+                tokio::select! {
+                    _ = stopped(&mut stop) => break,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
                 backoff = (backoff * 2).min(Duration::from_secs(1));
                 continue;
             }
@@ -421,19 +461,44 @@ pub async fn serve_listener(state: Arc<ProxyState>, listener: TcpListener) -> an
         let header_ms = state.limits.header_read_timeout_ms;
         let max_headers = state.limits.max_headers;
         let lifetime = Duration::from_millis(state.limits.max_connection_ms);
-        tokio::spawn(async move {
+        let mut conn_stop = stop.clone();
+        conns.spawn(async move {
             let _permit = permit;
             let svc = service_fn(move |req| handle(st.clone(), peer, req));
             let mut b = hyper::server::conn::http1::Builder::new();
             b.timer(TokioTimer::new())
                 .header_read_timeout(Duration::from_millis(header_ms))
                 .max_headers(max_headers);
+            let conn = b.serve_connection(TokioIo::new(stream), svc);
+            tokio::pin!(conn);
+            let run = async {
+                let mut closing = false;
+                loop {
+                    tokio::select! {
+                        _ = conn.as_mut() => break,
+                        _ = stopped(&mut conn_stop), if !closing => {
+                            // Finish the request in progress, then close.
+                            closing = true;
+                            conn.as_mut().graceful_shutdown();
+                        }
+                    }
+                }
+            };
             // Dropping the connection future on expiry closes the socket and
             // releases the slot, also when a client stops reading (no write
             // progress means hyper never finishes on its own).
-            let _ = tokio::time::timeout(lifetime, b.serve_connection(TokioIo::new(stream), svc)).await;
+            let _ = tokio::time::timeout(lifetime, run).await;
         });
     }
+    drop(listener);
+    let _ = tokio::time::timeout(drain, async {
+        while conns.join_next().await.is_some() {}
+    })
+    .await;
+    let open = conns.len();
+    // Abort the rest; their sockets close as the tasks are dropped.
+    conns.shutdown().await;
+    Ok(open)
 }
 
 #[cfg(test)]
@@ -664,6 +729,141 @@ mod tests {
             let addr = l.local_addr().unwrap();
             tokio::spawn(serve_listener(Arc::new(st), l));
             assert!(get(addr, "/").await.starts_with("HTTP/1.1 200"));
+        }
+    }
+
+    mod drain {
+        use super::*;
+        use std::time::Instant;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::watch;
+
+        /// Upstream stub that answers `200 ok` after `delay` (never, if `None`).
+        async fn slow_stub(delay: Option<Duration>) -> SocketAddr {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = l.accept().await else { return };
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 65536];
+                        let _ = s.read(&mut buf).await;
+                        match delay {
+                            Some(d) => tokio::time::sleep(d).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                        let _ = s.write_all(b"HTTP/1.1 200 OK
+Content-Length: 2
+Connection: close
+
+ok").await;
+                    });
+                }
+            });
+            addr
+        }
+
+        type Served = tokio::task::JoinHandle<anyhow::Result<usize>>;
+
+        async fn proxy(upstream: SocketAddr, drain: Duration) -> (SocketAddr, watch::Sender<bool>, Served) {
+            let st = ProxyState::new(
+                Shield::new(vft_core::Config::default()),
+                format!("http://{upstream}"),
+                audit::AuditSink::off(),
+                audit::AuditSink::off(),
+                true,
+            );
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            let (tx, rx) = watch::channel(false);
+            (addr, tx, tokio::spawn(serve_until(Arc::new(st), l, rx, drain)))
+        }
+
+        /// Send one request and read until the server closes (or 5 s).
+        async fn send(addr: SocketAddr, keep_alive: bool) -> tokio::net::TcpStream {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let conn = if keep_alive { "keep-alive" } else { "close" };
+            let raw = format!("GET / HTTP/1.1
+Host: shop.test
+Connection: {conn}
+
+");
+            s.write_all(raw.as_bytes()).await.unwrap();
+            s
+        }
+
+        async fn read_all(mut s: tokio::net::TcpStream) -> String {
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out)).await;
+            String::from_utf8_lossy(&out).into_owned()
+        }
+
+        #[tokio::test]
+        async fn stop_with_nothing_in_flight_returns_zero_and_releases_the_port() {
+            let up = slow_stub(Some(Duration::ZERO)).await;
+            let (addr, stop, served) = proxy(up, Duration::from_secs(10)).await;
+            assert!(read_all(send(addr, false).await).await.starts_with("HTTP/1.1 200"));
+            let t = Instant::now();
+            stop.send(true).unwrap();
+            let open = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap().unwrap();
+            assert_eq!(open, 0);
+            assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+            TcpListener::bind(addr).await.expect("the port is free again");
+        }
+
+        #[tokio::test]
+        async fn an_in_flight_request_completes_during_the_drain() {
+            let up = slow_stub(Some(Duration::from_millis(300))).await;
+            let (addr, stop, served) = proxy(up, Duration::from_secs(10)).await;
+            let s = send(addr, false).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stop.send(true).unwrap();
+            // No new connections once stopped.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "still accepting after stop");
+            assert!(read_all(s).await.starts_with("HTTP/1.1 200"));
+            let open = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap().unwrap();
+            assert_eq!(open, 0);
+        }
+
+        #[tokio::test]
+        async fn an_idle_keep_alive_connection_does_not_hold_up_the_stop() {
+            let up = slow_stub(Some(Duration::ZERO)).await;
+            let (addr, stop, served) = proxy(up, Duration::from_secs(10)).await;
+            let mut s = send(addr, true).await;
+            let mut buf = vec![0u8; 4096];
+            let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf)).await.unwrap().unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+            let t = Instant::now();
+            stop.send(true).unwrap();
+            let open = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap().unwrap();
+            assert_eq!(open, 0);
+            assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        }
+
+        #[tokio::test]
+        async fn a_request_that_never_finishes_is_cut_off_at_the_drain_limit() {
+            let up = slow_stub(None).await;
+            let (addr, stop, served) = proxy(up, Duration::from_millis(500)).await;
+            let s = send(addr, false).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let t = Instant::now();
+            stop.send(true).unwrap();
+            let open = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap().unwrap();
+            let took = t.elapsed();
+            assert_eq!(open, 1);
+            assert!(took >= Duration::from_millis(450) && took < Duration::from_secs(2), "{took:?}");
+            let resp = read_all(s).await;
+            assert!(!resp.contains(" 200 "), "cut off, not answered: {resp}");
+        }
+
+        #[tokio::test]
+        async fn dropping_the_stop_sender_also_stops() {
+            let up = slow_stub(Some(Duration::ZERO)).await;
+            let (_addr, stop, served) = proxy(up, Duration::from_secs(10)).await;
+            drop(stop);
+            let open = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap().unwrap();
+            assert_eq!(open, 0);
         }
     }
 }

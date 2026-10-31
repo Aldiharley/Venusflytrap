@@ -9,12 +9,11 @@ mod eval;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use vft_core::exceptions::{format_date, parse_date, ExceptionsFile, DAY_MS};
-use vft_core::{Config, ExceptionClock, Exceptions, Request, Shield};
+use vft_core::{Config, Exceptions, Request, Shield};
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum EvalMode {
@@ -79,6 +78,15 @@ enum Command {
         /// Scoped exceptions file (see `exceptions check`); expiry is checked per request.
         #[arg(long)]
         exceptions: Option<PathBuf>,
+        /// Admin listener (loopback `host:port`), or `off`. Default: `admin.bind` from the config.
+        #[arg(long)]
+        admin_bind: Option<String>,
+        /// Directory for the history database.
+        #[arg(long, default_value = "./state")]
+        state_dir: PathBuf,
+        /// Run without the history database.
+        #[arg(long)]
+        no_history: bool,
     },
     /// Evaluate on a raw labeled corpus (*.white benign, *.black malicious).
     Eval {
@@ -185,6 +193,20 @@ fn check_ocsf_path(audit: Option<&str>, ocsf: Option<&str>) -> anyhow::Result<()
         }
         _ => Ok(()),
     }
+}
+
+/// The admin listener address: `--admin-bind` (`off` disables it), else the
+/// config's `admin.bind`. Anything but a loopback address is an error.
+fn admin_bind(arg: Option<&str>, cfg: &Config) -> anyhow::Result<Option<SocketAddr>> {
+    let (text, from) = match arg {
+        Some(a) if a.eq_ignore_ascii_case("off") => return Ok(None),
+        Some(a) => (a, "--admin-bind"),
+        None => (cfg.admin.bind.as_str(), "admin.bind"),
+    };
+    let addr: SocketAddr =
+        text.parse().map_err(|_| anyhow::anyhow!("{from} {text:?} is not an ip:port address or `off`"))?;
+    vft_server::admin::check_bind(addr)?;
+    Ok(Some(addr))
 }
 
 fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Config> {
@@ -300,38 +322,52 @@ fn main() -> anyhow::Result<()> {
             ocsf,
             monitor_only,
             exceptions,
+            admin_bind: admin_arg,
+            state_dir,
+            no_history,
         } => {
             check_ocsf_path(audit.as_deref(), ocsf.as_deref())?;
             let cfg = load_config(cli.config.as_ref())?;
-            let mut shield = Shield::new(cfg);
+            // Before anything binds.
+            let admin = admin_bind(admin_arg.as_deref(), &cfg)?;
             if let Some(path) = &exceptions {
-                let ex = load_exceptions(path, now_ms(), 1);
-                for w in ex.warnings() {
-                    eprintln!("{w}");
-                }
-                shield = shield.with_exceptions(ex, ExceptionClock::PerRequest);
+                // Issues end the process here, before anything binds; the
+                // runtime loads the file itself and logs its warnings.
+                load_exceptions(path, now_ms(), 1);
             }
-            let max_bytes = audit_max_mb.saturating_mul(1024 * 1024);
-            let sink = vft_proxy::audit::AuditSink::new(audit.map(std::path::PathBuf::from), max_bytes);
-            let ocsf_sink = match ocsf {
-                Some(p) => vft_proxy::audit::AuditSink::with_format(
-                    Some(std::path::PathBuf::from(p)),
-                    max_bytes,
-                    vft_proxy::audit::Format::Ocsf,
-                ),
-                None => vft_proxy::audit::AuditSink::off(),
+            vft_server::logging::init();
+            let enforce = !monitor_only;
+            let opts = vft_server::runtime::RuntimeOptions {
+                bind,
+                upstream: upstream.clone(),
+                config_path: cli.config.clone(),
+                exceptions_path: exceptions,
+                audit: audit.map(PathBuf::from),
+                audit_max_bytes: audit_max_mb.saturating_mul(1024 * 1024),
+                ocsf: ocsf.map(PathBuf::from),
+                enforce,
+                admin_bind: admin,
+                state_dir: state_dir.clone(),
+                history: !no_history,
             };
-            let state = Arc::new(vft_proxy::ProxyState::new(
-                shield,
-                upstream,
-                sink,
-                ocsf_sink,
-                !monitor_only,
-            ));
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(vft_proxy::serve(state, bind))?;
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            rt.block_on(async move {
+                let runtime = vft_server::runtime::Runtime::start(opts).await?;
+                eprintln!(
+                    "venusflytrap proxy listening on http://{} -> {upstream} (enforce={enforce})",
+                    runtime.proxy_addr()
+                );
+                match runtime.admin_addr() {
+                    Some(a) => eprintln!("admin listening on http://{a}"),
+                    None => eprintln!("admin listener off"),
+                }
+                eprintln!(
+                    "state dir {}, history {}",
+                    state_dir.display(),
+                    if runtime.history() { "on" } else { "off" }
+                );
+                runtime.run_until_signal().await
+            })?;
         }
         Command::Eval { corpus, mode, sources, step_ms, out, limit, manifest, side, disable, shadow, promotion, dump_requests, exceptions, as_of } => {
             let mut cfg = load_config(cli.config.as_ref())?;
@@ -442,8 +478,24 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_ocsf_path, exceptions_check};
+    use super::{admin_bind, check_ocsf_path, exceptions_check};
     use vft_core::exceptions::parse_date;
+    use vft_core::Config;
+
+    #[test]
+    fn admin_bind_takes_the_flag_then_the_config_and_only_loopback() {
+        let mut cfg = Config::default();
+        assert_eq!(admin_bind(None, &cfg).unwrap(), Some("127.0.0.1:8899".parse().unwrap()));
+        assert_eq!(admin_bind(Some("[::1]:9000"), &cfg).unwrap(), Some("[::1]:9000".parse().unwrap()));
+        assert_eq!(admin_bind(Some("off"), &cfg).unwrap(), None);
+        assert_eq!(admin_bind(Some("OFF"), &cfg).unwrap(), None);
+        let e = admin_bind(Some("0.0.0.0:8899"), &cfg).unwrap_err().to_string();
+        assert!(e.contains("loopback"), "{e}");
+        let e = admin_bind(Some("localhost:8899"), &cfg).unwrap_err().to_string();
+        assert!(e.contains("--admin-bind") && e.contains("off"), "{e}");
+        cfg.admin.bind = "10.0.0.1:8899".into();
+        assert!(admin_bind(None, &cfg).unwrap_err().to_string().contains("loopback"));
+    }
 
     #[test]
     fn ocsf_path_must_differ_from_audit_path() {
