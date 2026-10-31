@@ -6,6 +6,8 @@
 //! [`WriteMsg`]s through a bounded queue with `try_send`, so recording history
 //! never blocks the proxy: a full queue drops the message and counts it.
 
+pub mod query;
+pub mod read;
 mod retention;
 mod schema;
 mod writer;

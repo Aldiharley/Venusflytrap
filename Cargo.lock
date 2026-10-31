@@ -1240,6 +1240,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",
