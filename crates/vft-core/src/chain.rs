@@ -212,6 +212,29 @@ impl ChainTracker {
         ChainTracker { cfg: cfg.clone(), sources: HashMap::new(), bans: HashMap::new() }
     }
 
+    /// The config this tracker decides with.
+    pub fn config(&self) -> &ChainConfig {
+        &self.cfg
+    }
+
+    /// Take the `Apply::Live` chain options of `cfg` (window and ban policy)
+    /// and keep the restart-only ones (`max_sources`, `events_per_source`,
+    /// `ipv6_prefix`, `ban_policy.max_bans`) the tracker was built with. A test
+    /// checks this list against `options::REGISTRY`. Tracked sources and bans
+    /// stay; the new values apply from the next observation.
+    pub fn set_live_config(&mut self, cfg: &ChainConfig) {
+        self.cfg.window_secs = cfg.window_secs;
+        let (bp, next) = (&mut self.cfg.ban_policy, &cfg.ban_policy);
+        bp.on_honeypot = next.on_honeypot;
+        bp.on_exfiltration_block = next.on_exfiltration_block;
+        bp.exploitation_blocks = next.exploitation_blocks;
+        bp.within_secs = next.within_secs;
+        bp.ttl_secs = next.ttl_secs;
+
+        bp.ttl_max_secs = next.ttl_max_secs;
+        bp.min_hostile_share = next.min_hostile_share;
+    }
+
     pub fn active_ban(&self, key: SourceKey, now_ms: u64) -> Option<BanRecord> {
         self.bans.get(&key).copied().filter(|b| b.active(now_ms))
     }
@@ -294,8 +317,19 @@ impl ChainTracker {
         rec
     }
 
+    /// Put back a ban record exactly as stored (no TTL or offence change), e.g.
+    /// when loading history at startup. `max_bans` eviction applies as for `ban`.
+    pub fn restore_ban(&mut self, key: SourceKey, rec: BanRecord) {
+        self.bans.insert(key, rec);
+        self.evict();
+    }
+
     pub fn lift(&mut self, key: SourceKey) -> bool {
         self.bans.remove(&key).is_some()
+    }
+    /// Every ban still active at `now_ms`, in no particular order.
+    pub fn active_bans(&self, now_ms: u64) -> impl Iterator<Item = (SourceKey, BanRecord)> + '_ {
+        self.bans.iter().filter(move |(_, b)| b.active(now_ms)).map(|(k, b)| (*k, *b))
     }
     pub fn tracked_sources(&self) -> usize {
         self.sources.len()
@@ -536,6 +570,77 @@ mod tests {
         }
         assert!(t.tracked_sources() <= 64);
         assert!(t.active_ban(key(7), 2).is_some());
+    }
+
+    #[test]
+    fn set_live_config_copies_exactly_the_live_chain_keys_of_the_registry() {
+        use crate::options::{Apply, REGISTRY};
+        let base = ChainConfig::default();
+        let base_tree = serde_json::to_value(&base).unwrap();
+        let chain_keys: Vec<_> = REGISTRY.iter().filter(|d| d.key.starts_with("chain.")).collect();
+        assert!(chain_keys.len() >= 12, "{}", chain_keys.len());
+        for d in chain_keys {
+            let ptr = format!("/{}", d.key["chain.".len()..].replace('.', "/"));
+            // A value different from the default, still within bounds.
+            let mut tree = base_tree.clone();
+            let slot = tree.pointer_mut(&ptr).unwrap_or_else(|| panic!("{} not in ChainConfig", d.key));
+            *slot = match slot.clone() {
+                serde_json::Value::Bool(b) => serde_json::Value::Bool(!b),
+                serde_json::Value::Number(n) if n.is_f64() => serde_json::json!(if n.as_f64() == Some(0.25) { 0.75 } else { 0.25 }),
+                serde_json::Value::Number(n) => serde_json::json!(n.as_u64().unwrap() + 7),
+                other => panic!("{}: unexpected {other}", d.key),
+            };
+            let next: ChainConfig = serde_json::from_value(tree.clone()).unwrap();
+            let mut t = ChainTracker::new(&base);
+            t.set_live_config(&next);
+            let got = serde_json::to_value(t.config()).unwrap();
+            let want = if d.apply == Apply::Live { &tree } else { &base_tree };
+            assert_eq!(got.pointer(&ptr), want.pointer(&ptr), "{} ({:?})", d.key, d.apply);
+        }
+    }
+
+    #[test]
+    fn set_live_config_changes_when_a_source_gets_banned() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        assert!(t.observe(key(20), Event::Exploitation, 0, true).new_ban.is_none(), "3 needed by default");
+        let mut next = ChainConfig::default();
+        next.ban_policy.exploitation_blocks = 1;
+        t.set_live_config(&next);
+        let o = t.observe(key(21), Event::Exploitation, 1_000, true);
+        assert_eq!(o.new_ban.map(|b| b.cause), Some(BanCause::RepeatedExploitation));
+    }
+
+    #[test]
+    fn restore_ban_keeps_the_record_as_is() {
+        let mut t = ChainTracker::new(&ChainConfig::default());
+        let rec = BanRecord { since_ms: 1_000, until_ms: 9_000, cause: BanCause::Manual, offences: 3 };
+        t.restore_ban(key(8), rec);
+        assert_eq!(t.active_ban(key(8), 8_999), Some(rec), "the exact record, no TTL recomputation");
+        assert_eq!(t.active_ban(key(8), 9_000), None, "inactive from until_ms on");
+        assert_eq!(t.ban_count(), 1);
+    }
+
+    #[test]
+    fn a_ban_after_a_restore_counts_offences_from_the_restored_record() {
+        let cfg = ChainConfig::default();
+        let mut t = ChainTracker::new(&cfg);
+        let rec = BanRecord { since_ms: 0, until_ms: 1_000, cause: BanCause::Honeypot, offences: 2 };
+        t.restore_ban(key(8), rec);
+        let next = t.ban(key(8), BanCause::Honeypot, 5_000);
+        assert_eq!(next.offences, 3);
+        assert_eq!(next.until_ms, 5_000 + cfg.ban_policy.ttl_secs * 4 * 1000);
+    }
+
+    #[test]
+    fn restore_ban_respects_max_bans() {
+        let mut cfg = ChainConfig::default();
+        cfg.ban_policy.max_bans = 640;
+        let mut t = ChainTracker::new(&cfg);
+        for n in 0..1_000u32 {
+            let k = SourceKey::new(IpAddr::V4(Ipv4Addr::from(0x0C00_0000 | n)), 64);
+            t.restore_ban(k, BanRecord { since_ms: 0, until_ms: 10_000 + u64::from(n), cause: BanCause::Manual, offences: 1 });
+        }
+        assert!(t.ban_count() <= 640);
     }
 
     #[test]

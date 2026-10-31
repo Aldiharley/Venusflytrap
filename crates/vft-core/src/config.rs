@@ -15,6 +15,8 @@ pub struct Config {
     pub proxy: ProxyConfig,
     pub limits: LimitsConfig,
     pub intel: IntelConfig,
+    pub history: HistoryConfig,
+    pub admin: AdminConfig,
 }
 
 impl Default for Config {
@@ -28,6 +30,8 @@ impl Default for Config {
             proxy: ProxyConfig::default(),
             limits: LimitsConfig::default(),
             intel: IntelConfig::default(),
+            history: HistoryConfig::default(),
+            admin: AdminConfig::default(),
         }
     }
 }
@@ -61,6 +65,38 @@ pub struct IntelConfig {
     pub deny_ips: Vec<String>,
     /// Sources never banned and never deny-pinned. They are still inspected.
     pub allow_ips: Vec<String>,
+}
+
+/// What the history store keeps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryConfig {
+    /// Share of untouched Allow judgments stored (every non-Allow and every Allow an exception touched is stored).
+    pub allow_sample_rate: f64,
+    /// Days of requests and chain events kept; rollups keep 90 days.
+    pub retention_days: u32,
+    /// Keep up to 128 characters of each field value (never Authorization, Cookie, Set-Cookie).
+    pub store_snippets: bool,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        HistoryConfig { allow_sample_rate: 0.01, retention_days: 14, store_snippets: false }
+    }
+}
+
+/// The local admin listener.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdminConfig {
+    /// Local admin listener, a loopback `ip:port` (e.g. `127.0.0.1:8899` or `[::1]:8899`); must be a loopback address until auth exists.
+    pub bind: String,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        AdminConfig { bind: "127.0.0.1:8899".into() }
+    }
 }
 
 /// Request-level limits on the data plane.
@@ -523,6 +559,60 @@ mod tests {
             assert!(issues(yaml).iter().any(|i| i.key == key), "{key}");
         }
         assert!(issues("proxy:\n  decision_headers: upstream\nlimits:\n  max_body: 2048\n").is_empty());
+    }
+
+    #[test]
+    fn history_and_admin_defaults() {
+        let c = Config::default();
+        assert_eq!(c.history.allow_sample_rate, 0.01);
+        assert_eq!(c.history.retention_days, 14);
+        assert!(!c.history.store_snippets);
+        assert_eq!(c.admin.bind, "127.0.0.1:8899");
+        let shipped: Config =
+            serde_yaml::from_str(include_str!("../../../config/shield.yaml")).expect("shipped yaml parses");
+        assert_eq!(shipped.history.allow_sample_rate, c.history.allow_sample_rate);
+        assert_eq!(shipped.history.retention_days, c.history.retention_days);
+        assert_eq!(shipped.history.store_snippets, c.history.store_snippets);
+        assert_eq!(shipped.admin.bind, c.admin.bind);
+    }
+
+    #[test]
+    fn history_and_admin_are_validated() {
+        for (yaml, key) in [
+            ("history:
+  allow_sample_rate: 1.5
+", "history.allow_sample_rate"),
+            ("history:
+  allow_sample_rate: -0.1
+", "history.allow_sample_rate"),
+            ("history:
+  retention_days: 0
+", "history.retention_days"),
+            ("history:
+  retention_days: 3651
+", "history.retention_days"),
+            ("admin:
+  bind: nope
+", "admin.bind"),
+            ("admin:
+  bind: \"127.0.0.1\"
+", "admin.bind"),
+        ] {
+            assert!(issues(yaml).iter().any(|i| i.key == key), "{key}");
+        }
+        assert!(issues("history:
+  allow_sample_rate: 1
+  retention_days: 3650
+  store_snippets: true
+admin:
+  bind: \"[::1]:9000\"
+").is_empty());
+        match Config::from_yaml_str("admin:
+  bind: nope
+") {
+            Err(ConfigError::Invalid(i)) => assert!(i.iter().any(|i| i.key == "admin.bind" && i.message.contains("host:port"))),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]

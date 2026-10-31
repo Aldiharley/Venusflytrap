@@ -4,7 +4,7 @@
 //! Per-key bounds live here; `Config::validate` adds the cross-field rules.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -25,6 +25,8 @@ pub enum OptionKind {
     Ips,
     /// A list of registered construct ids (`graph::sinks::constructs()`).
     ConstructIds,
+    /// A `host:port` socket address.
+    Addr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,7 +70,7 @@ const fn opt(key: &'static str, kind: OptionKind, section: &'static str, help: &
 
 use Apply::{Live, Restart};
 use Expertise::{Advanced, Basic, Expert};
-use OptionKind::{Bool, ConstructIds, Float, Int, Ips, Paths};
+use OptionKind::{Addr, Bool, ConstructIds, Float, Int, Ips, Paths};
 
 pub static REGISTRY: &[OptionDescriptor] = &[
     opt("version", Int { min: 1, max: 1 }, "general", "Config schema version. Only `1` exists.", Expert, Restart),
@@ -125,6 +127,12 @@ pub static REGISTRY: &[OptionDescriptor] = &[
     // intel
     opt("intel.deny_ips", Ips, "intel", "Sources always blocked, unless also allow-listed.", Basic, Live),
     opt("intel.allow_ips", Ips, "intel", "Sources never banned or deny-listed; still inspected.", Basic, Live),
+    // history
+    opt("history.allow_sample_rate", Float { min: 0.0, max: 1.0 }, "history", "Share of untouched Allow judgments stored; every non-Allow judgment and every Allow an exception touched is always stored.", Advanced, Live),
+    opt("history.retention_days", Int { min: 1, max: 3650 }, "history", "Days of requests and chain events kept; rollups keep 90 days.", Basic, Live),
+    opt("history.store_snippets", Bool, "history", "Keep up to 128 characters of each field value (never `Authorization`, `Cookie` or `Set-Cookie`).", Advanced, Live),
+    // admin
+    opt("admin.bind", Addr, "admin", "Local admin listener, a loopback `ip:port` (e.g. `127.0.0.1:8899` or `[::1]:8899`); must be a loopback address until auth exists.", Advanced, Restart),
 ];
 
 pub fn lookup(key: &str) -> Option<&'static OptionDescriptor> {
@@ -165,6 +173,10 @@ pub fn check_value(d: &OptionDescriptor, v: &Value) -> Option<String> {
         OptionKind::ConstructIds => strings(v, "a list of construct ids", |s| {
             crate::graph::sinks::lookup(s).is_none().then(|| format!("unknown construct id {s:?}"))
         }),
+        OptionKind::Addr => match v.as_str() {
+            Some(s) if s.parse::<SocketAddr>().is_ok() => None,
+            _ => Some(format!("must be host:port, e.g. 127.0.0.1:8899, got {v}")),
+        },
     }
 }
 

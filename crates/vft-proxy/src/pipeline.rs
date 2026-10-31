@@ -2,7 +2,10 @@
 //! client address → allow-list → ban fast-track → adapt → pure inspect (no
 //! lock) → sharded chain observe → finalize. No lock is held during inspection
 //! (H3). The handler runs the fast-track alone ([`Pipeline::fast_track`])
-//! before reading the body.
+//! before reading the body. Each call loads the [`ConfigHandle`] once and
+//! uses that one shield throughout. Trusted proxies and the chain store's
+//! capacities are restart-only and fixed at construction; a reload pushes the
+//! live `chain.*` options in with [`ChainStore::set_live_config`].
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -18,6 +21,7 @@ use vft_core::{
 };
 
 use crate::adapt;
+use crate::config_handle::{ConfigHandle, Loaded};
 
 const SHARDS: usize = 64;
 
@@ -25,6 +29,8 @@ const SHARDS: usize = 64;
 /// Only a single shard is locked, and only for the duration of one chain call.
 pub struct ChainStore {
     shards: Vec<Mutex<ChainTracker>>,
+    /// `chain.ipv6_prefix` the store was built with (restart-only).
+    ipv6_prefix: u8,
 }
 
 impl ChainStore {
@@ -32,7 +38,10 @@ impl ChainStore {
         let mut per = cfg.clone();
         per.max_sources = (cfg.max_sources / SHARDS).max(1);
         per.ban_policy.max_bans = (cfg.ban_policy.max_bans / SHARDS).max(1);
-        ChainStore { shards: (0..SHARDS).map(|_| Mutex::new(ChainTracker::new(&per))).collect() }
+        ChainStore {
+            shards: (0..SHARDS).map(|_| Mutex::new(ChainTracker::new(&per))).collect(),
+            ipv6_prefix: cfg.ipv6_prefix,
+        }
     }
 
     fn shard(&self, key: &SourceKey) -> MutexGuard<'_, ChainTracker> {
@@ -55,8 +64,33 @@ impl ChainStore {
         self.shard(&key).ban(key, cause, now_ms)
     }
 
+    /// Put back a stored ban record unchanged (history restore at startup).
+    pub fn restore_ban(&self, key: SourceKey, rec: BanRecord) {
+        self.shard(&key).restore_ban(key, rec)
+    }
+
     pub fn lift(&self, key: SourceKey) -> bool {
         self.shard(&key).lift(key)
+    }
+
+    /// Every ban active at `now_ms` (history writes them at stop). Locks one
+    /// shard at a time.
+    pub fn active_bans(&self, now_ms: u64) -> Vec<(SourceKey, BanRecord)> {
+        let mut out = Vec::new();
+        for shard in &self.shards {
+            out.extend(shard.lock().unwrap_or_else(PoisonError::into_inner).active_bans(now_ms));
+        }
+        out
+    }
+
+    /// Apply a reloaded config's live `chain.*` options to every shard
+    /// ([`ChainTracker::set_live_config`]). The restart-only capacities keep
+    /// their per-shard share and `ipv6_prefix` stays as built. Locks one shard
+    /// at a time.
+    pub fn set_live_config(&self, cfg: &ChainConfig) {
+        for shard in &self.shards {
+            shard.lock().unwrap_or_else(PoisonError::into_inner).set_live_config(cfg);
+        }
     }
 }
 
@@ -66,6 +100,8 @@ pub struct Decision {
     pub request: VftRequest,
     pub judgment: Judgment,
     pub src: Option<SourceKey>,
+    /// Revision of the config that decided it ([`Loaded::rev`]).
+    pub config_rev: u64,
 }
 
 impl Decision {
@@ -78,7 +114,7 @@ impl Decision {
 }
 
 pub struct Pipeline {
-    shield: Arc<Shield>,
+    handle: Arc<ConfigHandle>,
     chain: ChainStore,
     trusted: Vec<IpAddr>,
 }
@@ -96,8 +132,16 @@ fn parse_hop(hop: &str) -> Option<IpAddr> {
 }
 
 impl Pipeline {
+    /// A pipeline over a fixed shield (a fresh handle at rev 1).
     pub fn new(shield: Arc<Shield>) -> Self {
-        let cfg = shield.config();
+        Self::with_handle(Arc::new(ConfigHandle::new(shield)))
+    }
+
+    /// A pipeline that follows `handle`; restart-only settings (trusted
+    /// proxies, the chain store) come from its current config.
+    pub fn with_handle(handle: Arc<ConfigHandle>) -> Self {
+        let first = handle.load();
+        let cfg = first.shield.config();
         let trusted = cfg
             .proxy
             .trusted_proxies
@@ -106,11 +150,12 @@ impl Pipeline {
             .map(canonical)
             .collect();
         let chain = ChainStore::new(&cfg.chain);
-        Pipeline { shield, chain, trusted }
+        Pipeline { handle, chain, trusted }
     }
 
-    pub fn shield(&self) -> &Shield {
-        &self.shield
+    /// The config requests are decided with now.
+    pub fn current(&self) -> Arc<Loaded> {
+        self.handle.load()
     }
 
     pub fn chain(&self) -> &ChainStore {
@@ -142,24 +187,25 @@ impl Pipeline {
         peer
     }
 
-    /// The chain key and ban eligibility of the client behind `peer`.
-    fn source(&self, peer: IpAddr, headers: &HeaderMap) -> Source {
+    /// The chain key and ban eligibility of the client behind `peer`; the
+    /// allow-list is `shield`'s (live), the key prefix the chain store's.
+    fn source(&self, shield: &Shield, peer: IpAddr, headers: &HeaderMap) -> Source {
         let ip = self.client_ip(peer, headers);
         Source {
             ip,
-            key: SourceKey::new(ip, self.shield.config().chain.ipv6_prefix),
+            key: SourceKey::new(ip, self.chain.ipv6_prefix),
             // An allow-listed source (checked on its canonical address) is
             // inspected normally and is never banned, so a ban on its address
             // or shared prefix cannot block it.
-            may_ban: !self.shield.intel().is_allowed(&canonical(ip)),
+            may_ban: !shield.intel().is_allowed(&canonical(ip)),
         }
     }
 
-    fn banned(&self, src: &Source, now_ms: u64) -> Option<Judgment> {
+    fn banned(&self, shield: &Shield, src: &Source, now_ms: u64) -> Option<Judgment> {
         if !src.may_ban {
             return None;
         }
-        self.chain.active_ban(src.key, now_ms).map(|ban| self.shield.banned_judgment(&ban))
+        self.chain.active_ban(src.key, now_ms).map(|ban| shield.banned_judgment(&ban))
     }
 
     /// Spec §5.3 step 3: the ban fast-track from the request head alone, so
@@ -169,27 +215,31 @@ impl Pipeline {
     ///
     /// [`decide`]: Pipeline::decide
     pub fn fast_track(&self, parts: &Parts, peer: Option<IpAddr>, now_ms: u64) -> Option<Decision> {
-        let src = self.source(peer?, &parts.headers);
-        let judgment = self.banned(&src, now_ms)?;
+        let peer = peer?;
+        let cur = self.handle.load();
+        let src = self.source(&cur.shield, peer, &parts.headers);
+        let judgment = self.banned(&cur.shield, &src, now_ms)?;
         let request = adapt::from_parts(parts, b"", Some(src.ip));
-        Some(Decision { request, judgment, src: Some(src.key) })
+        Some(Decision { request, judgment, src: Some(src.key), config_rev: cur.rev })
     }
 
     pub fn decide(&self, parts: &Parts, body: &[u8], peer: Option<IpAddr>, now_ms: u64) -> Decision {
+        let cur = self.handle.load();
+        let (shield, config_rev) = (&cur.shield, cur.rev);
         let Some(peer) = peer else {
             let request = adapt::from_parts(parts, body, None);
-            let judgment = self.shield.inspect_at(&request, now_ms);
-            return Decision { request, judgment, src: None };
+            let judgment = shield.inspect_at(&request, now_ms);
+            return Decision { request, judgment, src: None, config_rev };
         };
-        let src = self.source(peer, &parts.headers);
+        let src = self.source(shield, peer, &parts.headers);
         let request = adapt::from_parts(parts, body, Some(src.ip));
-        if let Some(judgment) = self.banned(&src, now_ms) {
-            return Decision { request, judgment, src: Some(src.key) };
+        if let Some(judgment) = self.banned(shield, &src, now_ms) {
+            return Decision { request, judgment, src: Some(src.key), config_rev };
         }
-        let judgment = self.shield.inspect_at(&request, now_ms);
+        let judgment = shield.inspect_at(&request, now_ms);
         let outcome = self.chain.observe(src.key, event_for(&judgment), now_ms, src.may_ban);
-        let judgment = self.shield.finalize(judgment, &outcome);
-        Decision { request, judgment, src: Some(src.key) }
+        let judgment = shield.finalize(judgment, &outcome);
+        Decision { request, judgment, src: Some(src.key), config_rev }
     }
 }
 
@@ -466,6 +516,33 @@ exceptions:
     }
 
     #[test]
+    fn set_live_config_changes_when_a_source_gets_banned_and_keeps_shard_capacity() {
+        let p = pipeline();
+        let a: IpAddr = "203.0.113.61".parse().unwrap();
+        assert!(blocked(p.decide(&parts(EXFIL, CHROME), b"", Some(a), 0).judgment.verdict));
+        assert!(!p.decide(&parts("/", CHROME), b"", Some(a), 100).judgment.banned(), "3 blocks needed by default");
+        let mut next = Config::default().chain;
+        next.ban_policy.exploitation_blocks = 1;
+        next.max_sources = 640_000;
+        next.ban_policy.max_bans = 640_000;
+        next.ipv6_prefix = 48;
+        p.chain().set_live_config(&next);
+        let b: IpAddr = "203.0.113.62".parse().unwrap();
+        assert!(p.decide(&parts(EXFIL, CHROME), b"", Some(b), 1_000).judgment.banned(), "one block bans now");
+        assert!(p.decide(&parts("/", CHROME), b"", Some(b), 1_100).judgment.banned());
+        // Restart-only capacity stays at the per-shard share of the original.
+        let live = Config::default().chain;
+        for shard in &p.chain().shards {
+            let t = shard.lock().unwrap();
+            assert_eq!(t.config().ban_policy.exploitation_blocks, 1);
+            assert_eq!(t.config().max_sources, live.max_sources / SHARDS);
+            assert_eq!(t.config().ban_policy.max_bans, live.ban_policy.max_bans / SHARDS);
+            assert_eq!(t.config().ipv6_prefix, live.ipv6_prefix);
+        }
+        assert_eq!(p.chain().ipv6_prefix, live.ipv6_prefix);
+    }
+
+    #[test]
     fn ban_survives_source_churn_at_minimum_validated_capacity() {
         let mut cfg = Config::default();
         cfg.chain.max_sources = 640;
@@ -528,7 +605,7 @@ exceptions:
                             if stateful {
                                 let _ = p.decide(&w, b"", Some(ip), i);
                             } else {
-                                let _ = p.shield().inspect(&adapt::from_parts(&w, b"", Some(ip)));
+                                let _ = p.current().shield.inspect(&adapt::from_parts(&w, b"", Some(ip)));
                             }
                         }
                     })
