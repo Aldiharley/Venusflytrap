@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
-//! Venusflytrap service runtime: status board, supervisor, metrics, logging.
+//! Venusflytrap service runtime: status board, supervisor, metrics, logging,
+//! history.
 
 pub mod admin;
+pub mod history;
 pub mod logging;
 pub mod metrics;
 pub mod runtime;

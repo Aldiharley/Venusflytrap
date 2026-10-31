@@ -116,7 +116,8 @@ fn serve_prints_its_addresses_and_answers_on_the_admin_listener() {
     let proxy = addr_in(&s.wait_line("proxy listening on"));
     let admin = addr_in(&s.wait_line("admin listening on"));
     let st = s.wait_line("state dir");
-    assert!(st.contains(&state.display().to_string()) && st.contains("history off"), "{st}");
+    assert!(st.contains(&state.display().to_string()) && st.contains("history on"), "{st}");
+    assert!(state.join("history.db").is_file(), "the history store is in the state dir");
     assert_eq!(get(admin, "/api/v1/health"), (200, r#"{"ok":true}"#.to_string()));
     // The upstream is down: the proxy answers 502 itself.
     assert_eq!(get(proxy, "/").0, 502);
@@ -140,6 +141,8 @@ fn admin_bind_off_disables_the_admin_listener() {
     ]);
     s.wait_line("proxy listening on");
     s.wait_line("admin listener off");
+    let st = s.wait_line("state dir");
+    assert!(st.contains("history off"), "--no-history: {st}");
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }

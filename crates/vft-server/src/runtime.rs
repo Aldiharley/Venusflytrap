@@ -5,10 +5,11 @@
 //! Start order (each step only once the previous one succeeded): load the
 //! config and exceptions → [history] → bus consumers → admin listener → proxy
 //! listener. A failed step stops what already started, in reverse. Stop runs
-//! the other way: proxy (stop accepting, drain), admin, [history flush],
-//! supervised tasks.
+//! the other way: proxy (stop accepting, drain), admin, supervised tasks,
+//! [history: forward what the consumer had not read yet, flush, close].
 
 use crate::admin::{check_bind, serve_admin, AdminState, Reload};
+use crate::history::{HistoryHandle, HistoryQueue, WriteMsg};
 use crate::metrics::Metrics;
 use crate::status::{Health, StatusBoard, StatusRecord};
 use crate::supervise::supervise;
@@ -17,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use vft_core::config::ConfigError;
@@ -29,6 +31,9 @@ use vft_proxy::ProxyState;
 
 /// How long [`Runtime::stop`] waits for in-flight requests.
 pub const DRAIN: Duration = Duration::from_secs(10);
+
+/// How long [`Runtime::stop`] waits for the history store to flush and close.
+pub const HISTORY_CLOSE: Duration = Duration::from_secs(5);
 
 pub struct RuntimeOptions {
     /// Proxy listener address.
@@ -60,6 +65,8 @@ struct Core {
     bus: EventBus,
     status: Arc<StatusBoard>,
     metrics: Arc<Metrics>,
+    /// `None` when history is off.
+    history: Option<HistoryQueue>,
     /// Held for a whole reload, so admin POSTs and SIGHUP never interleave.
     reload_lock: Mutex<()>,
 }
@@ -68,23 +75,34 @@ fn issues_text<T: std::fmt::Display>(v: &[T]) -> Vec<String> {
     v.iter().map(|i| i.to_string()).collect()
 }
 
-/// The config at `path` (defaults if `None`), validated; issue strings on failure.
-fn read_config(path: Option<&Path>) -> Result<Config, Vec<String>> {
-    let cfg = Config::load_or_default(path).map_err(|e| match e {
-        ConfigError::Invalid(issues) => issues_text(&issues),
-        other => vec![match path {
-            Some(p) => format!("{}: {other}", p.display()),
-            None => other.to_string(),
-        }],
-    })?;
+/// The config at `path` (defaults if `None`), validated, with the bytes it
+/// was parsed from (empty for the defaults); issue strings on failure.
+fn read_config(path: Option<&Path>) -> Result<(Config, Vec<u8>), Vec<String>> {
+    let (cfg, raw) = match path {
+        None => (Config::default(), String::new()),
+        Some(p) => {
+            let in_file = |e: ConfigError| match e {
+                ConfigError::Invalid(issues) => issues_text(&issues),
+                other => vec![format!("{}: {other}", p.display())],
+            };
+            // Read once: the revision hash is of exactly the bytes parsed.
+            let raw = std::fs::read_to_string(p).map_err(|e| in_file(e.into()))?;
+            (Config::from_yaml_str(&raw).map_err(in_file)?, raw)
+        }
+    };
     cfg.validate().map_err(|v| issues_text(&v))?;
-    Ok(cfg)
+    Ok((cfg, raw.into_bytes()))
 }
 
-/// The exceptions at `path` as of now (none if `None`); issue strings on failure.
-fn read_exceptions(path: Option<&Path>) -> Result<Option<Exceptions>, Vec<String>> {
-    let Some(path) = path else { return Ok(None) };
-    let ex = Exceptions::load(path, vft_proxy::now_ms()).map_err(|issues| {
+/// The exceptions at `path` as of now (none if `None`), with the bytes they
+/// were parsed from (empty if `None`); issue strings on failure.
+fn read_exceptions(path: Option<&Path>) -> Result<(Option<Exceptions>, Vec<u8>), Vec<String>> {
+    let Some(path) = path else {
+        return Ok((None, Vec::new()));
+    };
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| vec![format!("{p}: {p}: {e}", p = path.display())])?;
+    let ex = Exceptions::from_yaml_str(&raw, vft_proxy::now_ms()).map_err(|issues| {
         issues
             .iter()
             .map(|i| format!("{}: {i}", path.display()))
@@ -93,7 +111,15 @@ fn read_exceptions(path: Option<&Path>) -> Result<Option<Exceptions>, Vec<String
     for w in ex.warnings() {
         tracing::warn!("{}: {w}", path.display());
     }
-    Ok(Some(ex))
+    Ok((Some(ex), raw.into_bytes()))
+}
+
+/// A validated reload, not yet swapped in.
+struct Prepared {
+    shield: Shield,
+    cand: Candidate,
+    config_raw: Vec<u8>,
+    exceptions_raw: Vec<u8>,
 }
 
 fn build_shield(cfg: Config, ex: Option<Exceptions>) -> Shield {
@@ -106,13 +132,18 @@ fn build_shield(cfg: Config, ex: Option<Exceptions>) -> Shield {
 
 impl Core {
     /// Read, validate and build the next shield; nothing is swapped here.
-    fn prepare(&self, live: &Config) -> Result<(Shield, Candidate), Vec<String>> {
-        let next = read_config(self.config_path.as_deref())?;
-        let ex = read_exceptions(self.exceptions_path.as_deref())?;
+    fn prepare(&self, live: &Config) -> Result<Prepared, Vec<String>> {
+        let (next, config_raw) = read_config(self.config_path.as_deref())?;
+        let (ex, exceptions_raw) = read_exceptions(self.exceptions_path.as_deref())?;
         let cand = candidate(live, next);
         // Restart-only values were copied back from live: validate the merge too.
         cand.config.validate().map_err(|v| issues_text(&v))?;
-        Ok((build_shield(cand.config.clone(), ex), cand))
+        Ok(Prepared {
+            shield: build_shield(cand.config.clone(), ex),
+            cand,
+            config_raw,
+            exceptions_raw,
+        })
     }
 
     fn on_hup(&self) {
@@ -131,13 +162,29 @@ impl Reload for Core {
             .unwrap_or_else(PoisonError::into_inner);
         let live = self.handle.load();
         match self.prepare(live.shield.config()) {
-            Ok((shield, cand)) => {
+            Ok(Prepared {
+                shield,
+                cand,
+                config_raw,
+                exceptions_raw,
+            }) => {
                 // `swap`'s precondition holds: the shield is built from `cand.config`.
                 let rev = self.handle.swap(shield);
                 self.proxy
                     .pipeline
                     .chain()
                     .set_live_config(&cand.config.chain);
+                if let Some(h) = &self.history {
+                    // Still under the reload lock: revisions are queued in order.
+                    h.set_config(rev, &cand.config.history);
+                    h.config_revision(
+                        rev,
+                        "reload",
+                        &config_raw,
+                        &exceptions_raw,
+                        cand.changed.clone(),
+                    );
+                }
                 self.status.set("config", Health::Ok, "");
                 self.status.set_config(rev, cand.restart_required.clone());
                 tracing::info!(rev, changed = ?cand.changed, restart_required = ?cand.restart_required, "config applied");
@@ -147,7 +194,6 @@ impl Reload for Core {
                     restart_required: cand.restart_required,
                 });
                 self.metrics.reload(true);
-                // Task 7: enqueue a config-revision row when history is on.
                 Ok(rev)
             }
             Err(issues) => {
@@ -223,23 +269,98 @@ fn start_metrics_consumer(
     }))
 }
 
+/// The history consumer's receiver, shared so `stop` can read what it left.
+type SharedRx = Arc<tokio::sync::Mutex<Receiver<BusEvent>>>;
+
+/// Hand one bus event to the history writer (never blocks; a full queue drops).
+fn to_history(queue: &HistoryQueue, ev: BusEvent) {
+    match ev {
+        BusEvent::Decision(d) => {
+            queue.enqueue(WriteMsg::Decision(d));
+        }
+        BusEvent::BanChanged { key, ban, lifted } => {
+            queue.enqueue(WriteMsg::Ban {
+                key,
+                ban,
+                lifted,
+                ts_ms: vft_proxy::now_ms(),
+            });
+        }
+        BusEvent::ConfigApplied { .. } | BusEvent::ConfigRejected { .. } => {}
+    }
+}
+
+/// The history consumer: maps `Decision` and `BanChanged` to writer messages
+/// and counts a lag as drops for consumer `history`. The receiver is made
+/// before `start` returns and kept across restarts.
+fn start_history_consumer(
+    rx: SharedRx,
+    queue: HistoryQueue,
+    status: Arc<StatusBoard>,
+    stop: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(supervise("history", stop, move || {
+        let (rx, queue, status) = (rx.clone(), queue.clone(), status.clone());
+        async move {
+            let mut rx = rx.lock().await;
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => to_history(&queue, ev),
+                    Err(RecvError::Lagged(n)) => status.add_drops("history", n),
+                    Err(RecvError::Closed) => return Ok(()),
+                }
+            }
+        }
+    }))
+}
+
+/// Close the history store: forward what the (stopped) consumer had not read
+/// yet, then flush and stop the writer, off the async workers.
+async fn close_history(history: Option<HistoryHandle>, rx: Option<SharedRx>, status: &StatusBoard) {
+    let Some(h) = history else { return };
+    if let Some(rx) = rx {
+        // The aborted consumer task releases the receiver as it is dropped.
+        match tokio::time::timeout(Duration::from_secs(1), rx.lock()).await {
+            Ok(mut rx) => {
+                let queue = h.queue();
+                loop {
+                    match rx.try_recv() {
+                        Ok(ev) => to_history(&queue, ev),
+                        Err(TryRecvError::Lagged(n)) => status.add_drops("history", n),
+                        Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                    }
+                }
+            }
+            Err(_) => tracing::warn!("history: the bus consumer did not stop in time"),
+        }
+    }
+    if tokio::task::spawn_blocking(move || h.close(HISTORY_CLOSE))
+        .await
+        .is_err()
+    {
+        tracing::error!("history: closing the store failed");
+    }
+}
+
 /// The running service. Dropping it without [`Runtime::stop`] also stops every
 /// listener and task (their stop senders go away), without waiting for them.
 pub struct Runtime {
     core: Arc<Core>,
     proxy_addr: SocketAddr,
     admin_addr: Option<SocketAddr>,
-    history: bool,
+    history: Option<HistoryHandle>,
+    history_rx: Option<SharedRx>,
     proxy: Stage<usize>,
     admin: Option<Stage<()>>,
     tasks: Tasks,
 }
 
 impl Runtime {
-    /// Ordered start with rollback: load config (+exceptions, PerRequest clock) → [history: open db,
-    /// migrate, record config revision "startup", restore active bans] → start bus consumers →
+    /// Ordered start with rollback: load config (+exceptions, PerRequest clock) → [history: open
+    /// `<state_dir>/history.db`, migrate, record config revision "startup"] → start bus consumers →
     /// admin listener → proxy listener. On any error, stop what started, in reverse, and return it.
-    /// A non-loopback `admin_bind` fails before anything is loaded or bound.
+    /// A non-loopback `admin_bind` fails before anything is loaded or bound; a history store that
+    /// cannot be opened fails before anything binds.
     pub async fn start(opts: RuntimeOptions) -> anyhow::Result<Runtime> {
         Self::start_with(opts, DRAIN).await
     }
@@ -249,32 +370,54 @@ impl Runtime {
         if let Some(a) = opts.admin_bind {
             check_bind(a)?;
         }
-        let cfg = read_config(opts.config_path.as_deref())
+        let (cfg, config_raw) = read_config(opts.config_path.as_deref())
             .map_err(|v| anyhow::anyhow!("loading config: {}", v.join("; ")))?;
-        let ex = read_exceptions(opts.exceptions_path.as_deref())
+        let (ex, exceptions_raw) = read_exceptions(opts.exceptions_path.as_deref())
             .map_err(|v| anyhow::anyhow!("loading exceptions:\n{}", v.join("\n")))?;
+        let history_cfg = cfg.history.clone();
         let handle = Arc::new(ConfigHandle::new(Arc::new(build_shield(cfg, ex))));
         let status = Arc::new(StatusBoard::new());
         status.set_config(1, Vec::new());
         let metrics = Arc::new(Metrics::new());
 
-        // History: Task 7 replaces this.
-        if opts.history {
-            tracing::warn!("history not available in this build; running without it");
-        }
-        status.set("history", Health::Ok, "off");
+        let history = if opts.history {
+            let h = HistoryHandle::open_with_status(
+                &opts.state_dir,
+                history_cfg,
+                metrics.clone(),
+                status.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("history: {e:#}"))?;
+            h.config_revision(1, "startup", &config_raw, &exceptions_raw, Vec::new());
+            status.set("history", Health::Ok, "on");
+            tracing::info!(db = %h.path().display(), "history on");
+            Some(h)
+        } else {
+            status.set("history", Health::Ok, "off");
+            None
+        };
 
         let bus = EventBus::new();
         let (tasks_stop, tasks_rx) = watch::channel(false);
-        let tasks = Tasks {
+        let mut tasks = Tasks {
             handles: vec![start_metrics_consumer(
                 &bus,
                 metrics.clone(),
                 status.clone(),
-                tasks_rx,
+                tasks_rx.clone(),
             )],
             stop: tasks_stop,
         };
+        let history_rx = history.as_ref().map(|h| {
+            let rx: SharedRx = Arc::new(tokio::sync::Mutex::new(bus.subscribe()));
+            tasks.handles.push(start_history_consumer(
+                rx.clone(),
+                h.queue(),
+                status.clone(),
+                tasks_rx,
+            ));
+            rx
+        });
 
         let audit = AuditSink::new(opts.audit.clone(), opts.audit_max_bytes);
         let ocsf = match &opts.ocsf {
@@ -299,6 +442,7 @@ impl Runtime {
             bus,
             status: status.clone(),
             metrics: metrics.clone(),
+            history: history.as_ref().map(HistoryHandle::queue),
             reload_lock: Mutex::new(()),
         });
 
@@ -325,6 +469,7 @@ impl Runtime {
                 }
                 Err(e) => {
                     tasks.stop().await;
+                    close_history(history, history_rx, &status).await;
                     anyhow::bail!("binding the admin listener on {a}: {e}");
                 }
             },
@@ -340,6 +485,7 @@ impl Runtime {
                     let _ = a.stop().await;
                 }
                 tasks.stop().await;
+                close_history(history, history_rx, &status).await;
                 anyhow::bail!("binding the proxy listener on {}: {e}", opts.bind);
             }
         };
@@ -353,7 +499,8 @@ impl Runtime {
             core,
             proxy_addr,
             admin_addr,
-            history: false,
+            history,
+            history_rx,
             proxy: proxy_stage,
             admin,
             tasks,
@@ -381,7 +528,7 @@ impl Runtime {
 
     /// Whether history is being recorded.
     pub fn history(&self) -> bool {
-        self.history
+        self.history.is_some()
     }
 
     /// The bus decisions, bans and config changes are published on.
@@ -394,13 +541,17 @@ impl Runtime {
         self.core.on_hup();
     }
 
-    /// Stop accepting, drain ≤ 10 s, stop admin, flush history, stop supervised tasks.
+    /// Stop accepting, drain ≤ 10 s, stop admin, stop supervised tasks, then
+    /// write what the history consumer had not read yet, flush and close the
+    /// history store (≤ 5 s).
     pub async fn stop(self) -> anyhow::Result<()> {
         let Runtime {
             core,
             proxy,
             admin,
             tasks,
+            history,
+            history_rx,
             ..
         } = self;
         let mut first_err = None;
@@ -415,8 +566,8 @@ impl Runtime {
                 first_err.get_or_insert(e);
             }
         }
-        // History flush: Task 7.
         tasks.stop().await;
+        close_history(history, history_rx, &core.status).await;
         tracing::info!("venusflytrap stopped");
         first_err.map_or(Ok(()), Err)
     }
@@ -649,16 +800,242 @@ mod tests {
         rt.stop().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn history_requested_is_accepted_but_off_in_this_build() {
+    fn component(rec: &StatusRecord, name: &str) -> (Health, String) {
+        let c = rec.components.iter().find(|c| c.name == name).unwrap();
+        (c.health, c.reason.clone())
+    }
+
+    fn history_db(dir: &Path) -> rusqlite::Connection {
+        rusqlite::Connection::open_with_flags(
+            dir.join("history.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+    }
+
+    fn count(c: &rusqlite::Connection, sql: &str) -> i64 {
+        c.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Flush until `sql` counts `want` (the bus consumer forwards asynchronously).
+    async fn wait_count(rt: &Runtime, dir: &Path, sql: &str, want: i64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(rt.history.as_ref().unwrap().flush(Duration::from_secs(5)));
+            let got = count(&history_db(dir), sql);
+            if got == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{sql}: {got}, want {want}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_records_rollups_non_allow_rows_and_the_startup_revision() {
         let env = Env::new("version: 1\n");
         let up = stub(Some(Duration::ZERO)).await;
         let mut o = env.opts(up);
         o.history = true;
+        let state = o.state_dir.clone();
+        let rt = Runtime::start(o).await.unwrap();
+        assert!(rt.history());
+        assert_eq!(
+            component(&rt.status(), "history"),
+            (Health::Ok, "on".into())
+        );
+        let p = rt.proxy_addr();
+        assert_eq!(http(p, "GET", "/", &[]).await.0, 200);
+        assert_eq!(http(p, "GET", "/products?page=2", &[]).await.0, 200);
+        assert_eq!(http(p, "GET", SQLI, &[]).await.0, 403);
+        wait_count(
+            &rt,
+            &state,
+            "SELECT coalesce(sum(count), 0) FROM rollup_minute",
+            3,
+        )
+        .await;
+        let c = history_db(&state);
+        assert_eq!(
+            count(
+                &c,
+                "SELECT sum(count) FROM rollup_minute WHERE verdict = 'Allow'"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &c,
+                "SELECT count(*) FROM requests WHERE verdict = 'Block' AND path = '/x' AND sampled = 0 AND config_rev = 1"
+            ),
+            1
+        );
+        let rev: (i64, String, String, String, String) = c
+            .query_row(
+                "SELECT rev, source, config_sha256, exceptions_sha256, changed_keys FROM config_revisions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            rev,
+            (
+                1,
+                "startup".into(),
+                crate::sha256::sha256_hex(b"version: 1\n"),
+                String::new(),
+                String::new()
+            )
+        );
+        rt.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_records_a_revision_and_applies_the_sample_rate() {
+        let env = Env::new("version: 1\nhistory:\n  allow_sample_rate: 0.0\n");
+        let exc = env.dir.join("exceptions.yaml");
+        std::fs::write(&exc, "version: 1\nexceptions: []\n").unwrap();
+        let up = stub(Some(Duration::ZERO)).await;
+        let mut o = env.opts(up);
+        o.history = true;
+        o.exceptions_path = Some(exc);
+        let state = o.state_dir.clone();
+        let rt = Runtime::start(o).await.unwrap();
+        let p = rt.proxy_addr();
+        assert_eq!(http(p, "GET", "/before", &[]).await.0, 200);
+        let next = "version: 1\nhistory:\n  allow_sample_rate: 1.0\n";
+        env.write(next);
+        assert_eq!(rt.reload(), Ok(2));
+        assert_eq!(http(p, "GET", "/after", &[]).await.0, 200);
+        wait_count(
+            &rt,
+            &state,
+            "SELECT coalesce(sum(count), 0) FROM rollup_minute",
+            2,
+        )
+        .await;
+        let c = history_db(&state);
+        assert_eq!(
+            count(&c, "SELECT count(*) FROM requests WHERE path = '/before'"),
+            0
+        );
+        assert_eq!(
+            count(
+                &c,
+                "SELECT count(*) FROM requests WHERE path = '/after' AND sampled = 1 AND config_rev = 2"
+            ),
+            1
+        );
+        let rows: Vec<(i64, String, String, String, String)> = c
+            .prepare(
+                "SELECT rev, source, config_sha256, exceptions_sha256, changed_keys FROM config_revisions ORDER BY rev",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let ex_sha = crate::sha256::sha256_hex(b"version: 1\nexceptions: []\n");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(
+            (rows[0].0, rows[0].1.as_str(), rows[0].3.as_str()),
+            (1, "startup", ex_sha.as_str())
+        );
+        assert_eq!(
+            rows[1],
+            (
+                2,
+                "reload".into(),
+                crate::sha256::sha256_hex(next.as_bytes()),
+                ex_sha.clone(),
+                "history.allow_sample_rate".into()
+            )
+        );
+        // A rejected reload records nothing.
+        env.write("version: 1\nscoring:\n  block_at: 500\n");
+        assert!(rt.reload().is_err());
+        wait_count(&rt, &state, "SELECT count(*) FROM config_revisions", 2).await;
+        rt.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_writes_the_decisions_made_before_it() {
+        let env = Env::new("version: 1\n");
+        let up = stub(Some(Duration::ZERO)).await;
+        let mut o = env.opts(up);
+        o.history = true;
+        let state = o.state_dir.clone();
+        let rt = Runtime::start(o).await.unwrap();
+        for _ in 0..20 {
+            assert_eq!(http(rt.proxy_addr(), "GET", SQLI, &[]).await.0, 403);
+        }
+        rt.stop().await.unwrap();
+        let c = history_db(&state);
+        assert_eq!(
+            count(&c, "SELECT count(*) FROM requests WHERE verdict = 'Block'"),
+            20
+        );
+        assert_eq!(count(&c, "SELECT sum(count) FROM rollup_minute"), 20);
+    }
+
+    #[tokio::test]
+    async fn no_history_creates_no_database() {
+        let env = Env::new("version: 1\n");
+        let up = stub(Some(Duration::ZERO)).await;
+        let o = env.opts(up);
+        let state = o.state_dir.clone();
         let rt = Runtime::start(o).await.unwrap();
         assert!(!rt.history());
-        assert_eq!(rt.status().health, Health::Ok);
+        assert_eq!(
+            component(&rt.status(), "history"),
+            (Health::Ok, "off".into())
+        );
+        assert_eq!(http(rt.proxy_addr(), "GET", SQLI, &[]).await.0, 403);
         rt.stop().await.unwrap();
+        assert!(!state.join("history.db").exists());
+    }
+
+    #[tokio::test]
+    async fn a_history_store_that_cannot_open_fails_the_start_before_anything_binds() {
+        let env = Env::new("version: 1\n");
+        let up = stub(Some(Duration::ZERO)).await;
+        // Hold the proxy port: had the proxy bound first, the error would be "binding".
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut o = env.opts(up);
+        o.history = true;
+        // A file where the state directory should be.
+        std::fs::write(&o.state_dir, b"not a directory").unwrap();
+        o.bind = held.local_addr().unwrap();
+        let err = Runtime::start(o)
+            .await
+            .err()
+            .expect("start fails")
+            .to_string();
+        assert!(err.contains("history"), "{err}");
+        assert!(!err.contains("binding"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_proxy_bind_closes_the_history_store() {
+        let env = Env::new("version: 1\n");
+        let up = stub(Some(Duration::ZERO)).await;
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut o = env.opts(up);
+        o.history = true;
+        o.bind = held.local_addr().unwrap();
+        let state = o.state_dir.clone();
+        assert!(Runtime::start(o).await.is_err());
+        // The startup revision was written before the store closed.
+        let c = history_db(&state);
+        assert_eq!(
+            count(
+                &c,
+                "SELECT count(*) FROM config_revisions WHERE source = 'startup'"
+            ),
+            1
+        );
     }
 
     #[tokio::test]

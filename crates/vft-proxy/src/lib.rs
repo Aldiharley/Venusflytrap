@@ -164,8 +164,10 @@ impl ProxyState {
 
 /// Publish one request's `Decision`, then a `BanChanged` when it set a ban.
 /// Consumes the decision (the judgment moves into the event, no clone); only
-/// called with a bus attached.
+/// called with a bus attached. Snippets are filled when the live config has
+/// `history.store_snippets` on (a Live option, read per request).
 fn publish_decision(
+    state: &ProxyState,
     bus: &bus::EventBus,
     d: pipeline::Decision,
     event_id: String,
@@ -174,6 +176,11 @@ fn publish_decision(
     upstream_status: Option<u16>,
 ) {
     let group_id = d.group_id();
+    let snippets = if state.pipeline.current().shield.config().history.store_snippets {
+        field_snippets(&d.request, &d.judgment)
+    } else {
+        Vec::new()
+    };
     let src_key = d.src.map(|k| k.ip().to_string());
     let new_ban = d.judgment.chain.as_ref().and_then(|c| c.new_ban);
     let host = d
@@ -196,12 +203,56 @@ fn publish_decision(
         latency_us: u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
         upstream_status,
         config_rev: d.config_rev,
-        snippets: Vec::new(),
+        snippets,
     };
     bus.publish(bus::BusEvent::Decision(Arc::new(ev)));
     if let (Some(key), Some(ban)) = (src_key, new_ban) {
         bus.publish(bus::BusEvent::BanChanged { key, ban: Some(ban), lifted: false });
     }
+}
+
+/// The most characters of a field value [`field_snippets`] keeps.
+pub const SNIPPET_CHARS: usize = 128;
+
+/// Never stored: credentials and session state.
+fn secret_field(f: &vft_core::FieldRef) -> bool {
+    match f.loc {
+        vft_core::Location::Cookie => true,
+        vft_core::Location::Header => {
+            ["authorization", "proxy-authorization", "cookie", "set-cookie"].iter().any(|h| f.name.eq_ignore_ascii_case(h))
+        }
+        _ => false,
+    }
+}
+
+/// Matched-field snippets for the history store (`history.store_snippets`):
+/// for every field a contribution names, once and in first-seen order, its
+/// value as the engine saw it, cut to [`SNIPPET_CHARS`] characters. Never the
+/// `Authorization`, `Proxy-Authorization`, `Cookie` or `Set-Cookie` headers,
+/// nor any cookie field. A field whose value cannot be found is left out.
+pub fn field_snippets(req: &vft_core::Request, j: &Judgment) -> Vec<(vft_core::FieldRef, String)> {
+    use vft_core::Location;
+    let mut out: Vec<(vft_core::FieldRef, String)> = Vec::new();
+    let mut fields: Option<Vec<vft_core::Field>> = None;
+    for f in j.contributions.iter().filter_map(|c| c.field.as_ref()) {
+        if secret_field(f) || out.iter().any(|(seen, _)| seen == f) {
+            continue;
+        }
+        let value = match f.loc {
+            Location::Path => Some(req.path.clone()),
+            Location::Header => req.header(&f.name).map(str::to_string),
+            Location::Body if f.name == "<body>" => Some(String::from_utf8_lossy(&req.body).into_owned()),
+            _ => fields
+                .get_or_insert_with(|| req.fields())
+                .iter()
+                .find(|x| x.loc == f.loc && x.name == f.name)
+                .map(|x| x.raw.clone()),
+        };
+        if let Some(v) = value {
+            out.push((f.clone(), v.chars().take(SNIPPET_CHARS).collect()));
+        }
+    }
+    out
 }
 
 pub fn now_ms() -> u64 {
@@ -284,7 +335,7 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
             state.ocsf.record(&d.request, &d.judgment, &m);
             let resp = refusal(d.judgment.verdict);
             if let Some(bus) = &state.bus {
-                publish_decision(bus, d, eid, ts, start, None);
+                publish_decision(&state, bus, d, eid, ts, start, None);
             }
             return Ok(resp);
         }
@@ -324,7 +375,7 @@ async fn handle(state: Arc<ProxyState>, peer: SocketAddr, req: HyperReq<Incoming
         forward(&state, &parts, collected, peer, &decision.judgment).await
     };
     if let Some(bus) = &state.bus {
-        publish_decision(bus, decision, eid, ts, start, upstream_status);
+        publish_decision(&state, bus, decision, eid, ts, start, upstream_status);
     }
     Ok(resp)
 }
@@ -639,6 +690,38 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn store_snippets_fills_snippets_for_matched_fields_only_when_on() {
+            let up = stub(200).await;
+            let mut cfg = Config::default();
+            cfg.history.store_snippets = true;
+            let bus = EventBus::new();
+            let st = ProxyState::new(Shield::new(cfg), format!("http://{up}"), audit::AuditSink::off(), audit::AuditSink::off(), true)
+                .with_bus(bus.clone());
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(serve_listener(Arc::new(st), l));
+            let mut rx = bus.subscribe();
+            let long = format!("1%20union%20select%20a,b%20from%20users--{}", "x".repeat(300));
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let raw = format!(
+                "GET /x?id={long} HTTP/1.1\r\nHost: shop.test\r\nAuthorization: Bearer 1' union select password from users--\r\nCookie: sid=1 union select a,b from users--\r\nConnection: close\r\n\r\n"
+            );
+            s.write_all(raw.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out)).await;
+            let d = next_decision(&mut rx).await;
+            assert_eq!(d.judgment.verdict, Verdict::Block);
+            let id = d.snippets.iter().find(|(f, _)| f.label() == "query:id").map(|(_, v)| v.clone());
+            let id = id.unwrap_or_else(|| panic!("no query:id snippet in {:?}", d.snippets));
+            assert_eq!(id.chars().count(), 128);
+            assert!(id.starts_with("1 union select"), "{id}");
+            for (f, _) in &d.snippets {
+                let l = f.label().to_ascii_lowercase();
+                assert!(l != "header:authorization" && l != "header:cookie" && !l.starts_with("cookie:"), "{l} stored");
+            }
+        }
+
+        #[tokio::test]
         async fn upstream_error_status_is_reported_as_the_upstream_sent_it() {
             let up = stub(502).await;
             let (addr, bus) = proxy(&up.to_string(), true).await;
@@ -729,6 +812,85 @@ mod tests {
             let addr = l.local_addr().unwrap();
             tokio::spawn(serve_listener(Arc::new(st), l));
             assert!(get(addr, "/").await.starts_with("HTTP/1.1 200"));
+        }
+    }
+
+    mod snippets {
+        use super::*;
+        use vft_core::{Contribution, FieldRef, FourValued, Location, Request};
+
+        fn on(field: FieldRef) -> Contribution {
+            Contribution {
+                engine: "graph-taint",
+                field: Some(field),
+                construct: None,
+                family: None,
+                value: FourValued::Dangerous,
+                weight: 1.0,
+                points: 1.0,
+                shadow: false,
+                exception: None,
+            }
+        }
+
+        fn f(loc: Location, name: &str) -> FieldRef {
+            FieldRef { loc, name: name.into() }
+        }
+
+        #[test]
+        fn matched_fields_truncated_on_a_char_boundary_and_secrets_never_kept() {
+            let req = Request {
+                method: "GET".into(),
+                path: "/x".into(),
+                query: vec![("id".into(), "\u{e9}".repeat(200)), ("q".into(), "short".into())],
+                headers: vec![
+                    ("Content-Type".into(), "application/json".into()),
+                    ("Authorization".into(), "Bearer secret".into()),
+                    ("Cookie".into(), "sid=secret".into()),
+                    ("Set-Cookie".into(), "a=secret".into()),
+                    ("Proxy-Authorization".into(), "Basic secret".into()),
+                    ("Referer".into(), "http://evil.test/'or 1=1".into()),
+                ],
+                cookies: vec![("sid".into(), "secret".into())],
+                body: br#"{"a":"1 union select"}"#.to_vec(),
+                ..Default::default()
+            };
+            let mut j = Judgment::allow();
+            j.contributions = vec![
+                on(f(Location::Query, "id")),
+                on(f(Location::Header, "Authorization")),
+                on(FieldRef::header("cookie")),
+                on(FieldRef::header("SET-COOKIE")),
+                on(FieldRef::header("proxy-authorization")),
+                on(f(Location::Cookie, "sid")),
+                on(f(Location::Cookie, "name:sid")),
+                on(FieldRef::header("referer")),
+                on(FieldRef::path()),
+                on(f(Location::Query, "id")),
+                on(f(Location::Query, "key:q")),
+            ];
+            let got = field_snippets(&req, &j);
+            let labels: Vec<String> = got.iter().map(|(f, _)| f.label()).collect();
+            assert_eq!(labels, ["query:id", "header:referer", "path:<path>", "query:key:q"]);
+            assert_eq!(got[0].1, "\u{e9}".repeat(128));
+            assert_eq!(got[1].1, "http://evil.test/'or 1=1");
+            assert_eq!(got[2].1, "/x");
+            assert_eq!(got[3].1, "q");
+            assert!(got.iter().all(|(_, v)| !v.contains("secret")));
+        }
+
+        #[test]
+        fn a_whole_body_field_is_the_body_text() {
+            let req = Request { body: b"1 union select a,b".to_vec(), ..Request::get("/x") };
+            let mut j = Judgment::allow();
+            j.contributions = vec![on(f(Location::Body, "<body>"))];
+            assert_eq!(field_snippets(&req, &j), vec![(f(Location::Body, "<body>"), "1 union select a,b".to_string())]);
+        }
+
+        #[test]
+        fn no_contribution_no_snippet() {
+            let req = Request { query: vec![("id".into(), "1".into())], ..Request::get("/x") };
+            assert!(field_snippets(&req, &Judgment::allow()).is_empty());
         }
     }
 
