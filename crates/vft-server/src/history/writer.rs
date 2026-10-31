@@ -2,13 +2,14 @@
 //! messages in batches (one transaction per [`HistoryHandle::BATCH`] messages
 //! or [`HistoryHandle::BATCH_WAIT`], whichever comes first, and on every flush).
 
+use super::retention::{Sweeper, SWEEP_BATCH};
 use super::{families, keep, rate_at, HistoryHandle, Shared, WriteMsg};
 use crate::metrics::Metrics;
 use crate::status::{Health, StatusBoard};
 use rusqlite::{params, Connection, Transaction};
 use serde_json::json;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
 use vft_core::FieldRef;
@@ -22,6 +23,9 @@ struct Writer {
     batch: Vec<WriteMsg>,
     /// The last commit failed (status shows `Degraded`).
     failing: bool,
+    /// A retention sweep in progress: one batch runs whenever the queue is
+    /// empty, so it never keeps decisions (or `close`) waiting for long.
+    sweep: Option<Sweeper>,
 }
 
 /// The writer loop. Returns when every sender is gone, or after the flush that
@@ -40,13 +44,30 @@ pub(super) fn run(
         status,
         batch: Vec::with_capacity(HistoryHandle::BATCH),
         failing: false,
+        sweep: None,
     };
     // When the oldest message of the open batch must be committed.
     let mut due: Option<Instant> = None;
     loop {
-        let next = match due {
-            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some(t) => rx.recv_timeout(t.saturating_duration_since(Instant::now())),
+        let next = if w.sweep.is_some() {
+            // Queue first; with nothing waiting, one more sweep batch.
+            match rx.try_recv() {
+                Ok(msg) => Ok(msg),
+                Err(TryRecvError::Empty) => {
+                    w.sweep_step();
+                    if due.is_some_and(|t| Instant::now() >= t) {
+                        w.commit();
+                        due = None;
+                    }
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+            }
+        } else {
+            match due {
+                None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                Some(t) => rx.recv_timeout(t.saturating_duration_since(Instant::now())),
+            }
         };
         match next {
             Ok(msg) => {
@@ -59,7 +80,9 @@ pub(super) fn run(
                 }
                 if flush && w.shared.stop.load(Relaxed) {
                     // `close` was called and a flush just went through: write
-                    // what is still queued, then stop.
+                    // what is still queued, then stop. A sweep in progress
+                    // is left for the next hourly one.
+                    w.sweep = None;
                     while let Ok(msg) = rx.try_recv() {
                         w.shared.depth.fetch_sub(1, Relaxed);
                         // Retention can wait for the next start.
@@ -98,7 +121,8 @@ impl Writer {
                 retention_days,
             } => {
                 self.commit();
-                self.sweep(now_ms, retention_days);
+                // A newer sweep replaces one still running.
+                self.sweep = Some(Sweeper::new(now_ms, retention_days, SWEEP_BATCH));
                 true
             }
             other => {
@@ -113,18 +137,24 @@ impl Writer {
         }
     }
 
-    /// The retention sweep on the write connection. A SQLite error turns
-    /// `history` Degraded like a failed commit; the next good write or sweep
-    /// clears it.
-    fn sweep(&mut self, now_ms: u64, retention_days: u32) {
-        match super::sweep(&self.conn, now_ms, retention_days) {
-            Ok((requests, chain_events, rollups)) => {
+    /// One batch of the retention sweep on the write connection. A SQLite
+    /// error ends the sweep and turns `history` Degraded like a failed commit;
+    /// the next good write or sweep clears it.
+    fn sweep_step(&mut self) {
+        let Some(sweeper) = self.sweep.as_mut() else {
+            return;
+        };
+        match sweeper.step(&self.conn) {
+            Ok((_, None)) => {}
+            Ok((_, Some((requests, chain_events, rollups)))) => {
+                self.sweep = None;
                 if requests + chain_events + rollups > 0 {
                     tracing::info!(requests, chain_events, rollups, "history: retention sweep");
                 }
                 self.recovered();
             }
             Err(e) => {
+                self.sweep = None;
                 tracing::error!(error = %e, "history: retention sweep failed");
                 self.status
                     .set("history", Health::Degraded, format!("sweep failed: {e}"));

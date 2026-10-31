@@ -643,11 +643,17 @@ fn a_sweep_message_deletes_old_rows_on_the_writer_connection() {
     // A decision queued behind the sweep is still written.
     h.enqueue(event("later", now, block()));
     assert!(h.flush(WAIT));
+    // The sweep works between queue turns; a flush does not wait for it.
+    let deadline = Instant::now() + WAIT;
+    while count(
+        &read(&tmp.0),
+        "SELECT count(*) FROM requests WHERE event_id = 'old'",
+    ) > 0
+    {
+        assert!(Instant::now() < deadline, "the sweep did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let c = read(&tmp.0);
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM requests WHERE event_id = 'old'"),
-        0
-    );
     assert_eq!(count(&c, "SELECT count(*) FROM requests"), 2);
     // Both rollup minutes are far younger than 90 days.
     assert_eq!(count(&c, "SELECT count(*) FROM rollup_minute"), 3);
@@ -676,8 +682,16 @@ fn a_failing_sweep_marks_history_degraded_and_the_next_good_write_clears_it() {
         let c = rec.components.iter().find(|c| c.name == "history").unwrap();
         (c.health, c.reason.clone())
     };
-    let (state, reason) = health();
-    assert_eq!(state, Health::Degraded);
+    // The sweep runs between queue turns; a flush does not wait for it.
+    let until = |want: Health| {
+        let deadline = Instant::now() + WAIT;
+        while health().0 != want {
+            assert!(Instant::now() < deadline, "history never became {want:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    until(Health::Degraded);
+    let (_, reason) = health();
     assert!(reason.contains("chain_events"), "{reason}");
     {
         let c = Connection::open(tmp.0.join("history.db")).unwrap();
@@ -689,6 +703,81 @@ fn a_failing_sweep_marks_history_degraded_and_the_next_good_write_clears_it() {
         retention_days: 14,
     });
     assert!(h.flush(WAIT));
-    assert_eq!(health().0, Health::Ok);
+    until(Health::Ok);
     h.close(WAIT);
+}
+
+/// `n` expired `requests` rows (ts 1 .. n), inserted behind the writer's back.
+fn old_backlog(dir: &Path, n: u64) {
+    let c = Connection::open(dir.join("history.db")).unwrap();
+    c.execute(
+        "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < ?1)
+         INSERT INTO requests (event_id, ts_ms, method, host, path, verdict, score, families,
+           cause_kind, decided_option, config_rev, latency_us, sampled, exceptions, extra)
+         SELECT 'old' || i, i, 'GET', 'h', '/', 'Block', 1, 0, 'Detection', 'o', 1, 1, 0, '', '{}' FROM c",
+        [n as i64],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_long_sweep_lets_the_queue_through_between_its_batches() {
+    let tmp = Tmp::new();
+    let h = open(&tmp.0, 0.0);
+    assert!(h.flush(WAIT));
+    let backlog = 100_000;
+    old_backlog(&tmp.0, backlog);
+    let now = 100 * DAY_MS;
+    h.enqueue(WriteMsg::Sweep {
+        now_ms: now,
+        retention_days: 14,
+    });
+    h.enqueue(event("fresh", now, block()));
+    assert!(h.flush(WAIT));
+    let c = read(&tmp.0);
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM requests WHERE event_id = 'fresh'"),
+        1,
+        "the decision queued behind the sweep is committed"
+    );
+    assert!(
+        count(
+            &c,
+            "SELECT count(*) FROM requests WHERE event_id LIKE 'old%'"
+        ) > 0,
+        "before the sweep finished: it works in batches between queue turns"
+    );
+    // The sweep carries on and completes.
+    let deadline = Instant::now() + WAIT;
+    while count(
+        &read(&tmp.0),
+        "SELECT count(*) FROM requests WHERE event_id LIKE 'old%'",
+    ) > 0
+    {
+        assert!(Instant::now() < deadline, "the sweep did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(h.dropped(), 0);
+    h.close(WAIT);
+    assert_eq!(count(&read(&tmp.0), "SELECT count(*) FROM requests"), 1);
+}
+
+#[test]
+fn close_stops_a_sweep_in_progress_within_its_timeout() {
+    let tmp = Tmp::new();
+    let h = open(&tmp.0, 0.0);
+    assert!(h.flush(WAIT));
+    old_backlog(&tmp.0, 300_000);
+    h.enqueue(WriteMsg::Sweep {
+        now_ms: 100 * DAY_MS,
+        retention_days: 14,
+    });
+    let started = Instant::now();
+    h.close(Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let left = count(&read(&tmp.0), "SELECT count(*) FROM requests");
+    assert!(
+        left > 0,
+        "the rest of the sweep waits for the next hourly one ({left} left)"
+    );
 }

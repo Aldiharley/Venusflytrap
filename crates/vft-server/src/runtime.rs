@@ -508,24 +508,26 @@ impl Runtime {
         );
         // Bans come back before any listener opens: the first request from a
         // banned source is already answered from the head. Nothing publishes
-        // on the bus yet, so the consumers see no event for them.
-        if let Some(h) = &history {
-            match restore_bans(
-                h.path(),
+        // on the bus yet, so the consumers see no event for them. Bans that
+        // cannot be read fail the start rather than let banned sources through.
+        let restored = history.as_ref().map(|h| {
+            let path = h.path().to_path_buf();
+            let r = restore_bans(
+                &path,
                 proxy.pipeline.chain(),
                 ipv6_prefix,
                 vft_proxy::now_ms(),
-            ) {
-                Ok(n) => tracing::info!(restored = n, "history: active bans restored"),
-                Err(e) => {
-                    tracing::error!(error = %e, "history: restoring the active bans failed");
-                    status.set(
-                        "history",
-                        Health::Degraded,
-                        format!("ban restore failed: {e}"),
-                    );
-                }
+            );
+            (path, r)
+        });
+        match restored {
+            Some((_, Ok(n))) => tracing::info!(restored = n, "history: active bans restored"),
+            Some((path, Err(e))) => {
+                tasks.stop().await;
+                close_history(history, history_rx, &status).await;
+                anyhow::bail!("restoring bans from {}: {e}", path.display());
             }
+            None => {}
         }
         let core = Arc::new(Core {
             config_path: opts.config_path.clone(),
@@ -1132,6 +1134,70 @@ chain:
             "other sources are not affected"
         );
         rt.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ipv6_ban_is_restored_for_its_whole_prefix() {
+        let env = Env::new(BAN_CFG);
+        let up = stub(Some(Duration::ZERO)).await;
+        let mut o = env.opts(up);
+        o.history = true;
+        let state = o.state_dir.clone();
+        let from = |ip: &'static str| [("X-Forwarded-For", ip)];
+
+        let rt = Runtime::start(o).await.unwrap();
+        let p = rt.proxy_addr();
+        assert_eq!(http(p, "GET", SQLI, &from("2001:db8:1:2::77")).await.0, 403);
+        wait_count(&rt, &state, "SELECT count(*) FROM bans", 1).await;
+        rt.stop().await.unwrap();
+
+        let mut o = env.opts(up);
+        o.history = true;
+        let rt = Runtime::start(o).await.unwrap();
+        let chain = rt.core.proxy.pipeline.chain();
+        let now = vft_proxy::now_ms();
+        // Another address of the same /64 shares the key; another /64 does not.
+        assert!(chain.active_ban(source("2001:db8:1:2::99"), now).is_some());
+        assert!(chain.active_ban(source("2001:db8:1:3::77"), now).is_none());
+        assert_eq!(
+            http(rt.proxy_addr(), "GET", "/", &from("2001:db8:1:2::5"))
+                .await
+                .0,
+            403
+        );
+        rt.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_bans_fail_the_start_before_the_proxy_binds() {
+        let env = Env::new("version: 1\n");
+        let up = stub(Some(Duration::ZERO)).await;
+        let mut o = env.opts(up);
+        o.history = true;
+        let state = o.state_dir.clone();
+        drop(HistoryHandle::open(&state, Default::default(), Arc::new(Metrics::new())).unwrap());
+        // The bans table is gone from under the store: the query cannot be prepared.
+        rusqlite::Connection::open(state.join("history.db"))
+            .unwrap()
+            .execute_batch("ALTER TABLE bans RENAME TO bans_gone")
+            .unwrap();
+        // A port nothing listens on, so a bind that happened would show.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        o.bind = port;
+        let err = Runtime::start(o)
+            .await
+            .err()
+            .expect("start must fail")
+            .to_string();
+        assert!(err.contains("restoring bans from"), "{err}");
+        assert!(err.contains("history.db"), "{err}");
+        assert!(
+            TcpStream::connect(port).await.is_err(),
+            "the proxy never opened"
+        );
     }
 
     #[tokio::test]

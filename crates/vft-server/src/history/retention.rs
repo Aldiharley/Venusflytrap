@@ -32,40 +32,71 @@ fn sweep_batched(
     retention_days: u32,
     batch: usize,
 ) -> rusqlite::Result<((u64, u64, u64), u64)> {
-    let keep_ms = |days: u32| u64::from(days).saturating_mul(DAY_MS);
-    let requests_cutoff = now_ms.saturating_sub(keep_ms(retention_days));
-    let rollup_cutoff = now_ms.saturating_sub(keep_ms(ROLLUP_DAYS));
-    let limit = i64::try_from(batch.max(1)).unwrap_or(i64::MAX);
+    let mut sweeper = Sweeper::new(now_ms, retention_days, batch);
     let mut txs = 0;
-    let mut run = |sql: &str, cutoff: u64| -> rusqlite::Result<u64> {
-        let cutoff = i64::try_from(cutoff).unwrap_or(i64::MAX);
-        let mut total = 0u64;
-        loop {
-            let tx = conn.unchecked_transaction()?;
-            let n = tx.execute(sql, params![cutoff, limit])? as u64;
-            tx.commit()?;
-            if n > 0 {
-                txs += 1;
-            }
-            total += n;
-            if n < limit as u64 {
-                return Ok(total);
-            }
+    loop {
+        let (deleted, done) = sweeper.step(conn)?;
+        if deleted > 0 {
+            txs += 1;
         }
-    };
-    let requests = run(
-        "DELETE FROM requests WHERE rowid IN (SELECT rowid FROM requests WHERE ts_ms < ?1 LIMIT ?2)",
-        requests_cutoff,
-    )?;
-    let events = run(
-        "DELETE FROM chain_events WHERE rowid IN (SELECT rowid FROM chain_events WHERE ts_ms < ?1 LIMIT ?2)",
-        requests_cutoff,
-    )?;
-    let rollups = run(
-        "DELETE FROM rollup_minute WHERE rowid IN (SELECT rowid FROM rollup_minute WHERE minute_ms < ?1 LIMIT ?2)",
-        rollup_cutoff,
-    )?;
-    Ok(((requests, events, rollups), txs))
+        if let Some(rows) = done {
+            return Ok((rows, txs));
+        }
+    }
+}
+
+const SWEEP_SQL: [&str; 3] = [
+    "DELETE FROM requests WHERE rowid IN (SELECT rowid FROM requests WHERE ts_ms < ?1 LIMIT ?2)",
+    "DELETE FROM chain_events WHERE rowid IN (SELECT rowid FROM chain_events WHERE ts_ms < ?1 LIMIT ?2)",
+    "DELETE FROM rollup_minute WHERE rowid IN (SELECT rowid FROM rollup_minute WHERE minute_ms < ?1 LIMIT ?2)",
+];
+
+/// Rows deleted per table: `(requests, chain_events, rollup_minute)`.
+pub(super) type Swept = (u64, u64, u64);
+
+/// A sweep in progress, advanced one transaction at a time, so the writer can
+/// serve its queue (and `close`) between batches.
+pub(super) struct Sweeper {
+    /// Cutoffs per table, in `SWEEP_SQL` order.
+    cutoffs: [i64; 3],
+    limit: i64,
+    /// The table being swept.
+    table: usize,
+    deleted: [u64; 3],
+}
+
+impl Sweeper {
+    pub(super) fn new(now_ms: u64, retention_days: u32, batch: usize) -> Sweeper {
+        let keep_ms = |days: u32| u64::from(days).saturating_mul(DAY_MS);
+        let cutoff =
+            |days: u32| i64::try_from(now_ms.saturating_sub(keep_ms(days))).unwrap_or(i64::MAX);
+        let requests = cutoff(retention_days);
+        Sweeper {
+            cutoffs: [requests, requests, cutoff(ROLLUP_DAYS)],
+            limit: i64::try_from(batch.max(1)).unwrap_or(i64::MAX),
+            table: 0,
+            deleted: [0; 3],
+        }
+    }
+
+    /// One transaction of at most `batch` rows. Returns the rows it deleted
+    /// and, once every table is swept, the totals `(requests, chain_events,
+    /// rollup_minute)`.
+    pub(super) fn step(&mut self, conn: &Connection) -> rusqlite::Result<(u64, Option<Swept>)> {
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
+            SWEEP_SQL[self.table],
+            params![self.cutoffs[self.table], self.limit],
+        )? as u64;
+        tx.commit()?;
+        self.deleted[self.table] += n;
+        if n < self.limit as u64 {
+            self.table += 1;
+        }
+        let done = (self.table == SWEEP_SQL.len())
+            .then(|| (self.deleted[0], self.deleted[1], self.deleted[2]));
+        Ok((n, done))
+    }
 }
 
 /// Active bans: until_ms > now and lifted_ms IS NULL, newest row per key.
