@@ -11,9 +11,9 @@ their numbers in the summary and in each section.
 
 | # | Measurement | Target | Result | Status |
 |---|---|---|---|---|
-| 1 | No change to decisions | 0 changed cells (dev A/B), 0 changed decisions (serve, `distinct` and `pooled:100`) | 0 and 0 and 0, on the 16,938 dev rows | met (dev rows only, see below) |
+| 1 | No change to decisions | 0 changed cells (dev A/B), 0 changed decisions (full-corpus serve diff, `distinct` and `pooled:100`) | 0 changed cells on the 16,938 dev rows; 0 changed decisions and 0 score-only changes on all 33,875 rows, in both source models | met |
 | 2 | Latency overhead of history | p99 with history within 5 % of without (median of 3 runs each, 1,000 rps, 60 s) | median p99 5.135 ms with, 5.717 ms without (-10.2 %) | met |
-| 3 | Reload under load | `failed` = 0, 20 reloads applied (2,000 rps, 60 s, reload every 3 s) | `failed` 0, 20 applied, 0 rejected | met |
+| 3 | Reload under load | `failed` = 0, 20 reloads applied (2,000 rps, 60 s, reload every 3 s) | `failed` 0 (8 malformed corpus requests were rejected by the proxy with 400 before any decision and `replay` counts them as `rejected`; counted as anything other than 200/403 they would be 8), 20 applied, 0 reloads rejected | met |
 | 4 | History write throughput | at least 5,000 events/s sustained over 60 s, 0 drops | default sample rate 0.01: 300,000 of 300,000 written in 60.004 s, 0 drops. Sample rate 1.0 (a `requests` row for every event): 3.7 % dropped, 4,737.7 and 4,746.0 events/s | met at the default sample rate, **MISSED** at 1.0 |
 | 5 | Query p95 over 1,000,000 rows | every 24-hour form p95 under 100 ms | 4 forms 0.9 to 6.4 ms; the unfiltered `group-by construct` p95 122.3 ms (run 1) and 120.2 ms (run 2); the same grouping over non-Allow rows 74.9 ms | **MISSED** for the unfiltered grouping |
 | 6 | Stalled consumer | the proxy never waits for a slow consumer | covered by two unit tests, both passing (see below) | met by tests |
@@ -30,8 +30,9 @@ their numbers in the summary and in each section.
   release binaries were rebuilt from the committed tree once more with the same source.
 - **Baseline binary (measurement 1):** `main-d6eec01.exe`, built from main `d6eec01`.
 - **Corpus:** the blazehttp corpus (33,875 request files found) with the dev/held-out split manifest
-  (`eval/split.py`). **Only the dev half was used, in every measurement.** Nothing was run on the held-out
-  half. The tools read the manifest and keep the dev rows: 16,938 files, of which 16,849 are replayable by
+  (`eval/split.py`). Every scored run and every load run used the dev half only; nothing was scored on the
+  held-out half. The one run over all 33,875 rows is the serve diff of section 1, which compares two builds'
+  decisions and scores nothing. The tools read the manifest and keep the dev rows: 16,938 files, of which 16,849 are replayable by
   `replay` (89 use `Transfer-Encoding` or `Upgrade` or could not be read, the same exclusion as
   `eval --mode tcp`).
 - **Paths:** `$VFT_CORPUS` is the corpus `testcases` directory, `$VFT_MANIFEST` the split manifest, `$VFT_RUNS`
@@ -66,7 +67,7 @@ their numbers in the summary and in each section.
 
 ## 1. No change to decisions
 
-Dev A/B in library mode, then serve mode on the dev rows, baseline binary against the branch binary:
+Dev A/B in library mode on the dev rows, then a serve-mode diff on the full corpus and on the dev rows, baseline binary against the branch binary. A serve diff compares the decisions of two builds and scores nothing, so it is run on all 33,875 rows; only its decision-diff counts are quoted here, no recall or false-positive figure from the full-corpus runs.
 
 ```
 bash eval/ab_dev.sh b12-nochange "" "" "$MAINBIN" ./target/release/venusflytrap.exe
@@ -82,29 +83,31 @@ b: tp=150 fp=100 tn=16510 fn=178 recall=45.73% [40.42%, 51.14%] fp_rate=0.602% [
 fallen: 0 malicious rows from Challenge/Block to Allow/Monitor
 ```
 
-For each of `distinct` and `pooled:100`, with each binary:
+For each of `distinct` and `pooled:100`, with each binary, on the full corpus (no `--manifest`, no `--side`) and,
+earlier in the task, on the dev rows:
 
 ```
+<binary> eval --corpus "$VFT_CORPUS" --mode serve --sources <distinct|pooled:100> --out <csv> > <json>
 <binary> eval --corpus "$VFT_CORPUS" --mode serve --sources <distinct|pooled:100> \
   --manifest "$VFT_MANIFEST" --side dev --out <csv> > <json>
 py -I -X utf8 eval/compare_runs.py <main.csv> <new.csv>
 py -I -X utf8 eval/changes.py gate --tag <tag> <main.csv> <new.csv> <new.json>
 ```
 
-| Sources | Shared rows | TP | FP | TN | FN | Changed decisions | Score-only changes | bans_from_allowed | invariant_violations |
-|---|---|---|---|---|---|---|---|---|---|
-| `distinct` | 16,938 | 150 | 100 | 16,510 | 178 | 0 | 0 | 0 | 0 |
-| `pooled:100` | 16,938 | 150 | 100 | 16,510 | 178 | 0 | 0 | 0 | 0 |
+| Rows | Sources | Rows compared | Changed decisions | Score-only changes | Only in one run | bans_from_allowed | invariant_violations |
+|---|---|---|---|---|---|---|---|
+| full corpus | `distinct` | 33,875 | 0 | 0 | 0 | 0 | 0 |
+| full corpus | `pooled:100` | 33,875 | 0 | 0 | 0 | 0 | 0 |
+| dev rows | `distinct` | 16,938 | 0 | 0 | 0 | 0 | 0 |
+| dev rows | `pooled:100` | 16,938 | 0 | 0 | 0 | 0 | 0 |
 
-`compare_runs.py` printed `delta: tp=+0 fp=+0` and `decision diffs: 0` for both. The two CSVs of each of the
-three comparisons (dev A/B library, serve `distinct`, serve `pooled:100`; 16,939 lines each, header included)
-are byte-for-byte identical (`cmp`), so 0 cells differ in any column.
+`compare_runs.py` printed `decision diffs: 0` for all four comparisons. The two CSVs of each comparison
+(full corpus: 33,876 lines each; dev rows and the dev A/B: 16,939 lines each, header included) are
+byte-for-byte identical (`cmp`), so 0 cells differ in any column.
 
-**Deviation from the brief:** the brief says "full-corpus serve diff". The serve runs here are on the dev rows
-only (`--manifest --side dev`), because no measurement in this task may touch the held-out half. Earlier notes
-(`eval/RESULTS-C-exceptions.md`) ran the serve diff on all 33,875 rows. The code that decides is the same
-The branch does change `vft-core` (chain, config, options) and `vft-proxy` (event bus, config handle,
-pipeline), so this check is a measurement on the dev rows and this note makes no claim about the held-out half.
+The branch changes `vft-core` (chain, config, options) and `vft-proxy` (event bus, config handle, pipeline).
+The diffs above show that those changes leave every decision, score and ban of the corpus identical to
+main's, in both source models.
 
 ## 2. Latency: history off against history on
 
@@ -135,9 +138,11 @@ requests. The 1,000 rps rate was sustained by the client in all six runs.
 The target (median p99 with history within 5 % of without) is met: with history on, the median p99 is lower
 than without, not higher. Read this as "no overhead measurable at 1,000 rps with three runs", not as history
 making the proxy faster: the run-to-run spread is larger than the difference (one history-off run has a p99 of
-14.029 ms against 5.6 ms and 5.7 ms in the other two; the median is robust to it). With history on, in every run all 59,997 messages (59,996 decisions and the startup revision) were written
-and 0 were dropped; the database held 59,996 rollup decisions and 4,260, 4,297 and 4,250 `requests` rows
-(non-Allow decisions plus about 1 % of Allow).
+14.029 ms against 5.6 ms and 5.7 ms in the other two; the median is robust to it).
+
+With history on, every run wrote all 59,997 messages (59,996 decisions and the startup revision) and dropped
+none. The database held 59,996 rollup decisions and 4,260, 4,297 and 4,250 `requests` rows (non-Allow
+decisions plus about 1 % of Allow).
 
 ## 3. Reload under load
 

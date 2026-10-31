@@ -140,7 +140,10 @@ assert_eq!(shield.inspect(&req).verdict, Verdict::Block);
 `venusflytrap serve` runs the proxy, an admin listener and a history store in one process:
 
 ```bash
-venusflytrap --config venusflytrap.yaml serve   --bind 0.0.0.0:8080 --upstream http://127.0.0.1:3000   --audit audit.jsonl --exceptions exceptions.yaml   --admin-bind 127.0.0.1:8899 --state-dir ./state
+venusflytrap --config venusflytrap.yaml serve \
+  --bind 0.0.0.0:8080 --upstream http://127.0.0.1:3000 \
+  --audit audit.jsonl --exceptions exceptions.yaml \
+  --admin-bind 127.0.0.1:8899 --state-dir ./state
 ```
 
 | Flag | Meaning |
@@ -179,10 +182,14 @@ service runs. Terms are ANDed; `-` negates one. It prints a page as JSON and exi
 
 ```bash
 # Blocked SQL injection in a 24-hour window, newest page of 100 rows
-venusflytrap history query --state-dir ./state   --q "verdict:block construct:sqli.*"   --from 2026-10-30T00:00:00Z --to 2026-10-31T00:00:00Z
+venusflytrap history query --state-dir ./state \
+  --q "verdict:block construct:sqli.*" \
+  --from 2026-10-30T00:00:00Z --to 2026-10-31T00:00:00Z
 
 # Which constructs fired on non-Allow requests from one /24, counted
-venusflytrap history query --state-dir ./state   --q "-verdict:allow src:203.0.113.0/24" --group-by construct   --from 2026-10-24T00:00:00Z --to 2026-10-31T00:00:00Z
+venusflytrap history query --state-dir ./state \
+  --q "-verdict:allow src:203.0.113.0/24" --group-by construct \
+  --from 2026-10-24T00:00:00Z --to 2026-10-31T00:00:00Z
 ```
 
 Terms: `verdict:`, `stage:`, `construct:` (a trailing `.*` is a prefix), `technique:`, `src:` (an address or an
